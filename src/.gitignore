@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# All runtime state, daily logs, compiled knowledge, reports, and logs
+# now live in ~/.agent-mem/ (or $AGENT_MEM_HOME). Nothing the hooks or
+# scripts write should land inside this checkout. If you ever see one of
+# these reappear under src/, that's a bug — file an issue.
+
+# Claude Code local settings (left here for users who hand-merge hook
+# config into a project's .claude/settings.json)
+.claude/settings.local.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Obsidian (some users open the store as a vault — keep their preferences
+# from ever leaking into the code tree even if they symlink things)
+.obsidian/

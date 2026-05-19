@@ -1,0 +1,30 @@
+[project]
+name = "agent-mem-search"
+version = "0.1.0"
+description = "Three-mode search (hierarchy / index-led LLM / BM25) over the agent-mem knowledge store."
+requires-python = ">=3.10"
+dependencies = [
+    "rank-bm25>=0.2.2",
+    "claude-agent-sdk>=0.1.29",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+agent-mem = "cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# Flat module layout: cli.py, bm25.py, frontmatter.py live at package root.
+only-include = ["cli.py", "bm25.py", "frontmatter.py"]
+sources = ["."]
+
+[tool.ruff]
+line-length = 100
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
