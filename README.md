@@ -100,44 +100,28 @@ To ask before asking the user: `/ultan-advisor should I use respx or hand-roll a
 
 ## How it works (the short version)
 
-```
-hooks (UserPromptSubmit, PostToolUse, Stop, SessionEnd, …)
-    ↓  append JSONL line per event
-~/.agent-mem/events.jsonl
-    ↓  tailed
-agent-mem-daemon
-    │  ┌──────────────────────────────────────────────┐
-    │  │  TailerThread  →  RollingBuffer per session  │
-    │  │                          ↓                   │
-    │  │             DebounceScheduler                │
-    │  │            (per-session quiet timer)         │
-    │  │                          ↓                   │
-    │  │  LibrarianPool  (N parallel Sonnet workers)  │
-    │  │   - read library snapshot                    │
-    │  │   - BM25 search (in-process MCP tool)        │
-    │  │   - Read/Glob for verification               │
-    │  │   - classify salience (contradicts/novel/    │
-    │  │     reinforces) + propose actions            │
-    │  │                          ↓                   │
-    │  │  daemon: bump `reinforced` counters          │
-    │  │   (deterministic, no SDK cost — empirical    │
-    │  │   "user mentioned this again" signal)        │
-    │  │                          ↓                   │
-    │  │  ScholarWorker  (single Opus worker)         │
-    │  │   - apply higher-bar salience filter:        │
-    │  │     "would I produce this advice unprompted?"│
-    │  │   - approve+execute via Write/Edit           │
-    │  │   - or veto+drop with reasoning              │
-    │  │                          ↓                   │
-    │  │  Reconciler (deterministic, post-batch)      │
-    │  │   - ensure README at every folder            │
-    │  │   - sync auto-managed child listings         │
-    │  │   - check wikilinks resolve                  │
-    │  │   - check frontmatter validates              │
-    │  │   - check scope/path agreement               │
-    │  └──────────────────────────────────────────────┘
-    ↓
-~/.agent-mem/knowledge/  ← your library
+```mermaid
+flowchart TD
+    Hooks["<b>hooks</b><br/>UserPromptSubmit · PostToolUse · Stop · SessionEnd"]
+    Events[("~/.agent-mem/events.jsonl<br/><i>append-only</i>")]
+    Library[("~/.agent-mem/knowledge/<br/><b>your library</b>")]
+
+    Hooks -->|append JSONL per event| Events
+
+    subgraph Daemon["agent-mem-daemon"]
+        direction TB
+        Tailer["TailerThread<br/>RollingBuffer per session"]
+        Debounce["DebounceScheduler<br/><i>per-session quiet timer</i>"]
+        Librarian["<b>LibrarianPool</b> — N × Sonnet <i>(System 1)</i><br/>classify salience: contradicts · novel · reinforces<br/>propose actions"]
+        Reinforce["bump <code>reinforced</code> counters<br/><i>deterministic, no SDK cost</i>"]
+        Scholar["<b>ScholarWorker</b> — Opus <i>(System 2)</i><br/>'would I produce this unprompted?'<br/>approve + execute · or veto + drop"]
+        Reconciler["<b>Reconciler</b> <i>(deterministic, post-batch)</i><br/>READMEs · child listings · wikilinks · frontmatter · scope"]
+
+        Tailer --> Debounce --> Librarian --> Reinforce --> Scholar --> Reconciler
+    end
+
+    Events -->|tailed| Tailer
+    Reconciler --> Library
 ```
 
 Design discipline that survived live testing:
