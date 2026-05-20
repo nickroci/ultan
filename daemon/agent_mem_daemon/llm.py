@@ -308,7 +308,7 @@ def run_scholar_call(
         system_prompt={"type": "preset", "preset": "claude_code"},
         allowed_tools=["Read", "Write", "Edit", "Glob", "Grep"],
         permission_mode="acceptEdits",
-        max_turns=30,
+        max_turns=100,
         env=_recursion_guard_env(),
         # Infra-level path guard: every Read/Write/Edit/Glob/Grep is
         # rejected if its path resolves outside the knowledge dir.

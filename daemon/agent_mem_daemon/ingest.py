@@ -46,7 +46,7 @@ DEFAULT_POLL_INTERVAL = 0.25
 # Recognised event types. The ingester accepts anything but logs at
 # DEBUG when it sees a type it doesn't recognise — this is forward-
 # compatibility for the hook author adding UserPromptSubmit etc.
-KNOWN_TYPES = {"PostToolUse", "Stop", "SessionEnd", "UserPromptSubmit", "SessionStart"}
+KNOWN_TYPES = {"PostToolUse", "PreToolUse", "Stop", "SessionEnd", "UserPromptSubmit", "SessionStart"}
 
 
 @dataclass
