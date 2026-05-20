@@ -194,10 +194,115 @@ def _handle_priming(req: dict) -> dict:
     return {"ok": True, "priming_md": body or "", "took_ms": took_ms, "lane": lane}
 
 
+def _handle_bm25_search(req: dict) -> dict:
+    """BM25 keyword search over the knowledge library.
+
+    Mirrors what the in-process Librarian MCP tool offers
+    (``library_tools.bm25_search``), but exposed over the daemon
+    socket so end-user skills can reach it without spawning an SDK
+    call. Returns a list of ``{path, score, snippet}`` hits.
+    """
+    query = req.get("query")
+    if not isinstance(query, str) or not query.strip():
+        return {"ok": False, "error": "query must be a non-empty string"}
+    try:
+        k = int(req.get("k", 5))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "k must be an int"}
+    k = max(1, min(20, k))
+
+    kdir = knowledge_dir()
+    if not kdir.exists():
+        return {"ok": True, "hits": []}
+
+    try:
+        from bm25 import load_or_build
+    except ImportError:
+        return {"ok": False, "error": "bm25 backend unavailable"}
+
+    try:
+        index = load_or_build(kdir)
+    except FileNotFoundError:
+        return {"ok": True, "hits": []}
+    except Exception as e:
+        log.exception("bm25 index load failed")
+        return {"ok": False, "error": f"bm25 index error: {e}"}
+
+    raw = index.search(query.strip(), k=k)
+    kroot = kdir.resolve()
+    hits = []
+    for p, score, snippet in raw:
+        pp = Path(p)
+        rel = str(pp.relative_to(kroot)) if pp.is_absolute() else str(pp)
+        hits.append({"path": rel, "score": float(score), "snippet": snippet})
+    return {"ok": True, "hits": hits}
+
+
+def _handle_fetch_entry(req: dict) -> dict:
+    """Fetch an entry + its directory context (siblings, subdirs, parent README).
+
+    Accepts a wikilink (``[[...]]``) or plain relative path (with or
+    without ``.md``). The path is resolved under the knowledge dir;
+    anything escaping it is rejected. Returns the file content plus
+    enough structural context for the caller to traverse without a
+    second tool call per neighbour.
+    """
+    path_arg = req.get("path")
+    if not isinstance(path_arg, str) or not path_arg.strip():
+        return {"ok": False, "error": "path must be a non-empty string"}
+
+    raw = path_arg.strip()
+    if raw.startswith("[[") and raw.endswith("]]"):
+        raw = raw[2:-2].strip()
+    raw = raw.strip("/")
+    target_rel = raw if raw.endswith(".md") else raw + ".md"
+
+    kdir = knowledge_dir()
+    if not kdir.exists():
+        return {"ok": False, "error": "knowledge dir not found"}
+    kroot = kdir.resolve()
+    target = (kroot / target_rel).resolve()
+    try:
+        target.relative_to(kroot)
+    except ValueError:
+        return {"ok": False, "error": "path escapes knowledge dir"}
+    if not target.is_file():
+        return {"ok": False, "error": f"entry not found: {target_rel}"}
+
+    content = target.read_text(encoding="utf-8")
+    parent = target.parent
+    siblings = sorted(
+        f.name for f in parent.iterdir()
+        if f.is_file() and f.suffix == ".md" and f.name != target.name
+    )
+    subdirs = sorted(
+        f.name + "/" for f in parent.iterdir()
+        if f.is_dir() and not f.name.startswith(".")
+    )
+    parent_readme = parent / "README.md"
+    parent_readme_excerpt = ""
+    if parent_readme.is_file() and parent_readme != target:
+        text = parent_readme.read_text(encoding="utf-8")
+        parent_readme_excerpt = "\n".join(text.splitlines()[:30])[:1500]
+
+    return {
+        "ok": True,
+        "path": str(target.relative_to(kroot)),
+        "content": content,
+        "siblings": siblings,
+        "subdirs": subdirs,
+        "parent_readme_excerpt": parent_readme_excerpt,
+    }
+
+
 def _dispatch(req: dict) -> dict:
     op = req.get("op")
     if op == "priming":
         return _handle_priming(req)
+    if op == "bm25_search":
+        return _handle_bm25_search(req)
+    if op == "fetch_entry":
+        return _handle_fetch_entry(req)
     return {"ok": False, "error": f"unknown op: {op!r}"}
 
 

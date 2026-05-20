@@ -235,7 +235,8 @@ def test_refresh_hot_context_writes_top_k_entries(tmp_path):
 
     body = out.read_text(encoding="utf-8")
     assert body.startswith("## Ultan — your library says")
-    assert "Wikilinks resolve to real files" in body
+    assert "Wikilinks resolve to real entries" in body
+    assert "ultan-search" in body
     # The python/uv entry should be the strongest match.
     assert "[[global/python/use-uv-not-pip]]" in body
     # Exactly 5 bullets (we asked for top_k=5).

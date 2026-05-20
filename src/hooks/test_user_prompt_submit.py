@@ -618,7 +618,7 @@ def test_hook_emits_priming_from_socket(short_home: Path):
     canned_md = (
         "## Ultan — your library says (cite or follow when applicable)\n\n"
         "- [[global/python/use-uv-not-pip]] (×3) — installing python deps\n\n"
-        "*Wikilinks resolve to real files in `~/.agent-mem/knowledge/<wikilink>.md` — Read one for the full entry, or call `/ultan-advisor <question>` for synthesis.*\n"
+        "*Wikilinks resolve to real entries. Use the `ultan-search` skill to read one (returns content + sibling entries + subfolders + parent README so you can traverse), or `/ultan-advisor <question>` to have Sonnet + Opus intelligently synthesise across multiple entries.*\n"
     )
 
     # The hook's _priming_client resolves the socket via AGENT_MEM_HOME.
@@ -659,7 +659,7 @@ def test_hook_combines_priming_and_nudges(short_home: Path):
     canned_md = (
         "## Ultan — your library says (cite or follow when applicable)\n\n"
         "- [[global/python/use-uv-not-pip]] — installing python deps\n\n"
-        "*Wikilinks resolve to real files in `~/.agent-mem/knowledge/<wikilink>.md` — Read one for the full entry, or call `/ultan-advisor <question>` for synthesis.*\n"
+        "*Wikilinks resolve to real entries. Use the `ultan-search` skill to read one (returns content + sibling entries + subfolders + parent README so you can traverse), or `/ultan-advisor <question>` to have Sonnet + Opus intelligently synthesise across multiple entries.*\n"
     )
     server = _FakeRpcServer(
         home_sock,

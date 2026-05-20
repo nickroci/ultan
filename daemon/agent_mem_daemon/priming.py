@@ -57,8 +57,9 @@ _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
 _HEADER = "## Ultan — your library says (cite or follow when applicable)"
 _FOOTER = (
-    "*Wikilinks resolve to real files in `~/.agent-mem/knowledge/<wikilink>.md` — "
-    "Read one for the full entry, or call `/ultan-advisor <question>` for synthesis.*"
+    "*Wikilinks resolve to real entries. Use the `ultan-search` skill to read one "
+    "(returns content + sibling entries + subfolders + parent README so you can traverse), "
+    "or `/ultan-advisor <question>` to have Sonnet + Opus intelligently synthesise across multiple entries.*"
 )
 
 
