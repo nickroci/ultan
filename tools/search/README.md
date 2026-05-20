@@ -116,14 +116,77 @@ These choices are pinned here so the PLAN can adopt or override them:
 
 If the PLAN wants stemming or stopwords later, they go here in `tokenize()`.
 
+## Semantic search (`embeddings.py`)
+
+BM25 finds keyword overlap. It misses paraphrased matches — *"I'm about to deploy"*
+doesn't surface *"never push to prod without approval"* because they share no
+tokens beyond maybe "deploy". `embeddings.py` is a parallel index, mirroring
+`bm25.BM25Index`'s shape, that does dense retrieval over the same corpus.
+
+It is **infrastructure only** for now — not wired into the CLI's `search`
+subcommands. Integration (BM25 + embeddings fusion / RRF / etc.) is a separate
+step. Until then the CLI remains pure BM25.
+
+### Install
+
+`uv sync` from `tools/search/` picks up `sentence-transformers` and `numpy`
+automatically. First use of the module downloads
+`sentence-transformers/all-MiniLM-L6-v2` (~80 MB) from HuggingFace into
+`~/.cache/huggingface/`; subsequent runs load from disk in ~1 second.
+
+### Basic usage
+
+```python
+from pathlib import Path
+from embeddings import load_or_build
+
+index = load_or_build(Path("~/.agent-mem/knowledge").expanduser())
+for hit in index.search("managing python dependencies", k=5):
+    print(f"{hit.score:.3f}  {hit.path.name}")
+    print(f"        {hit.snippet}")
+```
+
+The first call builds the index and persists it to
+`<knowledge_dir>/../.embeddings.idx`; later calls reload from disk if every
+tracked file is unchanged. Force a rebuild with `load_or_build(..., force_rebuild=True)`.
+
+### How it differs from BM25
+
+| | BM25 | embeddings |
+|---|------|-----------|
+| Match basis | exact token overlap | semantic similarity (cosine over 384-dim vectors) |
+| Strength | precise — exact phrase / identifier hits | recall — finds paraphrases, related concepts |
+| Weakness | misses paraphrased queries | weaker on novel proper nouns, identifiers |
+| Cost (warm) | sub-ms | ~4 ms per query, single thread, CPU |
+| Persistence | `.bm25.idx` | `.embeddings.idx` (pickled numpy array) |
+| Cold start | none | ~5 s to load the model the first time per process |
+
+Same file-selection rules: `_archive/` and the top-level `index.md` / `log.md`
+catalogs are excluded. Frontmatter is stripped except `keywords:` and
+`applies-when:`, which are prepended to the embedded text (matches
+`bm25.tokenize`).
+
+### Notes
+
+- **Pure CPU.** The module does not probe for GPUs; `all-MiniLM-L6-v2` is fast
+  enough on CPU for personal-corpus scale.
+- **Pickle is not portable across Python versions.** Delete `.embeddings.idx`
+  after an interpreter upgrade. `load_or_build` swallows unpickle errors and
+  rebuilds, so this is self-healing.
+- **Model cache is module-level**, keyed on model name. Multiple
+  `EmbeddingIndex` instances in the same process share one loaded model.
+
 ## Files
 
 ```
 tools/search/
-  pyproject.toml          # uv-managed, depends on rank-bm25, claude-agent-sdk, pyyaml
-  bm25.py                 # indexer + searcher (build_index, load_or_build, BM25Index.search)
+  pyproject.toml          # uv-managed; depends on rank-bm25, claude-agent-sdk, pyyaml,
+                          #   sentence-transformers, numpy
+  bm25.py                 # BM25 indexer + searcher
+  embeddings.py           # sentence-transformer indexer + searcher (parallel module)
   cli.py                  # `agent-mem search` entry point, three modes + merged default
-  test_bm25.py            # sanity tests against fixtures
+  test_bm25.py            # BM25 sanity tests
+  test_embeddings.py      # embeddings sanity tests (first run downloads the model)
   fixtures/knowledge/     # 5 dummy entries + index.md, schema-conformant per PLAN section 2
   README.md
 ```

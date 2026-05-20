@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install agent-mem hooks into a project's `.claude/settings.json`.
+"""Install agent-mem hooks into Claude Code's settings.
 
 Invoked by the `/ultan-install` slash command (or directly from a shell).
 Stdlib-only — no install/sync step.
@@ -7,14 +7,17 @@ Stdlib-only — no install/sync step.
 What it does:
   1. Resolves the template at <repo>/src/_dot_claude_disabled/settings.json.
   2. Substitutes AGENT_MEM_SRC -> the absolute src path.
-  3. Reads the project's existing .claude/settings.json (or {}).
+  3. Reads the existing settings.json (or {}).
   4. Merges the `hooks` block in (overwriting agent-mem hooks if present,
      preserving any other settings).
   5. Writes back atomically.
   6. Prints what changed and a note about starting the daemon.
 
-Default target: <cwd>/.claude/settings.json. Override with --target <path>
-or --global to write into ~/.claude/settings.json.
+Default target: ``~/.claude/settings.json`` (global — every Claude Code
+project gets the hooks, and there's one daemon per machine serving the
+whole library). Use ``--project`` to scope the install to just the
+current repo (writes into ``<cwd>/.claude/settings.json``). Use
+``--target <path>`` to point at any other settings.json.
 """
 from __future__ import annotations
 
@@ -96,13 +99,24 @@ def write_atomic(path: Path, payload: dict) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Install agent-mem hooks into a project's .claude/settings.json."
+        description=(
+            "Install agent-mem hooks. Default: ~/.claude/settings.json "
+            "(global — every Claude Code project). Use --project to scope "
+            "to the current repo only."
+        )
     )
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--target", type=Path,
-                   help="Path to settings.json (defaults to <cwd>/.claude/settings.json).")
+                   help="Path to settings.json (overrides default and --project).")
+    g.add_argument("--project", dest="project_local", action="store_true",
+                   help=("Install at <cwd>/.claude/settings.json instead of "
+                         "the global ~/.claude/settings.json. Use when you "
+                         "want agent-mem in just one repo."))
+    # ``--global`` is now the default but kept as a no-op flag for
+    # backward compatibility with any tooling or muscle memory that
+    # still passes it explicitly.
     g.add_argument("--global", dest="globally", action="store_true",
-                   help="Install at ~/.claude/settings.json (every project).")
+                   help="Deprecated (this is now the default). Kept for compatibility.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Print what would change; don't write.")
     args = ap.parse_args()
@@ -111,12 +125,17 @@ def main() -> int:
         print(f"ultan-install: template not found at {TEMPLATE}", file=sys.stderr)
         return 2
 
-    if args.globally:
-        target = Path.home() / ".claude" / "settings.json"
-    elif args.target:
+    if args.target:
         target = args.target.expanduser().resolve()
-    else:
+        scope = "custom"
+    elif args.project_local:
         target = (Path.cwd() / ".claude" / "settings.json").resolve()
+        scope = "project"
+    else:
+        # Default: global. One daemon per machine, one set of hooks
+        # serving all projects.
+        target = Path.home() / ".claude" / "settings.json"
+        scope = "global"
 
     template = load_template()
     existing: dict = {}
@@ -135,14 +154,14 @@ def main() -> int:
     merged, changed = merge_hooks(existing, template["hooks"])
 
     if args.dry_run:
-        print(f"target: {target}")
+        print(f"target: {target}  (scope: {scope})")
         print(f"events that would change: {changed or '(none)'}")
         print("--- merged settings would be ---")
         print(json.dumps(merged, indent=2))
         return 0
 
     write_atomic(target, merged)
-    print(f"installed hooks at {target}")
+    print(f"installed hooks at {target}  (scope: {scope})")
     print(f"events written: {sorted(AGENT_MEM_HOOK_EVENTS)}")
     if changed:
         print(f"events changed by this install: {changed}")

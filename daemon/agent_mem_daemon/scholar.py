@@ -22,11 +22,12 @@ import logging
 import time
 from typing import List
 
+from . import priming
 from . import runs
 from . import scholar_prompt
 from .librarian import EvidencePacket
 from .llm import LLMTimeout, SCHOLAR_TIMEOUT_S, run_scholar_call
-from .paths import ensure_home, knowledge_dir
+from .paths import ensure_home, hot_context_path, knowledge_dir
 
 
 log = logging.getLogger("agent_mem_daemon.scholar")
@@ -78,9 +79,20 @@ def review(packets: List[EvidencePacket]) -> None:
     if _all_empty(packets):
         log.debug(
             "scholar.review: all %d packets empty (no proposals, no interrupts); "
-            "skipping SDK call",
+            "skipping SDK call but still refreshing priming",
             n_packets,
         )
+        # Tier 1: still refresh hot-context from the buffer text even
+        # when the Librarian had nothing to propose. The agent's session
+        # content is signal we want to prime against regardless.
+        try:
+            priming.refresh_hot_context(
+                knowledge_dir(),
+                rolling_buffer_text=priming.extract_buffer_text(packets),
+                out_path=hot_context_path(),
+            )
+        except Exception:
+            log.exception("scholar.review: priming refresh raised (empty-packet path)")
         return
 
     session_id = _batch_session_id(packets)
@@ -188,6 +200,23 @@ def review(packets: List[EvidencePacket]) -> None:
                     log.info("scholar.review: %s", c)
         except Exception:
             log.exception("scholar.review: README reconciliation raised")
+
+        # ── Tier 1: ambient priming refresh ────────────────────────
+        # After the library state has settled (proposals executed,
+        # READMEs reconciled), re-pick the top-K most relevant entries
+        # for what THIS batch was about and write them to the hot-
+        # context file. The UserPromptSubmit hook reads that file on
+        # the next turn and injects it as additionalContext — gives
+        # the agent passive "familiarity" with the most-likely-
+        # relevant library entries without any extra LLM cost.
+        try:
+            priming.refresh_hot_context(
+                knowledge_dir(),
+                rolling_buffer_text=priming.extract_buffer_text(packets),
+                out_path=hot_context_path(),
+            )
+        except Exception:
+            log.exception("scholar.review: priming refresh raised")
 
         # ── Deterministic post-write invariants check ──────────────
         # Safety net: log a WARNING for any violation that survived

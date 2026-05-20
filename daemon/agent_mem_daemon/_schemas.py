@@ -23,9 +23,10 @@ Discipline:
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing_extensions import Annotated
 
 
@@ -35,13 +36,23 @@ from typing_extensions import Annotated
 
 
 class EvidenceItem(BaseModel):
-    """One quoted-evidence line: (turn_id, role, quote)."""
+    """One quoted-evidence line — a single turn the Librarian wants
+    the Scholar to look at when judging an interrupt."""
 
     model_config = ConfigDict(extra="ignore")
 
-    turn_id: Optional[int] = None
-    role: Optional[str] = None
-    quote: Optional[str] = None
+    turn_id: Optional[int] = Field(
+        default=None,
+        description="1-based turn id from the rolling buffer.",
+    )
+    role: Optional[str] = Field(
+        default=None,
+        description='"user" or "assistant".',
+    )
+    quote: Optional[str] = Field(
+        default=None,
+        description="Verbatim text snippet from the turn.",
+    )
 
 
 class BM25Hit(BaseModel):
@@ -49,9 +60,9 @@ class BM25Hit(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    entry_id: Optional[str] = None
-    score: Optional[float] = None
-    path: Optional[str] = None
+    entry_id: Optional[str] = Field(default=None, description="Frontmatter `id` of the hit.")
+    score: Optional[float] = Field(default=None, description="BM25 score.")
+    path: Optional[str] = Field(default=None, description="Path relative to knowledge/.")
 
 
 # ── ProposedAction discriminated union ───────────────────────────────
@@ -62,30 +73,38 @@ class _BaseAction(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    reasoning: str = ""
-    """One short paragraph explaining why this action is proposed.
-    The Scholar reads this to decide approve/veto."""
+    reasoning: str = Field(
+        default="",
+        description=(
+            "One short paragraph explaining why this action is "
+            "proposed. The Scholar reads this to decide approve/veto."
+        ),
+    )
 
-    salience_signal: Optional[Literal["contradicts", "novel", "reinforces"]] = None
-    """Why this is worth remembering, in cognitive-science terms:
+    salience_signal: Optional[Literal["contradicts", "novel", "reinforces"]] = Field(
+        default=None,
+        description=(
+            "Why this is worth remembering, in cognitive-science "
+            "terms. 'contradicts': disagrees with an existing entry "
+            "(cite path in existing_entry); user has changed their "
+            "mind. 'novel': not in library AND not derivable from "
+            "the model's baseline knowledge. 'reinforces': restates "
+            "an existing entry's claim (cite path in existing_entry); "
+            "the daemon will bump that entry's reinforced counter "
+            "and the Scholar may veto the write. Null if unsure — "
+            "the Scholar will infer."
+        ),
+    )
 
-      - ``contradicts``: the candidate disagrees with an existing library
-        entry (cite which in ``existing_entry``). User has changed their
-        mind, or the existing entry was wrong. Highest priority.
-      - ``novel``: not in the library AND not derivable from the model's
-        baseline knowledge (i.e. the model would NOT have produced this
-        advice unprompted). Capture.
-      - ``reinforces``: the candidate restates an existing entry's claim
-        (cite which in ``existing_entry``). Don't write a new entry —
-        the daemon increments the existing's ``reinforced`` counter and
-        the Scholar can typically veto the write.
-
-    Set to ``None`` if you're unsure — the Scholar will infer."""
-
-    existing_entry: Optional[str] = None
-    """For ``contradicts`` / ``reinforces``: the path of the existing
-    library entry the candidate relates to. Required for those signals
-    so the Scholar can verify the relationship."""
+    existing_entry: Optional[str] = Field(
+        default=None,
+        description=(
+            "For 'contradicts'/'reinforces' signals: path of the "
+            "existing library entry the candidate relates to, "
+            "relative to knowledge/. Required for those signals so "
+            "the Scholar can verify the relationship."
+        ),
+    )
 
 
 class WriteEntry(_BaseAction):
@@ -97,8 +116,8 @@ class WriteEntry(_BaseAction):
     approving."""
 
     action: Literal["write_entry"] = "write_entry"
-    path: str = ""
-    body: str = ""
+    path: str = Field(default="", description="Target path for the new entry, relative to knowledge/.")
+    body: str = Field(default="", description="Full markdown body including frontmatter.")
 
 
 class UpdateEntry(_BaseAction):
@@ -106,8 +125,8 @@ class UpdateEntry(_BaseAction):
     ``new_body`` (full file body, frontmatter included)."""
 
     action: Literal["update_entry"] = "update_entry"
-    path: str = ""
-    new_body: str = ""
+    path: str = Field(default="", description="Existing entry path, relative to knowledge/.")
+    new_body: str = Field(default="", description="Full replacement markdown body (frontmatter + body).")
 
 
 class MergeEntries(_BaseAction):
@@ -120,9 +139,12 @@ class MergeEntries(_BaseAction):
     """
 
     action: Literal["merge_entries"] = "merge_entries"
-    source_paths: List[str] = Field(default_factory=list)
-    target_path: str = ""
-    target_body: str = ""
+    source_paths: List[str] = Field(
+        default_factory=list,
+        description="List of existing entry paths (relative to knowledge/) to merge and archive.",
+    )
+    target_path: str = Field(default="", description="Where the merged entry should live.")
+    target_body: str = Field(default="", description="Full markdown body of the merged result.")
 
 
 class MoveEntry(_BaseAction):
@@ -134,8 +156,8 @@ class MoveEntry(_BaseAction):
     future deterministic pass."""
 
     action: Literal["move_entry"] = "move_entry"
-    from_path: str = ""
-    to_path: str = ""
+    from_path: str = Field(default="", description="Existing path, relative to knowledge/.")
+    to_path: str = Field(default="", description="New path, relative to knowledge/.")
 
 
 class ArchiveEntry(_BaseAction):
@@ -146,7 +168,7 @@ class ArchiveEntry(_BaseAction):
     field for traceability."""
 
     action: Literal["archive_entry"] = "archive_entry"
-    path: str = ""
+    path: str = Field(default="", description="Entry path to archive, relative to knowledge/.")
 
 
 class DeprecateEntry(_BaseAction):
@@ -167,8 +189,8 @@ class DeprecateEntry(_BaseAction):
     entry is wrong, irrelevant, or has no successor."""
 
     action: Literal["deprecate_entry"] = "deprecate_entry"
-    path: str = ""
-    superseded_by: str = ""
+    path: str = Field(default="", description="Older entry to deprecate, relative to knowledge/.")
+    superseded_by: str = Field(default="", description="Newer entry path that supersedes this one, relative to knowledge/.")
 
 
 class UpdateReadme(_BaseAction):
@@ -178,8 +200,8 @@ class UpdateReadme(_BaseAction):
     or ``""`` for the root README)."""
 
     action: Literal["update_readme"] = "update_readme"
-    folder_path: str = ""
-    new_body: str = ""
+    folder_path: str = Field(default="", description='Folder path relative to knowledge/, or "" for the root README.')
+    new_body: str = Field(default="", description="Prose only — daemon auto-maintains the child listing below the marker comments.")
 
 
 class AddWikilink(_BaseAction):
@@ -190,9 +212,9 @@ class AddWikilink(_BaseAction):
     is relevant (rendered alongside the link itself)."""
 
     action: Literal["add_wikilink"] = "add_wikilink"
-    from_path: str = ""
-    to_path: str = ""
-    context: str = ""
+    from_path: str = Field(default="", description="Entry whose Related section gets the new link (relative to knowledge/).")
+    to_path: str = Field(default="", description="Target entry path (relative to knowledge/).")
+    context: str = Field(default="", description="One-sentence why the link is relevant.")
 
 
 class SplitFolder(_BaseAction):
@@ -204,8 +226,11 @@ class SplitFolder(_BaseAction):
     subfolder."""
 
     action: Literal["split_folder"] = "split_folder"
-    folder_path: str = ""
-    into: Dict[str, List[str]] = Field(default_factory=dict)
+    folder_path: str = Field(default="", description="Folder to restructure, relative to knowledge/.")
+    into: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description="Mapping of new subfolder name → list of entry paths (relative to knowledge/) to move into it.",
+    )
 
 
 # Discriminated union — Pydantic dispatches on the ``action`` literal.
@@ -239,12 +264,49 @@ class LibrarianInterrupt(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    lesson_id: Optional[str] = None
-    lesson_path: Optional[str] = None
-    matching_applies_when: Optional[str] = None
-    evidence: List[EvidenceItem] = Field(default_factory=list)
-    match_score: Optional[float] = None
-    librarian_confidence: Optional[float] = None
+    lesson_id: Optional[str] = Field(default=None, description="Frontmatter `id` from the applies-when table.")
+    lesson_path: Optional[str] = Field(default=None, description="Path of the matched lesson, relative to knowledge/.")
+    matching_applies_when: Optional[str] = Field(default=None, description="The exact applies-when phrase that matched the buffer.")
+    evidence: List[EvidenceItem] = Field(
+        default_factory=list,
+        description=(
+            "List of EvidenceItem dicts (NOT strings). Each item is "
+            "{turn_id, role, quote}. Emit at least one verbatim turn quote."
+        ),
+    )
+    match_score: Optional[float] = Field(default=None, description="0.0 to 1.0 — how strongly the buffer matched the applies-when phrase.")
+    librarian_confidence: Optional[float] = Field(default=None, description="0.0 to 1.0 — how confident the Librarian is this is worth interrupting on.")
+
+    @field_validator("evidence", mode="before")
+    @classmethod
+    def _coerce_evidence(cls, v):
+        """Tolerate LLM-shape drift on evidence.
+
+        The schema asks for ``list[EvidenceItem]`` (dicts), but Sonnet /
+        Haiku sometimes emit:
+          - a single string (the full quoted turn)
+          - a list of strings
+          - a single dict instead of a list
+        Coerce all of those to the canonical list-of-dicts shape so we
+        don't drop the entire interrupt over a formatting variation.
+        Validation errors on individual items still surface in the
+        normal way.
+        """
+        if v is None:
+            return []
+        if isinstance(v, str):
+            return [{"quote": v}]
+        if isinstance(v, dict):
+            return [v]
+        if isinstance(v, list):
+            out = []
+            for item in v:
+                if isinstance(item, str):
+                    out.append({"quote": item})
+                else:
+                    out.append(item)
+            return out
+        return v
 
 
 class LibrarianProposal(BaseModel):
@@ -257,8 +319,24 @@ class LibrarianProposal(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    proposals: List[ProposedAction] = Field(default_factory=list)
-    interrupts: List[LibrarianInterrupt] = Field(default_factory=list)
+    proposals: List[ProposedAction] = Field(
+        default_factory=list,
+        description=(
+            "Ordered list of curator actions the Librarian wants the "
+            "Scholar to execute. Each item is a typed action object "
+            "discriminated by `action` (see the action enumeration). "
+            "Order matters — the Scholar processes them sequentially "
+            "and any may be vetoed. Emit [] when no curation is needed."
+        ),
+    )
+    interrupts: List[LibrarianInterrupt] = Field(
+        default_factory=list,
+        description=(
+            "Optional list of interrupt-nudge candidates: turns in the "
+            "buffer that match an existing entry's applies-when phrases. "
+            "Independent of `proposals`. Emit [] when nothing matched."
+        ),
+    )
 
 
 # ── Scholar review ───────────────────────────────────────────────────
@@ -275,9 +353,31 @@ class ScholarDecision(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    action_index: int = -1
-    decision: Literal["approve", "veto"] = "veto"
-    veto_reason: str = ""
+    action_index: int = Field(
+        default=-1,
+        description=(
+            "0-based index of the proposal in "
+            "`LibrarianProposal.proposals` this decision applies to. "
+            "Must be a valid index; mismatched indices are dropped."
+        ),
+    )
+    decision: Literal["approve", "veto"] = Field(
+        default="veto",
+        description=(
+            "Either 'approve' (the daemon executes the action) or "
+            "'veto' (the action is dropped — no fix-ups). Default "
+            "'veto' is fail-safe: an unparseable decision drops the "
+            "proposal rather than executing it."
+        ),
+    )
+    veto_reason: str = Field(
+        default="",
+        description=(
+            "Required on veto: one short sentence explaining why the "
+            "proposal was rejected. Surfaced in run logs for debugging. "
+            "Ignored on approve."
+        ),
+    )
 
 
 class ScholarInterruptDecision(BaseModel):
@@ -289,11 +389,36 @@ class ScholarInterruptDecision(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    lesson_id: Optional[str] = None
-    lesson_path: Optional[str] = None
-    action: Optional[str] = None  # "approve" | "veto"
-    text: Optional[str] = None
-    reason: Optional[str] = None
+    lesson_id: Optional[str] = Field(
+        default=None,
+        description="Frontmatter `id` of the lesson the interrupt was about.",
+    )
+    lesson_path: Optional[str] = Field(
+        default=None,
+        description="Path of the matched lesson, relative to knowledge/.",
+    )
+    action: Optional[str] = Field(
+        default=None,
+        description=(
+            "Either 'approve' (the nudge is written to pending-nudges.md "
+            "and surfaced to the user on the next prompt) or 'veto' "
+            "(the candidate is dropped silently)."
+        ),
+    )
+    text: Optional[str] = Field(
+        default=None,
+        description=(
+            "On approve: the exact nudge text to surface to the user. "
+            "One short sentence framed as a reminder of the relevant lesson."
+        ),
+    )
+    reason: Optional[str] = Field(
+        default=None,
+        description=(
+            "On veto: one short sentence explaining why the interrupt "
+            "was not worth surfacing. Ignored on approve."
+        ),
+    )
 
 
 class ScholarReview(BaseModel):
@@ -306,8 +431,23 @@ class ScholarReview(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    decisions: List[ScholarDecision] = Field(default_factory=list)
-    interrupts_processed: List[ScholarInterruptDecision] = Field(default_factory=list)
+    decisions: List[ScholarDecision] = Field(
+        default_factory=list,
+        description=(
+            "One ScholarDecision per Librarian proposal, matched by "
+            "`action_index`. Order need not mirror the proposals — the "
+            "daemon dispatches by `action_index`. Missing indices are "
+            "treated as implicit vetoes."
+        ),
+    )
+    interrupts_processed: List[ScholarInterruptDecision] = Field(
+        default_factory=list,
+        description=(
+            "One ScholarInterruptDecision per LibrarianInterrupt the "
+            "Scholar reviewed. Approved decisions are written to "
+            "pending-nudges.md; vetoed decisions are dropped."
+        ),
+    )
 
 
 # ── Backwards-compat aliases (kept so test_response_parser and any
@@ -419,49 +559,27 @@ def describe_action_types_markdown() -> str:
     return "\n".join(lines)
 
 
-def describe_librarian_response_shape() -> str:
-    """JSON skeleton the Librarian must emit. Derived from
-    ``LibrarianProposal``/``LibrarianInterrupt`` + the action shapes
-    above. Returns a fenced ``json`` block as plain text.
+def _model_schema_block(model: type[BaseModel]) -> str:
+    """Return the model's JSON Schema as a fenced ``json`` block.
+
+    Pydantic generates this from the model's fields and their
+    ``Field(description=...)`` metadata. LLMs are trained on JSON
+    Schema and follow it well — no hand-typed skeleton needed, no
+    bespoke walker, no drift risk. Change the model, the prompt
+    description updates automatically.
     """
-    return (
-        '```json\n'
-        '{\n'
-        '  "proposals": [\n'
-        '    {"action": "<one of: '
-        + ", ".join(_action_name(c) for c in _ACTION_CLASSES)
-        + '>", "reasoning": "<one sentence>", "<action-specific fields...>": "..."},\n'
-        '    ...\n'
-        '  ],\n'
-        '  "interrupts": [\n'
-        '    {"lesson_id": "...", "lesson_path": "...", '
-        '"matching_applies_when": "...", "evidence": [...], '
-        '"match_score": 0.0, "librarian_confidence": 0.0},\n'
-        '    ...\n'
-        '  ]\n'
-        '}\n'
-        '```'
-    )
+    schema = model.model_json_schema()
+    return "```json\n" + json.dumps(schema, indent=2) + "\n```"
+
+
+def describe_librarian_response_shape() -> str:
+    """Canonical JSON Schema for ``LibrarianProposal`` derived from the
+    Pydantic model. Single source of truth: any field description on
+    the model appears here automatically."""
+    return _model_schema_block(LibrarianProposal)
 
 
 def describe_scholar_response_shape() -> str:
-    """JSON skeleton the Scholar must emit. Derived from
-    ``ScholarReview``/``ScholarDecision``/``ScholarInterruptDecision``.
-    """
-    return (
-        '```json\n'
-        '{\n'
-        '  "decisions": [\n'
-        '    {"action_index": 0, "decision": "approve|veto", '
-        '"veto_reason": "<sentence if veto, else empty>"},\n'
-        '    ...\n'
-        '  ],\n'
-        '  "interrupts_processed": [\n'
-        '    {"lesson_id": "...", "lesson_path": "...", '
-        '"action": "approve|veto", "text": "<nudge if approve>", '
-        '"reason": "<short>"},\n'
-        '    ...\n'
-        '  ]\n'
-        '}\n'
-        '```'
-    )
+    """Canonical JSON Schema for ``ScholarReview`` derived from the
+    Pydantic model. Single source of truth."""
+    return _model_schema_block(ScholarReview)

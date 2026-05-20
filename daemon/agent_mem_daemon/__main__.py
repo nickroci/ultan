@@ -28,6 +28,7 @@ from .buffer import RollingBuffer, DEFAULT_INACTIVITY_SECONDS, DEFAULT_MAX_TURNS
 from .ingest import JsonlTailer, DEFAULT_POLL_INTERVAL
 from .logging_setup import configure as configure_logging
 from .paths import ensure_home, events_path, log_path, offset_state_path, pid_path
+from .priming_rpc import PrimingRpcThread
 from .scheduler import (
     Scheduler,
     SchedulerConfig,
@@ -240,6 +241,31 @@ def _build_parser() -> argparse.ArgumentParser:
 # ---- main loop ------------------------------------------------------
 
 
+def _prewarm_indexes(knowledge_dir: Path, log: logging.Logger) -> None:
+    """Verify the BM25 and embedding indexes match the markdown source
+    of truth at startup. Rebuild on drift; log either way.
+
+    Run synchronously before worker threads start so first retrieval
+    doesn't pay the rebuild cost. Failures fail-soft to lazy rebuild —
+    a broken index never blocks daemon start.
+    """
+    if not knowledge_dir.exists():
+        log.info("startup: knowledge dir %s missing — skipping index prewarm", knowledge_dir)
+        return
+    try:
+        from bm25 import load_or_build as bm25_load
+        idx = bm25_load(knowledge_dir)
+        log.info("startup: bm25 index ready (%d docs)", len(idx.docs))
+    except Exception:
+        log.exception("startup: bm25 prewarm failed (lazy rebuild on first use)")
+    try:
+        from embeddings import load_or_build as emb_load
+        idx = emb_load(knowledge_dir)
+        log.info("startup: embedding index ready (%d docs)", len(idx.docs))
+    except Exception:
+        log.exception("startup: embedding prewarm failed (lazy rebuild on first use)")
+
+
 def _install_signal_handlers(stop_event: threading.Event) -> None:
     def handler(signum, _frame):
         # signal.Signals(signum).name avoids hardcoding numbers in the
@@ -272,6 +298,13 @@ def run(args: argparse.Namespace) -> int:
     log.info("  pid file:    %s", pidfile)
 
     acquire_pid_file(pidfile)
+
+    # Verify indexes are in sync with the markdown source of truth.
+    # Rebuilds on drift (manual edits, git pull from another machine,
+    # restore from backup); logs "ready (N docs)" otherwise. Failures
+    # fail-soft — first retrieval rebuilds.
+    from .paths import knowledge_dir as _knowledge_dir
+    _prewarm_indexes(_knowledge_dir(), log)
 
     stop_event = threading.Event()
     _install_signal_handlers(stop_event)
@@ -311,8 +344,15 @@ def run(args: argparse.Namespace) -> int:
         poll_interval=args.poll_interval,
         stop_event=stop_event,
     )
+    # Tier-1 priming RPC: the UserPromptSubmit hook connects here per
+    # turn and gets a freshly-rendered priming snippet (keyed on the
+    # user's prompt, not the Librarian's batch). Lives on its own
+    # daemon thread with its own stop_event so a separate ctrl-flow
+    # bug in the scheduler can't leave the socket bound.
+    rpc_thread = PrimingRpcThread(stop_event=threading.Event())
     sched.start()
     tailer_thread.start()
+    rpc_thread.start()
     try:
         while not stop_event.is_set():
             stop_event.wait(timeout=1.0)
@@ -325,6 +365,11 @@ def run(args: argparse.Namespace) -> int:
         # Stop the scheduler: drains in-flight librarian work,
         # then drains the scholar queue with one final batch.
         sched.stop()
+        # Close the priming socket and unlink the socket file so a
+        # crashed daemon never leaves a stale path that blocks the
+        # next start. Last — the hook can keep getting priming until
+        # the moment we shut down.
+        rpc_thread.stop(timeout=2.0)
         log.info(
             "shutdown complete: stats=librarian_runs=%d backpressure_skips=%d "
             "librarian_debounced=%d scholar_runs=%d packets_queued=%d "

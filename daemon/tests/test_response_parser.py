@@ -178,3 +178,76 @@ def test_parse_diagnostic_carries_repaired_blob():
     assert diag.raw_json is not None
     # After repair the blob should be valid JSON.
     json.loads(diag.raw_json)
+
+
+# ── LibrarianInterrupt.evidence coercion ─────────────────────────────
+#
+# The Librarian sometimes emits `evidence` as a string or list-of-strings
+# instead of the canonical list-of-EvidenceItem-dicts. The
+# `_coerce_evidence` field validator normalises those shapes so we don't
+# drop an entire interrupt over a formatting variation. These tests pin
+# the coercion contract.
+
+
+def test_evidence_coerces_none_to_empty_list():
+    from agent_mem_daemon._schemas import LibrarianInterrupt
+
+    interrupt = LibrarianInterrupt(evidence=None)
+    assert interrupt.evidence == []
+
+
+def test_evidence_coerces_bare_string_to_single_quote_item():
+    from agent_mem_daemon._schemas import LibrarianInterrupt
+
+    interrupt = LibrarianInterrupt(evidence="user said this matters")
+    assert len(interrupt.evidence) == 1
+    assert interrupt.evidence[0].quote == "user said this matters"
+    assert interrupt.evidence[0].turn_id is None
+    assert interrupt.evidence[0].role is None
+
+
+def test_evidence_coerces_single_dict_to_one_item_list():
+    from agent_mem_daemon._schemas import LibrarianInterrupt
+
+    interrupt = LibrarianInterrupt(
+        evidence={"turn_id": 3, "role": "user", "quote": "hello"}
+    )
+    assert len(interrupt.evidence) == 1
+    assert interrupt.evidence[0].turn_id == 3
+    assert interrupt.evidence[0].role == "user"
+    assert interrupt.evidence[0].quote == "hello"
+
+
+def test_evidence_coerces_list_of_strings_to_quote_items():
+    from agent_mem_daemon._schemas import LibrarianInterrupt
+
+    interrupt = LibrarianInterrupt(evidence=["one", "two", "three"])
+    assert [e.quote for e in interrupt.evidence] == ["one", "two", "three"]
+    assert all(e.turn_id is None and e.role is None for e in interrupt.evidence)
+
+
+def test_evidence_list_of_dicts_passes_through_unchanged():
+    from agent_mem_daemon._schemas import LibrarianInterrupt
+
+    src = [
+        {"turn_id": 1, "role": "user", "quote": "alpha"},
+        {"turn_id": 2, "role": "assistant", "quote": "beta"},
+    ]
+    interrupt = LibrarianInterrupt(evidence=src)
+    assert len(interrupt.evidence) == 2
+    assert interrupt.evidence[0].turn_id == 1
+    assert interrupt.evidence[1].quote == "beta"
+
+
+def test_evidence_mixed_list_of_strings_and_dicts():
+    """Defensive: if the model emits a mixed list, dicts pass through
+    and bare strings get wrapped — partial drift doesn't drop the rest."""
+    from agent_mem_daemon._schemas import LibrarianInterrupt
+
+    src = ["plain quote", {"turn_id": 5, "quote": "structured"}]
+    interrupt = LibrarianInterrupt(evidence=src)
+    assert len(interrupt.evidence) == 2
+    assert interrupt.evidence[0].quote == "plain quote"
+    assert interrupt.evidence[0].turn_id is None
+    assert interrupt.evidence[1].turn_id == 5
+    assert interrupt.evidence[1].quote == "structured"

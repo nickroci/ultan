@@ -68,6 +68,7 @@ When you APPROVE, execute the action exactly as proposed (path, body, etc.). The
   - Stamp ``created`` / ``updated`` ISO dates if the Librarian left them as placeholders.
   - Normalise the ``id`` field to match the filename (kebab-case, no .md).
   - Fix obvious YAML frontmatter syntax bugs that would block parsing.
+  - For ``write_entry`` / ``update_entry`` / ``merge_entries``: if the Librarian did not include a ``paraphrases:`` field in the frontmatter, add one — a YAML list of 3–6 short alternative phrasings of the entry's CORE CLAIM. These are indexed by BM25 alongside title/keywords/applies-when so the entry surfaces for paraphrased queries (e.g. an entry whose claim is "always use uv for python" should list paraphrases like ``["use uv not pip", "uv is the right python package manager", "install python deps with uv", "managing python dependencies"]``). Optional but strongly preferred — skip only if the entry's core claim is itself a single short keyword phrase where paraphrasing would be redundant.
 
 Anything more substantial is a VETO. The lesson will recur in a future session.
 

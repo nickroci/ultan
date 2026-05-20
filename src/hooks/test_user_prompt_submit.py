@@ -14,8 +14,14 @@ expect; we exercise it via subprocess rather than importing.
 from __future__ import annotations
 
 import json
+import shutil
+import socket
+import struct
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -27,9 +33,164 @@ if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
 import _nudges  # noqa: E402
+import _priming_client  # noqa: E402
 
 
 HOOK_SCRIPT = _THIS_DIR / "user-prompt-submit.py"
+
+
+# ── Helpers for the priming/socket tests ─────────────────────────────
+
+
+def _short_sock_dir() -> Path:
+    """macOS caps AF_UNIX paths at ~104 chars; pytest's tmp_path is
+    too long for AGENT_MEM_HOME to be both the socket parent AND a
+    nested test dir. Use /tmp for the socket parent."""
+    return Path(tempfile.mkdtemp(prefix="ult-hook-"))
+
+
+def _seed_lib(root: Path) -> Path:
+    """Tiny library so the local-lexical fallback (and a real daemon
+    if one were running) has something to match. Mirrors the minimum
+    shape used in tests/test_priming.py over in the daemon repo."""
+    k = root / "knowledge"
+    for sub in ("global/python", "global/git"):
+        (k / sub).mkdir(parents=True, exist_ok=True)
+        (k / sub / "README.md").write_text(f"# {sub}\n", encoding="utf-8")
+    (k / "README.md").write_text("# knowledge\n", encoding="utf-8")
+
+    def _entry(path: Path, *, title: str, applies_when: str, keywords: list,
+               reinforced: int = 0, body: str = "") -> None:
+        lines = [
+            "---",
+            f"id: {path.stem}",
+            "type: lesson",
+            "scope: global",
+            "status: provisional",
+            "confidence: 0.7",
+            "applies-when: |",
+            f"  {applies_when}",
+            "keywords: [" + ", ".join(keywords) + "]",
+            f'title: "{title}"',
+        ]
+        if reinforced:
+            lines.append(f"reinforced: {reinforced}")
+        lines += ["---", "", body or f"# {title}", ""]
+        path.write_text("\n".join(lines), encoding="utf-8")
+
+    _entry(k / "global" / "python" / "use-uv-not-pip.md",
+           title="Always use uv for python",
+           applies_when="installing python deps",
+           keywords=["python", "uv", "pip"],
+           reinforced=3)
+    _entry(k / "global" / "python" / "type-hints.md",
+           title="Use type hints",
+           applies_when="writing python functions",
+           keywords=["python", "types"])
+    _entry(k / "global" / "git" / "no-force-push.md",
+           title="Never force-push",
+           applies_when="pushing to git remotes",
+           keywords=["git", "push"])
+    return k
+
+
+class _FakeRpcServer(threading.Thread):
+    """Minimal length-prefixed-JSON server used to mock the daemon.
+
+    The handler is a callable ``(request_dict) -> response_dict`` so
+    individual tests can canned-respond, raise, or sleep."""
+
+    def __init__(self, socket_path: Path, handler):
+        super().__init__(daemon=True, name="fake-priming-rpc")
+        self._socket_path = socket_path
+        self._handler = handler
+        self._server: socket.socket | None = None
+        self._stop = threading.Event()
+        self._ready = threading.Event()
+
+    def start_and_wait(self, timeout: float = 2.0) -> None:
+        self.start()
+        assert self._ready.wait(timeout=timeout), "fake server failed to bind"
+
+    def _bind(self) -> socket.socket:
+        if self._socket_path.exists() or self._socket_path.is_symlink():
+            try:
+                self._socket_path.unlink()
+            except OSError:
+                pass
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(str(self._socket_path))
+        s.listen(16)
+        s.settimeout(0.2)
+        return s
+
+    def run(self) -> None:
+        self._server = self._bind()
+        self._ready.set()
+        try:
+            while not self._stop.is_set():
+                try:
+                    conn, _ = self._server.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                try:
+                    conn.settimeout(5.0)
+                    header = b""
+                    while len(header) < 4:
+                        chunk = conn.recv(4 - len(header))
+                        if not chunk:
+                            break
+                        header += chunk
+                    if len(header) < 4:
+                        conn.close()
+                        continue
+                    (length,) = struct.unpack(">I", header)
+                    payload = b""
+                    while len(payload) < length:
+                        chunk = conn.recv(length - len(payload))
+                        if not chunk:
+                            break
+                        payload += chunk
+                    try:
+                        req = json.loads(payload.decode("utf-8"))
+                    except Exception:
+                        req = {}
+                    try:
+                        resp = self._handler(req)
+                    except Exception as e:
+                        resp = {"ok": False, "error": f"handler raised: {e}"}
+                    body = json.dumps(resp).encode("utf-8")
+                    try:
+                        conn.sendall(struct.pack(">I", len(body)) + body)
+                    except OSError:
+                        pass
+                finally:
+                    try:
+                        conn.close()
+                    except OSError:
+                        pass
+        finally:
+            try:
+                if self._server:
+                    self._server.close()
+            except OSError:
+                pass
+            try:
+                if self._socket_path.exists() or self._socket_path.is_symlink():
+                    self._socket_path.unlink()
+            except OSError:
+                pass
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._server:
+            try:
+                self._server.close()
+            except OSError:
+                pass
+        self.join(timeout=2.0)
 
 
 # ── pure-Python tests of _nudges (fast, no subprocess) ───────────────
@@ -286,3 +447,254 @@ def test_hook_skips_nudges_when_no_session_id(tmp_path: Path):
     assert "additionalContext" not in res.stdout
     # Without session_id we don't drain — leave the file intact.
     assert nudges_path.exists()
+
+
+# ── Priming client (unit, in-process) ─────────────────────────────────
+
+
+def test_get_priming_empty_prompt_returns_empty(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("AGENT_MEM_HOME", str(tmp_path))
+    assert _priming_client.get_priming("") == ""
+    assert _priming_client.get_priming("   ") == ""
+
+
+def test_get_priming_no_socket_no_library_returns_empty(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("AGENT_MEM_HOME", str(tmp_path))
+    assert _priming_client.get_priming("python uv install") == ""
+
+
+def test_get_priming_local_fallback_when_socket_missing(tmp_path: Path, monkeypatch):
+    """Daemon down (no socket file), but knowledge dir exists —
+    fallback should still return rendered markdown."""
+    monkeypatch.setenv("AGENT_MEM_HOME", str(tmp_path))
+    _seed_lib(tmp_path)
+
+    out = _priming_client.get_priming("python uv pip install package")
+    assert out.startswith("## Ultan — your library says"), out
+    assert "[[global/python/use-uv-not-pip]]" in out
+    # Reinforced count should propagate.
+    assert "(×3)" in out
+
+
+def test_get_priming_socket_success_short_circuits_fallback(tmp_path: Path, monkeypatch):
+    """When the socket responds ok=true, we use that payload and don't
+    fall back even if it differs from what local search would produce."""
+    monkeypatch.setenv("AGENT_MEM_HOME", str(tmp_path))
+    _seed_lib(tmp_path)
+
+    sock_dir = _short_sock_dir()
+    socket_path = sock_dir / "priming.sock"
+    monkeypatch.setattr(_priming_client, "_priming_socket_path", lambda: socket_path)
+
+    canned = "## Library priming (you may know more about this than you think)\n\n- [[FROM_DAEMON]] — canned\n\n*Tip-of-the-tongue? `/ultan-advisor <q>` pulls the full entry.*\n"
+    server = _FakeRpcServer(socket_path, lambda req: {"ok": True, "priming_md": canned,
+                                                       "took_ms": 5, "lane": "hybrid"})
+    try:
+        server.start_and_wait()
+        out = _priming_client.get_priming("python uv")
+        assert out == canned, "should pass through daemon payload verbatim"
+    finally:
+        server.stop()
+        shutil.rmtree(sock_dir, ignore_errors=True)
+
+
+def test_get_priming_socket_timeout_falls_back_to_local(tmp_path: Path, monkeypatch):
+    """Slow socket past the budget -> client gives up, uses local
+    search. The total wall time stays under the budget + the local
+    fallback's runtime."""
+    monkeypatch.setenv("AGENT_MEM_HOME", str(tmp_path))
+    _seed_lib(tmp_path)
+
+    sock_dir = _short_sock_dir()
+    socket_path = sock_dir / "priming.sock"
+    monkeypatch.setattr(_priming_client, "_priming_socket_path", lambda: socket_path)
+
+    def _slow(req):
+        time.sleep(2.0)  # well past the 200ms budget
+        return {"ok": True, "priming_md": "should never be seen", "took_ms": 2000, "lane": "hybrid"}
+
+    server = _FakeRpcServer(socket_path, _slow)
+    try:
+        server.start_and_wait()
+        t0 = time.monotonic()
+        # Tight budget — make sure we abandon the socket and fall back.
+        out = _priming_client.get_priming("python uv pip", total_budget_ms=100)
+        elapsed = time.monotonic() - t0
+
+        # The fallback should fire and produce real bullets keyed on the
+        # local lexical search.
+        assert "## Ultan — your library says" in out
+        assert "[[global/python/use-uv-not-pip]]" in out
+        # Sanity: we did not wait for the slow server.
+        assert elapsed < 1.0, f"client waited {elapsed:.2f}s; should've bailed at 100ms"
+    finally:
+        server.stop()
+        shutil.rmtree(sock_dir, ignore_errors=True)
+
+
+def test_get_priming_socket_ok_false_falls_back(tmp_path: Path, monkeypatch):
+    """ok=false from the server -> use local fallback."""
+    monkeypatch.setenv("AGENT_MEM_HOME", str(tmp_path))
+    _seed_lib(tmp_path)
+
+    sock_dir = _short_sock_dir()
+    socket_path = sock_dir / "priming.sock"
+    monkeypatch.setattr(_priming_client, "_priming_socket_path", lambda: socket_path)
+
+    server = _FakeRpcServer(socket_path, lambda req: {"ok": False, "error": "nope"})
+    try:
+        server.start_and_wait()
+        out = _priming_client.get_priming("python uv")
+        # Local fallback fired.
+        assert "## Ultan — your library says" in out
+        assert "[[global/python/use-uv-not-pip]]" in out
+    finally:
+        server.stop()
+        shutil.rmtree(sock_dir, ignore_errors=True)
+
+
+def test_get_priming_local_fallback_is_fast(tmp_path: Path, monkeypatch):
+    """The pure-stdlib fallback must stay under 100 ms on a tiny library."""
+    monkeypatch.setenv("AGENT_MEM_HOME", str(tmp_path))
+    _seed_lib(tmp_path)
+
+    # First call may pay a tiny disk-warm cost; measure the second.
+    _priming_client.get_priming("warm-up")
+    t0 = time.monotonic()
+    out = _priming_client.get_priming("python uv pip install")
+    elapsed_ms = (time.monotonic() - t0) * 1000.0
+    assert "## Ultan — your library says" in out
+    assert elapsed_ms < 100.0, f"local fallback took {elapsed_ms:.1f}ms (budget 100ms)"
+
+
+def test_get_priming_socket_round_trip_is_fast(tmp_path: Path, monkeypatch):
+    """Happy path with a fast fake server: total wall time well under
+    the daemon-served 200 ms budget."""
+    monkeypatch.setenv("AGENT_MEM_HOME", str(tmp_path))
+    _seed_lib(tmp_path)
+
+    sock_dir = _short_sock_dir()
+    socket_path = sock_dir / "priming.sock"
+    monkeypatch.setattr(_priming_client, "_priming_socket_path", lambda: socket_path)
+
+    server = _FakeRpcServer(
+        socket_path,
+        lambda req: {"ok": True, "priming_md": "## Ultan — your library says\n\n- [[x]]\n\n*Tip*\n",
+                     "took_ms": 1, "lane": "hybrid"},
+    )
+    try:
+        server.start_and_wait()
+        # Warm-up to dodge interpreter / import jitter on first read.
+        _priming_client.get_priming("warm-up")
+        t0 = time.monotonic()
+        out = _priming_client.get_priming("python uv")
+        elapsed_ms = (time.monotonic() - t0) * 1000.0
+        assert out.startswith("## Ultan — your library says")
+        assert elapsed_ms < 200.0, f"socket round trip took {elapsed_ms:.1f}ms (budget 200ms)"
+    finally:
+        server.stop()
+        shutil.rmtree(sock_dir, ignore_errors=True)
+
+
+# ── Hook end-to-end with the socket path ──────────────────────────────
+
+
+@pytest.fixture
+def short_home():
+    """AGENT_MEM_HOME under /tmp so the priming.sock path stays under
+    the macOS AF_UNIX 104-char cap. pytest's own tmp_path is too long."""
+    d = Path(tempfile.mkdtemp(prefix="ult-home-"))
+    try:
+        yield d
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_hook_emits_priming_from_socket(short_home: Path):
+    """Subprocess hook -> talks to a fake server -> emits daemon's
+    canned priming as additionalContext."""
+    _seed_lib(short_home)
+
+    canned_md = (
+        "## Ultan — your library says (cite or follow when applicable)\n\n"
+        "- [[global/python/use-uv-not-pip]] (×3) — installing python deps\n\n"
+        "*Wikilinks resolve to real files in `~/.agent-mem/knowledge/<wikilink>.md` — Read one for the full entry, or call `/ultan-advisor <question>` for synthesis.*\n"
+    )
+
+    # The hook's _priming_client resolves the socket via AGENT_MEM_HOME.
+    home_sock = short_home / "priming.sock"
+    server = _FakeRpcServer(
+        home_sock,
+        lambda req: {"ok": True, "priming_md": canned_md, "took_ms": 4, "lane": "hybrid"},
+    )
+    try:
+        server.start_and_wait()
+        res = _run_hook(
+            {"session_id": "s1", "cwd": "/tmp", "prompt": "python uv install"},
+            env_overrides={"AGENT_MEM_HOME": str(short_home)},
+        )
+        assert res.returncode == 0, res.stderr
+        stdout = res.stdout.strip()
+        assert stdout, f"expected priming injection, got nothing. stderr={res.stderr}"
+        output = json.loads(stdout)
+        ctx = output["hookSpecificOutput"]["additionalContext"]
+        assert "## Ultan — your library says" in ctx
+        assert "use-uv-not-pip" in ctx
+    finally:
+        server.stop()
+
+
+def test_hook_combines_priming_and_nudges(short_home: Path):
+    """Both halves present — priming from the socket, then nudges,
+    visually separated by ``## Active nudges``."""
+    _seed_lib(short_home)
+
+    nudges_path = short_home / "pending-nudges.md"
+    nudges_path.write_text(
+        "---\nid: n1\ncreated: 2026-05-19T00:00:00+00:00\nlesson: l/n\n---\nnudge body text\n",
+        encoding="utf-8",
+    )
+
+    home_sock = short_home / "priming.sock"
+    canned_md = (
+        "## Ultan — your library says (cite or follow when applicable)\n\n"
+        "- [[global/python/use-uv-not-pip]] — installing python deps\n\n"
+        "*Wikilinks resolve to real files in `~/.agent-mem/knowledge/<wikilink>.md` — Read one for the full entry, or call `/ultan-advisor <question>` for synthesis.*\n"
+    )
+    server = _FakeRpcServer(
+        home_sock,
+        lambda req: {"ok": True, "priming_md": canned_md, "took_ms": 3, "lane": "hybrid"},
+    )
+    try:
+        server.start_and_wait()
+        res = _run_hook(
+            {"session_id": "s1", "cwd": "/tmp", "prompt": "python uv install"},
+            env_overrides={"AGENT_MEM_HOME": str(short_home)},
+        )
+        assert res.returncode == 0, res.stderr
+        output = json.loads(res.stdout.strip())
+        ctx = output["hookSpecificOutput"]["additionalContext"]
+        assert "## Ultan — your library says" in ctx
+        assert "## Active nudges" in ctx
+        assert "nudge body text" in ctx
+        # Priming MUST come before nudges in the output.
+        assert ctx.index("## Ultan — your library says") < ctx.index("## Active nudges")
+    finally:
+        server.stop()
+
+
+def test_hook_falls_back_when_daemon_down(short_home: Path):
+    """No socket at all, but knowledge dir has entries — the hook's
+    in-process fallback should still emit priming."""
+    _seed_lib(short_home)
+    res = _run_hook(
+        {"session_id": "s1", "cwd": "/tmp", "prompt": "python uv pip install"},
+        env_overrides={"AGENT_MEM_HOME": str(short_home)},
+    )
+    assert res.returncode == 0, res.stderr
+    stdout = res.stdout.strip()
+    assert stdout, "fallback should still produce additionalContext"
+    output = json.loads(stdout)
+    ctx = output["hookSpecificOutput"]["additionalContext"]
+    assert "## Ultan — your library says" in ctx
+    assert "use-uv-not-pip" in ctx

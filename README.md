@@ -25,9 +25,20 @@ It's your library. On your disk. In plain markdown. You can `ls` it, `cat` it, `
 - **Three slash commands** wire it into Claude Code without ceremony:
   - `/ultan <text>` — drop something into memory now, no extraction needed.
   - `/ultan-install` — wire the hooks into the current project's `.claude/settings.json`.
-  - `/ultan-advisor <question>` — query the library before asking the user a preference question. The advisor finds relevant entries (Sonnet, BM25 + Read), writes a referenced answer (Opus), and clearly distinguishes stored knowledge from its own opinion. *Always cheaper to check than to ask.*
-- **Soft nudges, not Clippy.** When the Librarian sees a stored preference that applies to what you're doing, the Scholar decides whether to mention it. Approved nudges land in `pending-nudges.md` and inject as `additionalContext` on your next turn — budgeted to 1/turn, 3/session.
-- **Pure markdown store.** No vector DB, no database, no daemons-of-daemons. Everything lives under `~/.agent-mem/` and you can `ls`, `cat`, or `git` it.
+  - `/ultan-advisor <question>` — query the library before asking the user a preference question. The advisor finds relevant entries (Sonnet, BM25 + embeddings + Read), writes a referenced answer (Opus), and clearly distinguishes stored knowledge from its own opinion. *Always cheaper to check than to ask.*
+- **Pure markdown store.** No database. The library is `~/.agent-mem/knowledge/` — `ls`, `cat`, `git` it. Two derived indexes alongside (`.bm25.idx` for keyword, `.embeddings.idx` for semantic) auto-rebuild on drift.
+
+### Three retrieval tiers, modelled on how brains actually retrieve memory
+
+The agent can't afford to query the library for everything it's about to do. Humans don't either — they rely on layered retrieval. Yonelinas's dual-process theory; Lisman & Grace's novelty loop; the orbital-prefrontal "stop signal." Three mechanisms, three latencies:
+
+| Tier | Cognitive analog | Latency | Trigger | What it does |
+|---|---|---|---|---|
+| **1. Ambient priming** | Familiarity / spreading activation | ~0 (already in prompt context) | Daemon refreshes `hot-context.md` after every batch | Top 5 most-relevant entries injected as `additionalContext` on every UserPromptSubmit. Agent has them "in mind" without asking. Hybrid retrieval: BM25 + sentence-transformer embeddings merged via RRF, boosted by `reinforced` counter. ≤500 char budget. |
+| **2. Deliberate recall** | Explicit retrieval (hippocampal) | 30-60s | `/ultan-advisor <question>` invocation | Sonnet Librarian searches deeply, Opus Scholar synthesises a referenced answer. The drill-down when the priming snippet isn't enough. |
+| **3. Acute notice** | Orbital prefrontal "stop signal" | <100ms synchronous | PreToolUse hook on every tool call | Default `advise`: pattern-matches the tool call against entries with `block_triggers`; on match, emits an `additionalContext` FYI — *"📚 Library note: [[X]] applies here"* — and the tool proceeds. **The agent decides.** Opt-in `severity: block` is reserved for genuinely dangerous actions (`rm -rf /`, force-push to main); only then does the hook hard-deny. Like a human noticing a relevant memory mid-action: noticed, not paralysed. |
+
+The Scholar still owns a **soft nudge pipeline** orthogonal to these — when the Librarian sees a stored preference matching the rolling buffer, the Scholar can approve a nudge to `pending-nudges.md` for injection on the next turn. Budget: 1/turn, 3/session.
 
 ---
 
@@ -40,18 +51,28 @@ cd daemon && uv sync --extra dev
 # 2. Sync the search CLI (separate venv, shared BM25 implementation)
 cd ../tools/search && uv sync
 
-# 3. Install the slash commands and hooks template
+# 3. Install the slash commands and hooks
 #    - /ultan, /ultan-install, /ultan-advisor live at ~/.claude/commands/
-#    - In any project: `/ultan-install` to wire hooks into <project>/.claude/settings.json
-#    - Or `/ultan-install --global` for user-wide
+#    - `/ultan-install` writes hooks into ~/.claude/settings.json (GLOBAL — every
+#      Claude Code project). One daemon per machine serves the whole library
+#      across every repo, so global is the recommended default.
+#    - `/ultan-install --project` if you'd rather scope to one repo only.
 
-# 4. Start the daemon (foreground; logs to ~/.agent-mem/daemon.log)
+# 4. Start the daemon (foreground; logs to ~/.agent-mem/daemon.log). One per
+#    machine — it listens on ~/.agent-mem/priming.sock and answers Tier-1
+#    priming requests from every hook on every project.
 cd /path/to/ultan/daemon && uv run agent-mem-daemon -v
 #    (nohup, tmux, or a launchd plist if you want it persistent — Phase 4 work.)
 
-# 5. Open Claude Code in any project where you ran /ultan-install and work normally.
-#    Entries land under ~/.agent-mem/knowledge/ as the Scholar approves them.
+# 5. Open Claude Code in any project (no per-project setup needed once the
+#    hooks are global) and work normally. Entries land under
+#    ~/.agent-mem/knowledge/ as the Scholar approves them.
 ```
+
+When the daemon is running, the ``UserPromptSubmit`` hook makes a sub-100 ms
+Unix-socket call into it to get a priming snippet keyed on your *current
+prompt* (not the last batch's curation). When the daemon is down, the hook
+falls back to a tiny in-process lexical scan so you still see relevant entries.
 
 To save a memory explicitly: `/ultan never deploy to prod without my explicit OK`.
 
@@ -168,9 +189,23 @@ Storage on disk:
 
 ---
 
+## A note on cost
+
+**Ultan is token-heavy by design.** It trades tokens for richer memory and lower friction. Expect roughly:
+
+- **Librarian (Sonnet)** runs after each session's quiet period (per-session debounce, default 30s). With moderate activity that's ~10-30 invocations per working day per project. Each is a few thousand input tokens (prompt + library snapshot + buffer) plus a few hundred output tokens.
+- **Scholar (Opus)** runs in batches — every 3 Librarian packets or 60s, whichever first. Each batch is one Opus call: prompt + accumulated proposals, ~30s wall time, ~$0.20-0.50 per batch on pay-as-you-go pricing.
+- **Ambient priming (Tier 1)** is daemon-side BM25 + embeddings, **no LLM cost**, but it injects up to 500 chars into every UserPromptSubmit — call it ~150 tokens of prompt overhead per turn.
+- **Advisor (`/ultan-advisor`)** is one Sonnet call (Librarian step) + one Opus call (Scholar synthesis) per invocation. ~$0.30-0.50 each.
+- **PreToolUse Tier 3** is pure deterministic regex match, **no LLM cost**, sub-100ms.
+
+For pay-as-you-go API users this adds up — easily $5-20/day for active dogfooding. **If you're on Max/Pro**, the cost lands against your quota rather than your card; the latency cost remains.
+
+If that's too rich for your workflow: turn off the daemon entirely and use just the slash commands (`/ultan`, `/ultan-advisor`) — the curator stops running, but the explicit-write and explicit-query paths still work. You lose ambient priming, automatic extraction, and proactive nudges, but you keep the markdown library and the on-demand advisor.
+
 ## Status
 
-177 tests passing. Live-tested end-to-end against real Sonnet + Opus calls. Currently a personal dogfood project — not packaged for `pip install`. Expect to clone, `uv sync`, and tune the prompts to your own preferences.
+225 tests passing across daemon, hooks, and search. Live-tested end-to-end against real Sonnet + Opus calls including the three retrieval tiers, the curator's salience-signal classification, README reconciler, wikilink validator, and the PreToolUse advisory/block hook. Currently a personal dogfood project — not packaged for `pip install`. Expect to clone, `uv sync`, and tune the prompts to your own preferences.
 
 ## License
 

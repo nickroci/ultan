@@ -212,6 +212,76 @@ related:
   travel. The Librarian uses it as a hard filter: when active in project A,
   lessons with `scope: project:B` are not candidates for interrupts.
 
+### 2.2.1 Optional blocking fields (Tier 3 — synchronous PreToolUse)
+
+Two optional frontmatter fields opt an entry in to the **synchronous
+PreToolUse deterministic interrupt** (the only point in Claude Code's
+hook contract where the host can block a tool call **before** it runs).
+The post-hoc Librarian → Scholar → `pending-nudges.md` pipeline is too
+late to stop a destructive action; the PreToolUse hook
+(`src/hooks/pre-tool-use.py`) loads the small set of entries flagged
+here and pattern-matches them against every tool call.
+
+**Opt-in is by `block_triggers` presence** — any entry that lists
+triggers gets loaded by the PreToolUse hook. `severity` controls
+**how loud** the response is when a trigger matches:
+
+| Field | Type | Required | Written by | Read by | Purpose |
+|---|---|---|---|---|---|
+| `block_triggers` | list[dict] | optional — present means PreToolUse will check | Scholar / user | PreToolUse hook | One or more match rules. Two shapes recognised below. |
+| `severity` | enum | optional (default `advise`) | Scholar / user | PreToolUse hook | `advise` (FYI — emits `additionalContext`, tool proceeds, agent decides) or `block` (hard stop — emits `permissionDecision: deny`, tool refused). Default is `advise` — like a human noticing a relevant constraint, not paralysed by it. |
+
+**Trigger shapes:**
+
+```yaml
+# Default (advise): tool proceeds; agent gets an additionalContext FYI.
+block_triggers:
+  - tool: Bash
+    pattern: 'pip install'           # "use uv instead" FYI
+  - tool: Edit
+    file_pattern: 'production\.env$' # FYI when touching prod env
+
+# Opt-in hard block (rare — reserve for genuinely dangerous things):
+severity: block
+block_triggers:
+  - tool: Bash
+    pattern: 'rm -rf /(?!tmp)'       # blanket rm -rf outside /tmp
+  - tool: Bash
+    pattern: 'git push.*--force.*main'
+```
+
+- `tool: Bash` + `pattern: <regex>` — the regex (Python `re.search`,
+  not `re.fullmatch`) is matched against the `command` field of
+  `tool_input`. Authors anchor with `^`/`$` themselves if they want
+  exact-match semantics.
+- `tool: Edit` (or `Write`, `NotebookEdit`) + `file_pattern: <regex>`
+  — matched against the `file_path` field of `tool_input`.
+
+A trigger fires only when its `tool` value exactly matches the
+PascalCase Claude Code tool name (`Bash`, `Edit`, `Write`,
+`NotebookEdit`, ...). Invalid regexes are silently dropped at load
+time — better one dead trigger than a crashing hook on every tool
+call. An entry with zero usable triggers is dropped entirely.
+
+**On match:**
+
+- `severity: advise` (default) → hook emits
+  `{"hookSpecificOutput": {"additionalContext": "📚 Library note (FYI; agent decides): [[<wikilink>]] applies here — <one-line rule>"}}`.
+  The tool runs; the agent gets the note as system context and decides
+  on its own whether to take notice.
+- `severity: block` → hook emits
+  `{"hookSpecificOutput": {"permissionDecision": "deny", "permissionDecisionReason": "⚠ Library blocks this action: [[<wikilink>]] - <one-line rule>. Confirm with the user before retrying."}}`.
+  The tool is refused; the agent must reconsider.
+
+The one-line rule in both cases is the first non-heading, non-empty
+line of the entry body, so author your trigger entries with a
+one-sentence rule on the first line.
+
+**Recursion guard:** the PreToolUse hook short-circuits when
+`CLAUDE_INVOKED_BY` is set, so the Scholar's own Edit/Write calls
+inside the daemon are never blocked. This is what keeps the daemon
+from deadlocking on its own writes.
+
 ### 2.3 Invariants (enforced by `agent-mem doctor` / lint)
 
 1. `id` equals filename without `.md`.

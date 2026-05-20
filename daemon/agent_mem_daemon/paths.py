@@ -72,6 +72,33 @@ def index_md_path() -> Path:
     return knowledge_dir() / "index.md"
 
 
+def priming_socket_path() -> Path:
+    """Unix-domain socket the priming RPC listens on.
+
+    Lives at ``~/.agent-mem/priming.sock``. The hook (a fresh Python
+    process per ``UserPromptSubmit``) opens a short-lived connection
+    here to ask the daemon for a freshly-rendered priming snippet —
+    keyed on the user's current prompt rather than the Librarian's
+    proposals. The daemon already has the embedding model warm, so
+    the round trip is sub-100 ms; loading the model in the hook
+    would cost ~5s per turn.
+    """
+    return home() / "priming.sock"
+
+
+def hot_context_path() -> Path:
+    """Ambient-priming (Tier 1) hot-context file.
+
+    Lives at ``~/.agent-mem/hot-context.md`` — daemon state, not a
+    library entry, so it sits next to ``pending-nudges.md`` rather than
+    under ``knowledge/``. The Scholar's post-batch flow rewrites it via
+    ``priming.refresh_hot_context``; the UserPromptSubmit hook reads it
+    and injects the body as ``additionalContext`` for the agent's next
+    turn.
+    """
+    return home() / "hot-context.md"
+
+
 def ensure_home() -> Path:
     """Create the home dir if missing; return it."""
     h = home()
