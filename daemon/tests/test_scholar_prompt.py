@@ -587,3 +587,108 @@ def test_reconcile_removes_archived_entry_from_listing(tmp_path: Path):
 def test_check_invariants_missing_dir_returns_empty(tmp_path: Path):
     out = scholar_prompt.check_invariants(tmp_path / "nope")
     assert out == []
+
+
+# ── reinforcement counter ────────────────────────────────────────────
+
+
+def test_apply_reinforcement_bumps_counter_on_existing_entry(tmp_path: Path):
+    k = tmp_path / "knowledge"
+    (k / "global" / "tooling").mkdir(parents=True)
+    entry = k / "global" / "tooling" / "use-uv.md"
+    entry.write_text(_valid_frontmatter(id_="use-uv"), encoding="utf-8")
+
+    packets = [{
+        "session_id": "s1",
+        "proposals": [{
+            "action": "update_entry",
+            "salience_signal": "reinforces",
+            "existing_entry": "global/tooling/use-uv.md",
+            "path": "global/tooling/use-uv.md",
+            "new_body": "...",
+            "reasoning": "user reaffirmed",
+        }],
+    }]
+
+    changes = scholar_prompt.apply_reinforcement_counters(packets, k)
+    assert any("global/tooling/use-uv.md" in c for c in changes)
+
+    import yaml as _yaml
+    text = entry.read_text(encoding="utf-8")
+    fm = _yaml.safe_load(text.split("---", 2)[1])
+    assert fm.get("reinforced") == 1
+    assert fm.get("last_reinforced")  # date stamped
+
+
+def test_apply_reinforcement_dedupes_within_batch(tmp_path: Path):
+    k = tmp_path / "knowledge"
+    (k / "global" / "tooling").mkdir(parents=True)
+    entry = k / "global" / "tooling" / "use-uv.md"
+    entry.write_text(_valid_frontmatter(id_="use-uv"), encoding="utf-8")
+
+    # Two proposals both reinforce the same entry in one batch.
+    packets = [{
+        "session_id": "s1",
+        "proposals": [
+            {"action": "update_entry", "salience_signal": "reinforces",
+             "existing_entry": "global/tooling/use-uv.md",
+             "path": "global/tooling/use-uv.md", "new_body": "", "reasoning": ""},
+            {"action": "update_entry", "salience_signal": "reinforces",
+             "existing_entry": "global/tooling/use-uv.md",
+             "path": "global/tooling/use-uv.md", "new_body": "", "reasoning": ""},
+        ],
+    }]
+
+    changes = scholar_prompt.apply_reinforcement_counters(packets, k)
+    assert len(changes) == 1  # deduped
+
+    import yaml as _yaml
+    fm = _yaml.safe_load(
+        entry.read_text(encoding="utf-8").split("---", 2)[1]
+    )
+    assert fm.get("reinforced") == 1  # not 2
+
+
+def test_apply_reinforcement_rejects_path_traversal(tmp_path: Path):
+    k = tmp_path / "knowledge"
+    (k / "global").mkdir(parents=True)
+    outside = tmp_path / "outside.md"
+    outside.write_text("---\nid: x\n---\n", encoding="utf-8")
+
+    packets = [{
+        "session_id": "s1",
+        "proposals": [{
+            "action": "update_entry",
+            "salience_signal": "reinforces",
+            "existing_entry": "../outside.md",
+            "path": "../outside.md", "new_body": "", "reasoning": "",
+        }],
+    }]
+
+    changes = scholar_prompt.apply_reinforcement_counters(packets, k)
+    assert changes == []
+    # Outside file must NOT have been touched.
+    assert outside.read_text(encoding="utf-8") == "---\nid: x\n---\n"
+
+
+def test_apply_reinforcement_skips_non_reinforces_signals(tmp_path: Path):
+    k = tmp_path / "knowledge"
+    (k / "global" / "tooling").mkdir(parents=True)
+    entry = k / "global" / "tooling" / "use-uv.md"
+    entry.write_text(_valid_frontmatter(id_="use-uv"), encoding="utf-8")
+
+    packets = [{
+        "session_id": "s1",
+        "proposals": [
+            {"action": "write_entry", "salience_signal": "novel",
+             "path": "x", "body": "", "reasoning": ""},
+            {"action": "deprecate_entry", "salience_signal": "contradicts",
+             "existing_entry": "global/tooling/use-uv.md",
+             "path": "global/tooling/use-uv.md",
+             "superseded_by": "x", "reasoning": ""},
+        ],
+    }]
+
+    changes = scholar_prompt.apply_reinforcement_counters(packets, k)
+    assert changes == []
+    assert "reinforced" not in entry.read_text(encoding="utf-8")

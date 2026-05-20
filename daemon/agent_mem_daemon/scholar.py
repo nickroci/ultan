@@ -100,6 +100,24 @@ def review(packets: List[EvidencePacket]) -> None:
         "interrupts_in": n_ints,
     }
     started = time.time()
+
+    # ── Empirical reinforcement counter bump ─────────────────────
+    # Run BEFORE the SDK call. Reinforcement is a fact ("the user
+    # mentioned this again"), not a judgment call — no need to wait
+    # for the Scholar. Bumps an entry's `reinforced` counter and
+    # stamps `last_reinforced` when the Librarian's proposal flagged
+    # `salience_signal: "reinforces"` with a valid existing_entry path.
+    try:
+        reinforced_changes = scholar_prompt.apply_reinforcement_counters(
+            packets, knowledge_dir(),
+        )
+        if reinforced_changes:
+            record.decisions["reinforcement_bumps"] = len(reinforced_changes)
+            for c in reinforced_changes:
+                log.info("scholar.review: %s", c)
+    except Exception:
+        log.exception("scholar.review: reinforcement-counter pass raised")
+
     log.info(
         "scholar.review: invoking SDK (session=%s packets=%d proposals=%d interrupts=%d)",
         session_id, n_packets, n_props, n_ints,

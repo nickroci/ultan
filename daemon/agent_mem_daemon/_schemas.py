@@ -66,6 +66,27 @@ class _BaseAction(BaseModel):
     """One short paragraph explaining why this action is proposed.
     The Scholar reads this to decide approve/veto."""
 
+    salience_signal: Optional[Literal["contradicts", "novel", "reinforces"]] = None
+    """Why this is worth remembering, in cognitive-science terms:
+
+      - ``contradicts``: the candidate disagrees with an existing library
+        entry (cite which in ``existing_entry``). User has changed their
+        mind, or the existing entry was wrong. Highest priority.
+      - ``novel``: not in the library AND not derivable from the model's
+        baseline knowledge (i.e. the model would NOT have produced this
+        advice unprompted). Capture.
+      - ``reinforces``: the candidate restates an existing entry's claim
+        (cite which in ``existing_entry``). Don't write a new entry —
+        the daemon increments the existing's ``reinforced`` counter and
+        the Scholar can typically veto the write.
+
+    Set to ``None`` if you're unsure — the Scholar will infer."""
+
+    existing_entry: Optional[str] = None
+    """For ``contradicts`` / ``reinforces``: the path of the existing
+    library entry the candidate relates to. Required for those signals
+    so the Scholar can verify the relationship."""
+
 
 class WriteEntry(_BaseAction):
     """Create a new entry at ``path`` with ``body``.
@@ -361,9 +382,11 @@ def _action_name(cls: type[BaseModel]) -> str:
 
 def _action_payload_fields(cls: type[BaseModel]) -> List[str]:
     """Non-discriminator, non-base field names for an action class, in
-    declaration order. Excludes ``action`` (the discriminator) and
-    ``reasoning`` (inherited; documented once globally)."""
-    skip = {"action", "reasoning"}
+    declaration order. Excludes inherited fields (``action``,
+    ``reasoning``, ``salience_signal``, ``existing_entry``) — those
+    are documented once globally near the action table, not repeated
+    on every row."""
+    skip = {"action", "reasoning", "salience_signal", "existing_entry"}
     return [name for name in cls.model_fields if name not in skip]
 
 

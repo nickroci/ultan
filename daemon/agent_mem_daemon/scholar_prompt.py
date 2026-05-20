@@ -135,6 +135,43 @@ Special notes:
             ``> **Superseded by [[<superseded_by>]] as of <today's ISO date>**. Kept for historical reference.``
       4. Do NOT delete, archive, or otherwise move the file. The wikilinks pointing at it must keep resolving.
 
+═══════════════════════════════════════════════════════════════════
+SALIENCE DELIBERATION — apply BEFORE invariant checks
+═══════════════════════════════════════════════════════════════════
+
+Each proposal carries a ``salience_signal`` from the Librarian. The Librarian is Sonnet-tier with a low bar; you are Opus-tier and must apply a stricter check. For each proposal, ask the central question:
+
+  **"Would I have produced this advice unprompted, from my own training knowledge?"**
+
+If YES → it's not actually novel to a competent assistant. VETO with reason "in-baseline knowledge — not adding info over what any capable assistant would produce."
+
+If NO → the candidate is genuinely new information that wouldn't otherwise be available. APPROVE (subject to invariants).
+
+Apply this per signal:
+
+  ``salience_signal: "novel"``
+    The Librarian thinks this is new. **Self-test before approving:**
+      - Would I, given the same situation without this entry, default to this advice? If yes → veto, not actually novel.
+      - Common veto pattern: "use uv for python" → I know uv; rephrasing of a default. Veto.
+      - Common approve pattern: "use uv for python in ALL cases, never pip even ad-hoc" → I know uv exists but I'd default to "use whichever the project already uses"; the user is overriding my default. Approve.
+      - Common approve pattern: project-specific facts ("API key in 1Password vault `prod-api`"), user-specific preferences ("don't summarise diffs at end"), or user-specific hardware/setup the model has no way to infer.
+
+  ``salience_signal: "contradicts"``
+    The Librarian found an existing entry that conflicts. **Self-test before approving:**
+      - Read the cited ``existing_entry`` (don't trust the Librarian's summary).
+      - Is the conflict real, or are the two entries actually at different scopes (one global, one project-specific) or different contexts? If different scopes, VETO and explain.
+      - If real, the proposal should usually be ``deprecate_entry`` on the older + ``update_entry`` or new ``write_entry`` for the newer. Approve and execute per the recipe above.
+
+  ``salience_signal: "reinforces"``
+    The Librarian found an existing entry that the candidate restates. **Self-test:**
+      - Is the new phrasing meaningfully different (adds nuance, clarifies edge case)? If yes → approve as ``update_entry`` that absorbs the new framing.
+      - If it's the same claim in different words → VETO. The daemon increments the existing's confidence/reinforcement counter separately; you don't need to write anything.
+
+  ``salience_signal: null`` (Librarian was unsure)
+    Apply the central self-test directly. If you'd produce the advice unprompted → veto. Otherwise → approve.
+
+This is the PRIMARY filter. Run it FIRST before invariant checks; invariants are the safety net for proposals that passed the salience test.
+
 All paths are relative to ``knowledge/`` and resolved from your CURRENT WORKING DIRECTORY. Never construct absolute paths — never type ``~/.agent-mem/...`` or ``/Users/.../.agent-mem/...``. Use only relative paths (e.g. ``knowledge/index.md``, ``knowledge/global/python/use-uv.md``). Your cwd is set correctly by the daemon; absolute paths can land you in the wrong store entirely (this has happened in testing).
 
 ═══════════════════════════════════════════════════════════════════
@@ -658,6 +695,112 @@ def _parse_frontmatter(text: str) -> Dict[str, Any]:
     except yaml.YAMLError:
         return {}
     return fm if isinstance(fm, dict) else {}
+
+
+# ── Deterministic reinforcement-counter bookkeeping ──────────────────
+#
+# When the Librarian flags a proposal with ``salience_signal: "reinforces"``
+# and a valid ``existing_entry`` path, the daemon bumps a counter on that
+# entry's frontmatter — no SDK round-trip. This is an EMPIRICAL fact
+# ("the user mentioned this again") not a judgment call, so it doesn't
+# need the Scholar's deliberation.
+#
+# The Scholar still sees the proposal and decides whether to APPROVE an
+# ``update_entry`` to merge in new phrasing or VETO with "counter already
+# bumped server-side, no substantive new content."
+
+
+def _bump_reinforced_counter(
+    entry_path: Path,
+    *,
+    today_iso: Optional[str] = None,
+) -> bool:
+    """Increment ``reinforced`` in entry's frontmatter; stamp
+    ``last_reinforced``. Returns True on success, False if the file
+    can't be read or has no parseable frontmatter."""
+    if today_iso is None:
+        today_iso = datetime.now(timezone.utc).date().isoformat()
+    try:
+        text = entry_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    m = _FRONTMATTER_HEAD_RE.match(text)
+    if not m:
+        return False
+    try:
+        fm = yaml.safe_load(m.group(1)) or {}
+    except yaml.YAMLError:
+        return False
+    if not isinstance(fm, dict):
+        return False
+    fm["reinforced"] = int(fm.get("reinforced") or 0) + 1
+    fm["last_reinforced"] = today_iso
+    try:
+        new_fm = yaml.safe_dump(fm, sort_keys=False, default_flow_style=False).rstrip()
+    except yaml.YAMLError:
+        return False
+    rest = text[m.end():]
+    new_text = f"---\n{new_fm}\n---\n{rest}"
+    try:
+        tmp = entry_path.with_suffix(entry_path.suffix + ".tmp")
+        tmp.write_text(new_text, encoding="utf-8")
+        os.replace(tmp, entry_path)
+    except OSError:
+        return False
+    return True
+
+
+def apply_reinforcement_counters(
+    packets: Sequence[EvidencePacket],
+    knowledge_dir_path: Path,
+) -> List[str]:
+    """Walk all proposals across all packets; for each with
+    ``salience_signal == "reinforces"`` and a valid ``existing_entry``
+    path inside ``knowledge_dir_path``, bump the counter.
+
+    Returns a list of human-readable change messages. Idempotent within
+    a single batch (each unique entry bumped once even if multiple
+    proposals reinforce it) — multiple separate batches will compound.
+    """
+    if not knowledge_dir_path.exists():
+        return []
+    root = knowledge_dir_path.resolve()
+    today = datetime.now(timezone.utc).date().isoformat()
+    changes: List[str] = []
+    bumped_paths: set[Path] = set()
+
+    for packet in packets:
+        for prop in packet.get("proposals") or []:
+            if not isinstance(prop, dict):
+                continue
+            if prop.get("salience_signal") != "reinforces":
+                continue
+            cited = prop.get("existing_entry")
+            if not isinstance(cited, str) or not cited:
+                continue
+            # Resolve relative to the knowledge dir; reject path traversal.
+            candidate = (root / cited).resolve()
+            try:
+                candidate.relative_to(root)
+            except ValueError:
+                log.warning(
+                    "apply_reinforcement_counters: rejected path outside "
+                    "knowledge dir: %s", cited,
+                )
+                continue
+            if candidate in bumped_paths:
+                continue  # dedupe within batch
+            if not candidate.exists():
+                log.debug(
+                    "apply_reinforcement_counters: existing_entry not found: %s",
+                    candidate.relative_to(root),
+                )
+                continue
+            if _bump_reinforced_counter(candidate, today_iso=today):
+                bumped_paths.add(candidate)
+                rel = candidate.relative_to(root)
+                changes.append(f"reinforced {rel}")
+    return changes
 
 
 # ── README reconciliation (deterministic bookkeeping) ──────────────────
