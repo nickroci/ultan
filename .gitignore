@@ -8,3 +8,6 @@ __pycache__/
 
 # Cloned at install time; not part of the repo
 prior-art/
+
+# Per-machine Claude Code hook config; written by /ultan-install
+.claude/
