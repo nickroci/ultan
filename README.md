@@ -2,6 +2,8 @@
 
 A personal memory system for coding agents. Built for Claude Code; lives outside any one session, project, or machine.
 
+> ⚠️ **Pre-alpha / experimental.** Under active development. Expect breaking changes and rough edges — feedback welcome.
+
 > *"Show me a man who has read all of the books of one of the major branches of knowledge — say, military history — and I'll show you a man more ignorant than the merest churl. For while he has read, others have written; and the body of available knowledge has grown so much faster than his understanding of it that he is, on balance, less learned at the end of his studies than at their beginning."*
 >
 > — Master Ultan, Gene Wolfe
