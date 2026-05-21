@@ -107,7 +107,7 @@ def _split_frontmatter(text: str) -> tuple[str, str]:
     m = _FRONTMATTER_RE.match(text)
     if not m:
         return "", text
-    return m.group(1), text[m.end():]
+    return m.group(1), text[m.end() :]
 
 
 def _strip_quotes(value: str) -> str:
@@ -181,7 +181,12 @@ def _parse_block_triggers(fm: str) -> list[dict[str, str]]:
 
         if not in_block:
             # Looking for the top-level key ``block_triggers:``.
-            if indent == 0 and stripped.rstrip().rstrip(":") == "block_triggers" and stripped.rstrip().endswith(":"):
+            stripped_r = stripped.rstrip()
+            if (
+                indent == 0
+                and stripped_r.rstrip(":") == "block_triggers"
+                and stripped_r.endswith(":")
+            ):
                 in_block = True
             continue
 
@@ -473,6 +478,6 @@ def rel_to_knowledge(entry_path: Path, knowledge_dir: Optional[Path] = None) -> 
     parts = entry_path.parts
     for i, part in enumerate(parts):
         if part == "knowledge" and i + 1 < len(parts):
-            tail = os.sep.join(parts[i + 1:])
+            tail = os.sep.join(parts[i + 1 :])
             return tail.removesuffix(".md")
     return entry_path.stem

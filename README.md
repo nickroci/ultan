@@ -77,7 +77,7 @@ The deliberate choice: deterministic-and-cheap text retrieval at always-on Tier 
 
 ```bash
 # 1. Sync the daemon's deps (uv-managed)
-cd daemon && uv sync --extra dev
+cd daemon && uv sync --group dev
 
 # 2. Sync the search CLI (separate venv, shared BM25 implementation)
 cd ../tools/search && uv sync

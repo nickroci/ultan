@@ -39,6 +39,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
+from _events import append_event  # noqa: E402
 from config import (  # noqa: E402
     CODE_ROOT,
     STATE_DIR,
@@ -46,8 +47,6 @@ from config import (  # noqa: E402
     ensure_store_dirs,
 )
 from scope import current_project_slug  # noqa: E402
-
-from _events import append_event  # noqa: E402
 
 ensure_store_dirs()
 
@@ -122,7 +121,7 @@ def main() -> None:
         try:
             hook_input: dict = json.loads(raw_input)
         except json.JSONDecodeError:
-            fixed_input = re.sub(r'(?<!\\)\\(?!["\\])', r'\\\\', raw_input)
+            fixed_input = re.sub(r'(?<!\\)\\(?!["\\])', r"\\\\", raw_input)
             hook_input = json.loads(fixed_input)
     except (json.JSONDecodeError, ValueError, EOFError) as e:
         logging.error("Failed to parse stdin: %s", e)

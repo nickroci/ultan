@@ -27,6 +27,7 @@ single source of truth lives in that module's docstring)::
 
 Blocks separated by another ``---``. The daemon appends; we read-and-clear.
 """
+
 from __future__ import annotations
 
 import json
@@ -36,7 +37,6 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-
 
 # PLAN §5 — pinned per-turn / per-session budgets.
 DEFAULT_PER_TURN_BUDGET = 1
@@ -74,6 +74,7 @@ def budget_state_path(session_id: str) -> Path:
 @dataclass(frozen=True)
 class Nudge:
     """One parsed nudge block."""
+
     id: str
     created: str
     lesson: str
@@ -116,12 +117,14 @@ def parse_nudges(body: str) -> List[Nudge]:
             i += 1
         text = "\n".join(body_lines).strip()
         if meta or text:
-            out.append(Nudge(
-                id=meta.get("id", ""),
-                created=meta.get("created", ""),
-                lesson=meta.get("lesson", ""),
-                text=text,
-            ))
+            out.append(
+                Nudge(
+                    id=meta.get("id", ""),
+                    created=meta.get("created", ""),
+                    lesson=meta.get("lesson", ""),
+                    text=text,
+                )
+            )
     return out
 
 
@@ -301,7 +304,10 @@ def render_context(nudges: List[Nudge]) -> str:
     """
     if not nudges:
         return ""
-    lines = [f"Memory has {len(nudges)} relevant lesson(s). Apply if relevant. The user has not been asked."]
+    lines = [
+        f"Memory has {len(nudges)} relevant lesson(s). "
+        "Apply if relevant. The user has not been asked."
+    ]
     for n in nudges:
         # One bullet per nudge: lesson path then the text.
         ref = f"[[{n.lesson}]]" if n.lesson else "(unknown lesson)"

@@ -17,10 +17,10 @@ the protocol is short enough that fakes wouldn't catch the half of
 the bugs we care about (handler not draining, accept loop hanging,
 etc).
 """
+
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import socket
 import struct
@@ -32,7 +32,7 @@ from typing import List, Optional
 
 import pytest
 
-from agent_mem_daemon import priming, priming_rpc
+from agent_mem_daemon import priming_rpc
 from agent_mem_daemon.priming_rpc import PrimingRpcThread
 
 
@@ -179,8 +179,9 @@ def _isolate_agent_mem_home(tmp_path, monkeypatch):
 # ── Wire helpers (mirror priming_rpc._send_message / _recv_message) ──
 
 
-def _send_request(socket_path: Path, request: dict, *, connect_timeout: float = 2.0,
-                   io_timeout: float = 2.0) -> dict:
+def _send_request(
+    socket_path: Path, request: dict, *, connect_timeout: float = 2.0, io_timeout: float = 2.0
+) -> dict:
     """Tiny test-only client. Returns the parsed JSON response.
 
     Intentionally re-implemented rather than calling priming_rpc's
@@ -240,12 +241,16 @@ def test_round_trip_returns_priming_markdown(tmp_path, rpc_server):
     _seed_library(tmp_path)
     _thread, socket_path = rpc_server
 
-    resp = _send_request(socket_path, {
-        "op": "priming",
-        "prompt": "we were debugging a python package install. tried pip and it broke. switching to uv.",
-        "k": 3,
-        "char_budget": 500,
-    }, io_timeout=30.0)
+    resp = _send_request(
+        socket_path,
+        {
+            "op": "priming",
+            "prompt": "we were debugging a python package install. tried pip and it broke. switching to uv.",
+            "k": 3,
+            "char_budget": 500,
+        },
+        io_timeout=30.0,
+    )
 
     assert resp["ok"] is True, resp
     assert "priming_md" in resp
@@ -345,9 +350,14 @@ def test_non_object_json_returns_error(tmp_path, rpc_server):
 def test_bad_k_returns_error(tmp_path, rpc_server):
     _thread, socket_path = rpc_server
 
-    resp = _send_request(socket_path, {
-        "op": "priming", "prompt": "x", "k": -1,
-    })
+    resp = _send_request(
+        socket_path,
+        {
+            "op": "priming",
+            "prompt": "x",
+            "k": -1,
+        },
+    )
     assert resp["ok"] is False
 
 
@@ -418,9 +428,14 @@ def test_handler_timeout_returns_error_not_hang(tmp_path, monkeypatch):
         # The client-side timeout is generous — we're verifying the
         # SERVER doesn't hang the connection past its own cap.
         try:
-            resp = _send_request(socket_path, {
-                "op": "priming", "prompt": "python uv",
-            }, io_timeout=3.0)
+            resp = _send_request(
+                socket_path,
+                {
+                    "op": "priming",
+                    "prompt": "python uv",
+                },
+                io_timeout=3.0,
+            )
         except (ConnectionError, socket.timeout):
             resp = None
         elapsed = time.monotonic() - t0
@@ -449,8 +464,9 @@ def test_concurrent_requests_all_serviced(tmp_path, rpc_server):
 
     def _client():
         try:
-            r = _send_request(socket_path, {"op": "priming", "prompt": "python uv"},
-                              io_timeout=30.0)
+            r = _send_request(
+                socket_path, {"op": "priming", "prompt": "python uv"}, io_timeout=30.0
+            )
             with lock:
                 results.append(r)
         except Exception as e:  # pragma: no cover - debugging aid

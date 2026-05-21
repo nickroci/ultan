@@ -17,6 +17,7 @@ Coverage:
   - Invariants checker runs after the SDK call and surfaces violations
     in the decisions counter.
 """
+
 from __future__ import annotations
 
 import json
@@ -27,6 +28,7 @@ from typing import List
 import pytest
 
 from agent_mem_daemon import scholar
+from agent_mem_daemon.runs import InvocationRecord
 
 
 @pytest.fixture(autouse=True)
@@ -53,6 +55,7 @@ def _packet(
 def _make_canned(response_text: str, cost: float = 0.01):
     def _stub(prompt, *, cwd, timeout_s):
         return response_text, cost
+
     return _stub
 
 
@@ -88,11 +91,13 @@ def test_review_runs_even_with_high_recorded_cost(monkeypatch):
     of accumulated spend."""
     from agent_mem_daemon import runs
 
-    runs.save_cost_state({
-        "today": runs._today_iso(),
-        "today_usd": 999.99,
-        "lifetime_usd": 999.99,
-    })
+    runs.save_cost_state(
+        {
+            "today": runs._today_iso(),
+            "today_usd": 999.99,
+            "lifetime_usd": 999.99,
+        }
+    )
 
     sdk_calls: List[int] = []
 
@@ -101,11 +106,13 @@ def test_review_runs_even_with_high_recorded_cost(monkeypatch):
         return json.dumps({"decisions": [], "interrupts_processed": []}), 0.01
 
     monkeypatch.setattr(scholar, "run_scholar_call", _stub)
-    scholar.review([
-        _packet("s1", proposals=[
-            {"action": "archive_entry", "path": "a.md", "reasoning": "stale"}
-        ])
-    ])
+    scholar.review(
+        [
+            _packet(
+                "s1", proposals=[{"action": "archive_entry", "path": "a.md", "reasoning": "stale"}]
+            )
+        ]
+    )
     assert sdk_calls == [1]
 
 
@@ -116,8 +123,7 @@ def test_review_happy_path_approve_populates_decisions(monkeypatch, tmp_path):
     canned = {
         "decisions": [
             {"action_index": 0, "decision": "approve", "veto_reason": ""},
-            {"action_index": 1, "decision": "veto",
-             "veto_reason": "thin evidence"},
+            {"action_index": 1, "decision": "veto", "veto_reason": "thin evidence"},
         ],
         "interrupts_processed": [
             {
@@ -136,11 +142,12 @@ def test_review_happy_path_approve_populates_decisions(monkeypatch, tmp_path):
         ],
     }
     monkeypatch.setattr(
-        scholar, "run_scholar_call",
+        scholar,
+        "run_scholar_call",
         _make_canned(json.dumps(canned), cost=0.03),
     )
 
-    records_finalised: List[object] = []
+    records_finalised: List[InvocationRecord] = []
     orig_finalise = scholar.runs.InvocationRecord.finalise
 
     def _spy(self):
@@ -149,19 +156,29 @@ def test_review_happy_path_approve_populates_decisions(monkeypatch, tmp_path):
 
     monkeypatch.setattr(scholar.runs.InvocationRecord, "finalise", _spy)
 
-    packets = [_packet(
-        "s1",
-        proposals=[
-            {"action": "write_entry", "path": "global/tooling/x.md",
-             "body": "x", "reasoning": "r1"},
-            {"action": "write_entry", "path": "global/tooling/y.md",
-             "body": "y", "reasoning": "r2"},
-        ],
-        interrupts=[
-            {"lesson_id": "factory-pattern-for-apis"},
-            {"lesson_id": "no-mock-db"},
-        ],
-    )]
+    packets = [
+        _packet(
+            "s1",
+            proposals=[
+                {
+                    "action": "write_entry",
+                    "path": "global/tooling/x.md",
+                    "body": "x",
+                    "reasoning": "r1",
+                },
+                {
+                    "action": "write_entry",
+                    "path": "global/tooling/y.md",
+                    "body": "y",
+                    "reasoning": "r2",
+                },
+            ],
+            interrupts=[
+                {"lesson_id": "factory-pattern-for-apis"},
+                {"lesson_id": "no-mock-db"},
+            ],
+        )
+    ]
     scholar.review(packets)
 
     assert len(records_finalised) == 1
@@ -202,19 +219,18 @@ def test_review_all_vetoes_no_files_written(monkeypatch, tmp_path):
     no entries written, and the audit row records veto counts."""
     canned = {
         "decisions": [
-            {"action_index": 0, "decision": "veto",
-             "veto_reason": "thin evidence"},
-            {"action_index": 1, "decision": "veto",
-             "veto_reason": "duplicate"},
+            {"action_index": 0, "decision": "veto", "veto_reason": "thin evidence"},
+            {"action_index": 1, "decision": "veto", "veto_reason": "duplicate"},
         ],
         "interrupts_processed": [],
     }
     monkeypatch.setattr(
-        scholar, "run_scholar_call",
+        scholar,
+        "run_scholar_call",
         _make_canned(json.dumps(canned), cost=0.02),
     )
 
-    records: List[object] = []
+    records: List[InvocationRecord] = []
     orig = scholar.runs.InvocationRecord.finalise
 
     def _spy(self):
@@ -223,10 +239,15 @@ def test_review_all_vetoes_no_files_written(monkeypatch, tmp_path):
 
     monkeypatch.setattr(scholar.runs.InvocationRecord, "finalise", _spy)
 
-    packets = [_packet("s-veto", proposals=[
-        {"action": "write_entry", "path": "global/a.md", "body": "x", "reasoning": "r"},
-        {"action": "write_entry", "path": "global/b.md", "body": "y", "reasoning": "r"},
-    ])]
+    packets = [
+        _packet(
+            "s-veto",
+            proposals=[
+                {"action": "write_entry", "path": "global/a.md", "body": "x", "reasoning": "r"},
+                {"action": "write_entry", "path": "global/b.md", "body": "y", "reasoning": "r"},
+            ],
+        )
+    ]
     scholar.review(packets)
 
     rec = records[0]
@@ -251,18 +272,21 @@ def test_review_runs_invariants_check_after_sdk(monkeypatch, tmp_path):
     (k / "global" / "tooling").mkdir(parents=True)
     for i in range(6):
         (k / "global" / "tooling" / f"e{i}.md").write_text(
-            "---\nid: e{}\n---\n# x\n".format(i), encoding="utf-8",
+            "---\nid: e{}\n---\n# x\n".format(i),
+            encoding="utf-8",
         )
 
-    canned = {"decisions": [
-        {"action_index": 0, "decision": "veto", "veto_reason": "n/a"}
-    ], "interrupts_processed": []}
+    canned = {
+        "decisions": [{"action_index": 0, "decision": "veto", "veto_reason": "n/a"}],
+        "interrupts_processed": [],
+    }
     monkeypatch.setattr(
-        scholar, "run_scholar_call",
+        scholar,
+        "run_scholar_call",
         _make_canned(json.dumps(canned), cost=0.01),
     )
 
-    records: List[object] = []
+    records: List[InvocationRecord] = []
     orig = scholar.runs.InvocationRecord.finalise
 
     def _spy(self):
@@ -271,9 +295,9 @@ def test_review_runs_invariants_check_after_sdk(monkeypatch, tmp_path):
 
     monkeypatch.setattr(scholar.runs.InvocationRecord, "finalise", _spy)
 
-    scholar.review([_packet("s1", proposals=[
-        {"action": "archive_entry", "path": "x.md", "reasoning": "r"}
-    ])])
+    scholar.review(
+        [_packet("s1", proposals=[{"action": "archive_entry", "path": "x.md", "reasoning": "r"}])]
+    )
 
     assert records[0].decisions.get("invariant_violations", 0) >= 1
 
@@ -285,11 +309,12 @@ def test_review_invariants_clean_does_not_log_violation(monkeypatch, tmp_path):
     # Empty tree — invariants checker returns [].
     canned = {"decisions": [], "interrupts_processed": []}
     monkeypatch.setattr(
-        scholar, "run_scholar_call",
+        scholar,
+        "run_scholar_call",
         _make_canned(json.dumps(canned), cost=0.01),
     )
 
-    records: List[object] = []
+    records: List[InvocationRecord] = []
     orig = scholar.runs.InvocationRecord.finalise
 
     def _spy(self):
@@ -298,9 +323,9 @@ def test_review_invariants_clean_does_not_log_violation(monkeypatch, tmp_path):
 
     monkeypatch.setattr(scholar.runs.InvocationRecord, "finalise", _spy)
 
-    scholar.review([_packet("s1", proposals=[
-        {"action": "archive_entry", "path": "x.md", "reasoning": "r"}
-    ])])
+    scholar.review(
+        [_packet("s1", proposals=[{"action": "archive_entry", "path": "x.md", "reasoning": "r"}])]
+    )
     assert "invariant_violations" not in records[0].decisions
 
 
@@ -310,9 +335,11 @@ def test_review_invariants_clean_does_not_log_violation(monkeypatch, tmp_path):
 def test_review_heterogeneous_session_id_marked_batch(monkeypatch):
     canned = {"decisions": [], "interrupts_processed": []}
     monkeypatch.setattr(
-        scholar, "run_scholar_call", _make_canned(json.dumps(canned)),
+        scholar,
+        "run_scholar_call",
+        _make_canned(json.dumps(canned)),
     )
-    records: List[object] = []
+    records: List[InvocationRecord] = []
     orig = scholar.runs.InvocationRecord.finalise
 
     def _spy(self):
@@ -321,14 +348,16 @@ def test_review_heterogeneous_session_id_marked_batch(monkeypatch):
 
     monkeypatch.setattr(scholar.runs.InvocationRecord, "finalise", _spy)
 
-    scholar.review([
-        _packet("s1", proposals=[
-            {"action": "archive_entry", "path": "a.md", "reasoning": "r"}
-        ]),
-        _packet("s2", proposals=[
-            {"action": "archive_entry", "path": "b.md", "reasoning": "r"}
-        ]),
-    ])
+    scholar.review(
+        [
+            _packet(
+                "s1", proposals=[{"action": "archive_entry", "path": "a.md", "reasoning": "r"}]
+            ),
+            _packet(
+                "s2", proposals=[{"action": "archive_entry", "path": "b.md", "reasoning": "r"}]
+            ),
+        ]
+    )
     assert records[0].session_id == "batch"
 
 
@@ -337,10 +366,11 @@ def test_review_heterogeneous_session_id_marked_batch(monkeypatch):
 
 def test_review_malformed_json_does_not_crash(monkeypatch, tmp_path, caplog):
     monkeypatch.setattr(
-        scholar, "run_scholar_call",
+        scholar,
+        "run_scholar_call",
         _make_canned("definitely not json at all"),
     )
-    records: List[object] = []
+    records: List[InvocationRecord] = []
     orig = scholar.runs.InvocationRecord.finalise
 
     def _spy(self):
@@ -350,9 +380,9 @@ def test_review_malformed_json_does_not_crash(monkeypatch, tmp_path, caplog):
     monkeypatch.setattr(scholar.runs.InvocationRecord, "finalise", _spy)
 
     caplog.set_level(logging.WARNING)
-    scholar.review([_packet("s1", proposals=[
-        {"action": "archive_entry", "path": "a.md", "reasoning": "r"}
-    ])])
+    scholar.review(
+        [_packet("s1", proposals=[{"action": "archive_entry", "path": "a.md", "reasoning": "r"}])]
+    )
     assert len(records) == 1
     assert records[0].parsed_ok is False
     assert not (tmp_path / "pending-nudges.md").exists()
@@ -365,9 +395,9 @@ def test_review_sdk_exception_is_swallowed(monkeypatch, tmp_path, caplog):
 
     monkeypatch.setattr(scholar, "run_scholar_call", _raise)
     caplog.set_level(logging.WARNING)
-    scholar.review([_packet("s1", proposals=[
-        {"action": "archive_entry", "path": "a.md", "reasoning": "r"}
-    ])])
+    scholar.review(
+        [_packet("s1", proposals=[{"action": "archive_entry", "path": "a.md", "reasoning": "r"}])]
+    )
 
 
 def test_review_sdk_timeout_is_swallowed(monkeypatch, tmp_path, caplog):
@@ -386,7 +416,8 @@ def test_review_sdk_timeout_is_swallowed(monkeypatch, tmp_path, caplog):
 
 
 def test_end_to_end_proposal_approved_writes_entry_to_knowledge_dir(
-    monkeypatch, tmp_path,
+    monkeypatch,
+    tmp_path,
 ):
     """Integration-flavoured: the Scholar's SDK call would normally use
     the Write tool to create the file. We simulate that by writing the
@@ -399,7 +430,8 @@ def test_end_to_end_proposal_approved_writes_entry_to_knowledge_dir(
     (tmp_path / "knowledge" / "README.md").write_text("# k\n", encoding="utf-8")
     (tmp_path / "knowledge" / "global" / "README.md").write_text("# g\n", encoding="utf-8")
     (tmp_path / "knowledge" / "global" / "tooling" / "README.md").write_text(
-        "# tooling\n", encoding="utf-8",
+        "# tooling\n",
+        encoding="utf-8",
     )
 
     full_entry = (
@@ -407,7 +439,7 @@ def test_end_to_end_proposal_approved_writes_entry_to_knowledge_dir(
         "status: provisional\nconfidence: 0.7\n"
         "applies-when: |\n  testing a service with a factory\n"
         "keywords: [test, stub, factory]\n"
-        "title: \"Stub the factory\"\n"
+        'title: "Stub the factory"\n'
         "created: 2026-05-19\nupdated: 2026-05-19\n"
         "fired: 0\nfired-helpful: 0\nsources:\n  - manual\n"
         "---\n\n# Stub the factory\nBody.\n"
@@ -417,16 +449,14 @@ def test_end_to_end_proposal_approved_writes_entry_to_knowledge_dir(
         # Simulate the Scholar's Write tool call.
         target_path.write_text(full_entry, encoding="utf-8")
         canned = {
-            "decisions": [
-                {"action_index": 0, "decision": "approve", "veto_reason": ""}
-            ],
+            "decisions": [{"action_index": 0, "decision": "approve", "veto_reason": ""}],
             "interrupts_processed": [],
         }
         return json.dumps(canned), 0.01
 
     monkeypatch.setattr(scholar, "run_scholar_call", _stub_writes_file)
 
-    records: List[object] = []
+    records: List[InvocationRecord] = []
     orig = scholar.runs.InvocationRecord.finalise
 
     def _spy(self):
@@ -435,14 +465,21 @@ def test_end_to_end_proposal_approved_writes_entry_to_knowledge_dir(
 
     monkeypatch.setattr(scholar.runs.InvocationRecord, "finalise", _spy)
 
-    scholar.review([_packet("s1", proposals=[
-        {
-            "action": "write_entry",
-            "path": "global/tooling/stub-the-factory.md",
-            "body": full_entry,
-            "reasoning": "buffer turn [2]",
-        }
-    ])])
+    scholar.review(
+        [
+            _packet(
+                "s1",
+                proposals=[
+                    {
+                        "action": "write_entry",
+                        "path": "global/tooling/stub-the-factory.md",
+                        "body": full_entry,
+                        "reasoning": "buffer turn [2]",
+                    }
+                ],
+            )
+        ]
+    )
 
     assert target_path.exists()
     assert records[0].decisions.get("approve") == 1

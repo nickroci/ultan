@@ -12,6 +12,7 @@ Lifecycle:
   5. Spin up the scheduler + tailer.
   6. Run until stopped, then drain the Scholar queue + clean up.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -21,18 +22,14 @@ import os
 import signal
 import sys
 import threading
-import time
 from pathlib import Path
 
-from .buffer import RollingBuffer, DEFAULT_INACTIVITY_SECONDS, DEFAULT_MAX_TURNS
-from .ingest import JsonlTailer, DEFAULT_POLL_INTERVAL
+from .buffer import DEFAULT_INACTIVITY_SECONDS, DEFAULT_MAX_TURNS, RollingBuffer
+from .ingest import DEFAULT_POLL_INTERVAL, JsonlTailer
 from .logging_setup import configure as configure_logging
 from .paths import ensure_home, events_path, log_path, offset_state_path, pid_path
 from .priming_rpc import PrimingRpcThread
 from .scheduler import (
-    Scheduler,
-    SchedulerConfig,
-    TailerThread,
     DEFAULT_LIBRARIAN_CONCURRENCY,
     DEFAULT_LIBRARIAN_DEBOUNCE_SECS,
     DEFAULT_QUEUE_CEILING,
@@ -41,8 +38,10 @@ from .scheduler import (
     DEFAULT_SCHOLAR_MAX_BATCH,
     DEFAULT_SESSION_END_DEBOUNCE_SECS,
     DEFAULT_SWEEP_INTERVAL_SECS,
+    Scheduler,
+    SchedulerConfig,
+    TailerThread,
 )
-
 
 # ---- PID file -------------------------------------------------------
 
@@ -120,8 +119,8 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=True,
         help="Run in the foreground (default; the only mode in v1). "
-             "Kept as an explicit flag so future launchd/background "
-             "modes can land without breaking invocations.",
+        "Kept as an explicit flag so future launchd/background "
+        "modes can land without breaking invocations.",
     )
     p.add_argument(
         "--events-file",
@@ -254,12 +253,14 @@ def _prewarm_indexes(knowledge_dir: Path, log: logging.Logger) -> None:
         return
     try:
         from bm25 import load_or_build as bm25_load
+
         idx = bm25_load(knowledge_dir)
         log.info("startup: bm25 index ready (%d docs)", len(idx.docs))
     except Exception:
         log.exception("startup: bm25 prewarm failed (lazy rebuild on first use)")
     try:
         from embeddings import load_or_build as emb_load
+
         idx = emb_load(knowledge_dir)
         log.info("startup: embedding index ready (%d docs)", len(idx.docs))
     except Exception:
@@ -304,6 +305,7 @@ def run(args: argparse.Namespace) -> int:
     # restore from backup); logs "ready (N docs)" otherwise. Failures
     # fail-soft — first retrieval rebuilds.
     from .paths import knowledge_dir as _knowledge_dir
+
     _prewarm_indexes(_knowledge_dir(), log)
 
     stop_event = threading.Event()

@@ -54,8 +54,8 @@ if str(_SCRIPTS_DIR) not in sys.path:
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-from _events import append_event  # noqa: E402
 from _blockers import find_match, load_blockers, rel_to_knowledge  # noqa: E402
+from _events import append_event  # noqa: E402
 
 
 def _knowledge_dir() -> Path:
@@ -129,13 +129,17 @@ def main() -> None:
                 f"[[{wiki}]] - {rule} "
                 f"Confirm with the user before retrying."
             )
-            sys.stdout.write(json.dumps({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": reason,
-                }
-            }))
+            sys.stdout.write(
+                json.dumps(
+                    {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": reason,
+                        }
+                    }
+                )
+            )
             sys.stdout.flush()
             decision_payload["blocked"] = True
             decision_payload["severity"] = "block"
@@ -146,16 +150,17 @@ def main() -> None:
             # system reminder via additionalContext and decides what
             # to do. Like a human noticing a relevant memory mid-action
             # — not paralysing, just informing.
-            notice = (
-                f"📚 Library note (FYI; agent decides): "
-                f"[[{wiki}]] applies here — {rule}"
+            notice = f"📚 Library note (FYI; agent decides): [[{wiki}]] applies here — {rule}"
+            sys.stdout.write(
+                json.dumps(
+                    {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "additionalContext": notice,
+                        }
+                    }
+                )
             )
-            sys.stdout.write(json.dumps({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "additionalContext": notice,
-                }
-            }))
             sys.stdout.flush()
             decision_payload["blocked"] = False
             decision_payload["severity"] = "advise"

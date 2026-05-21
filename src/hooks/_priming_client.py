@@ -29,6 +29,7 @@ We deliberately don't import the daemon's ``priming`` module — the
 hook lives in a separate uv project root (``src/``) with no path dep
 on the daemon. Mirroring the renderer here keeps the boundary clean.
 """
+
 from __future__ import annotations
 
 import json
@@ -39,7 +40,6 @@ import struct
 import time
 from pathlib import Path
 from typing import List, Optional, Tuple
-
 
 # ── Tunables ─────────────────────────────────────────────────────────
 
@@ -75,9 +75,7 @@ def _knowledge_dir() -> Path:
 # ── Wire helpers ─────────────────────────────────────────────────────
 
 
-def _send_request(
-    socket_path: Path, request: dict, *, total_budget_ms: int
-) -> Optional[dict]:
+def _send_request(socket_path: Path, request: dict, *, total_budget_ms: int) -> Optional[dict]:
     """One-shot length-prefixed JSON exchange. Returns parsed response
     or ``None`` on any failure (timeout, refused, closed, bad JSON).
 
@@ -124,8 +122,14 @@ def _send_request(
             return json.loads(buf.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             return None
-    except (FileNotFoundError, ConnectionRefusedError, ConnectionResetError,
-            BrokenPipeError, socket.timeout, OSError):
+    except (
+        FileNotFoundError,
+        ConnectionRefusedError,
+        ConnectionResetError,
+        BrokenPipeError,
+        socket.timeout,
+        OSError,
+    ):
         return None
     finally:
         try:
@@ -145,7 +149,8 @@ _HEADER = "## Ultan — your library says (cite or follow when applicable)"
 _FOOTER = (
     "*Wikilinks resolve to real entries. Use the `ultan-search` skill to read one "
     "(returns content + sibling entries + subfolders + parent README so you can traverse), "
-    "or `/ultan-advisor <question>` to have Sonnet + Opus intelligently synthesise across multiple entries.*"
+    "or `/ultan-advisor <question>` to have Sonnet + Opus intelligently synthesise "
+    "across multiple entries.*"
 )
 
 
@@ -259,10 +264,14 @@ def _summary(fm: dict, path: Path) -> str:
 
 
 def _local_priming(
-    prompt: str, *, k: int, char_budget: int, knowledge_dir: Optional[Path] = None,
+    prompt: str,
+    *,
+    k: int,
+    char_budget: int,
+    knowledge_dir: Optional[Path] = None,
 ) -> str:
     """Pure-stdlib token-overlap rank. Returns rendered markdown or ""."""
-    kdir = (knowledge_dir or _knowledge_dir())
+    kdir = knowledge_dir or _knowledge_dir()
     if not kdir.exists():
         return ""
 
@@ -285,7 +294,7 @@ def _local_priming(
         body = text
         if m:
             fm = _parse_yaml_lite(m.group(1))
-            body = text[m.end():]
+            body = text[m.end() :]
         doc_tokens = set(_tokenize(body))
         # Add keywords + applies-when to the token bag (mirrors bm25's
         # search-relevant frontmatter extraction).

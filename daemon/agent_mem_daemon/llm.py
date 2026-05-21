@@ -135,8 +135,8 @@ def _check_and_repair_writes(
     if not hits:
         return "allow", tool_input, ""
 
-    repairs: list[tuple[str, str]] = []   # (broken, fixed)
-    unresolvable: list[str] = []          # broken with no auto-fix
+    repairs: list[tuple[str, str]] = []  # (broken, fixed)
+    unresolvable: list[str] = []  # broken with no auto-fix
 
     for hit in hits:
         link = hit.target
@@ -156,7 +156,8 @@ def _check_and_repair_writes(
         repair_note = ""
         if repairs:
             repair_note = (
-                " (note: " + ", ".join(f"[[{b}]] → [[{f}]]" for b, f in repairs)
+                " (note: "
+                + ", ".join(f"[[{b}]] → [[{f}]]" for b, f in repairs)
                 + " would auto-resolve, but the unresolvable links above also "
                 "need to be corrected before the write can proceed)"
             )
@@ -191,9 +192,7 @@ def _rewrite_link_in_text(text: str, broken: str, fixed: str) -> str:
     # Match `[[broken]]` or `[[broken|alias]]` or `[[broken.md]]` (with
     # alias). Escape the broken target for regex use.
     escaped = _re.escape(broken)
-    pattern = _re.compile(
-        r"\[\[" + escaped + r"(?:\.md)?(\|[^\[\]]*)?\]\]"
-    )
+    pattern = _re.compile(r"\[\[" + escaped + r"(?:\.md)?(\|[^\[\]]*)?\]\]")
     return pattern.sub(lambda m: f"[[{fixed}{m.group(1) or ''}]]", text)
 
 
@@ -296,14 +295,17 @@ def _make_path_guard(boundary: Path, *, allow_writes: bool, check_wikilinks: boo
         # the post-write validator only logged about.
         if check_wikilinks and tool_name in WRITE_TOOLS:
             status, payload, info = _check_and_repair_writes(
-                tool_name, tool_input, root,
+                tool_name,
+                tool_input,
+                root,
             )
             if status == "deny":
                 return PermissionResultDeny(message=info)
             if status == "allow_with_repair":
                 log.warning(
                     "path guard: auto-repaired broken wikilinks in %s: %s",
-                    tool_input.get("file_path"), info,
+                    tool_input.get("file_path"),
+                    info,
                 )
                 return PermissionResultAllow(updated_input=payload)
             # status == "allow" — fall through to the default Allow.
@@ -377,6 +379,7 @@ async def _drain_query(
 def _run_with_timeout(coro, timeout_s: float):
     """Wrap a coroutine in ``asyncio.run`` with a timeout. Raises
     LLMTimeout on expiry."""
+
     async def _wrapped():
         try:
             return await asyncio.wait_for(coro, timeout=timeout_s)
@@ -414,6 +417,7 @@ def run_librarian_call(
     """
     # Lazy import so daemon startup doesn't require the SDK to be present.
     from claude_agent_sdk import ClaudeAgentOptions
+
     from . import library_tools
 
     librarian_tools = ["Read", "Glob", "Grep"]
@@ -453,7 +457,9 @@ def run_librarian_call(
     options = ClaudeAgentOptions(**opts)
     log.debug(
         "librarian SDK call: model=%s cwd=%s prompt_chars=%d",
-        model, cwd, len(prompt),
+        model,
+        cwd,
+        len(prompt),
     )
     return _run_with_timeout(_drain_query(prompt, options), timeout_s)
 
@@ -477,6 +483,7 @@ def run_scholar_call(
     caller logs and skips the batch.
     """
     from claude_agent_sdk import ClaudeAgentOptions
+
     from . import library_tools
 
     # Scholar's cwd is the agent-mem home (so prompt-relative paths like
@@ -495,7 +502,11 @@ def run_scholar_call(
         cwd=str(cwd),
         system_prompt={"type": "preset", "preset": "claude_code"},
         allowed_tools=[
-            "Read", "Write", "Edit", "Glob", "Grep",
+            "Read",
+            "Write",
+            "Edit",
+            "Glob",
+            "Grep",
             library_tools.fully_qualified_move_name(),
         ],
         mcp_servers=mcp_servers,
@@ -507,11 +518,15 @@ def run_scholar_call(
         # Stops the "Scholar edits the wrong store" class of bug at
         # the SDK layer, independent of whatever the prompt says.
         can_use_tool=_make_path_guard(
-            boundary, allow_writes=True, check_wikilinks=True,
+            boundary,
+            allow_writes=True,
+            check_wikilinks=True,
         ),
     )
     log.debug(
         "scholar SDK call: model=%s cwd=%s prompt_chars=%d",
-        model, cwd, len(prompt),
+        model,
+        cwd,
+        len(prompt),
     )
     return _run_with_timeout(_drain_query(prompt, options), timeout_s)

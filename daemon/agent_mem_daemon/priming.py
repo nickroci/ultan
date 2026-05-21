@@ -39,6 +39,7 @@ Design notes:
     lazily inside the function so a missing/broken bm25 install never
     breaks daemon startup — same defensive style as ``library_tools.py``.
 """
+
 from __future__ import annotations
 
 import logging
@@ -46,8 +47,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
-
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 log = logging.getLogger("agent_mem_daemon.priming")
 
@@ -59,7 +59,8 @@ _HEADER = "## Ultan — your library says (cite or follow when applicable)"
 _FOOTER = (
     "*Wikilinks resolve to real entries. Use the `ultan-search` skill to read one "
     "(returns content + sibling entries + subfolders + parent README so you can traverse), "
-    "or `/ultan-advisor <question>` to have Sonnet + Opus intelligently synthesise across multiple entries.*"
+    "or `/ultan-advisor <question>` to have Sonnet + Opus intelligently "
+    "synthesise across multiple entries.*"
 )
 
 
@@ -119,11 +120,13 @@ def _shorten(text: str, *, max_chars: int = 80) -> str:
 
 def _reinforced_count(fm: Dict[str, Any]) -> int:
     raw = fm.get("reinforced")
+    if raw is None:
+        return 0
     try:
         n = int(raw)
-        return n if n > 0 else 0
     except (TypeError, ValueError):
         return 0
+    return n if n > 0 else 0
 
 
 def _entry_summary(fm: Dict[str, Any], path: Path) -> str:
@@ -157,7 +160,7 @@ def _wikilink_path(entry: Path, knowledge_dir: Path) -> str:
 # ── Buffer-text extraction (the input for BM25) ──────────────────────
 
 
-def extract_buffer_text(packets: Iterable[Dict[str, Any]]) -> str:
+def extract_buffer_text(packets: Iterable[Mapping[str, Any]]) -> str:
     """Flatten the Scholar's incoming packets back into plain text for
     BM25 to chew on.
 
@@ -200,8 +203,14 @@ def _collect_strings(obj: Any) -> List[str]:
     don't dilute the BM25 query with UUIDs and integers cast to str.
     """
     skip_keys = {
-        "_action_index", "action", "action_index", "session_id",
-        "lesson_id", "lesson_path", "match_score", "librarian_confidence",
+        "_action_index",
+        "action",
+        "action_index",
+        "session_id",
+        "lesson_id",
+        "lesson_path",
+        "match_score",
+        "librarian_confidence",
         "turn_id",
     }
     out: List[str] = []
@@ -310,11 +319,7 @@ def _embedding_search(
     # produce scores in the 0.02-0.05 range; genuine paraphrase
     # matches sit at 0.4+.
     EMBEDDING_NOISE_FLOOR = 0.25
-    return [
-        (Path(h.path), float(h.score))
-        for h in hits
-        if float(h.score) >= EMBEDDING_NOISE_FLOOR
-    ]
+    return [(Path(h.path), float(h.score)) for h in hits if float(h.score) >= EMBEDDING_NOISE_FLOOR]
 
 
 def _rrf_merge(
@@ -448,19 +453,11 @@ def _assemble_output(
 
     sliced = ranked[:top_k]
 
-    # Budget accounting: header + blank + bullets + blank + footer.
-    overhead = len(_HEADER) + 2 + 2 + len(_FOOTER)
-    body_budget = max(0, char_budget - overhead)
-
     def _join(bullets: List[str]) -> str:
         return f"{_HEADER}\n\n" + "\n".join(bullets) + f"\n\n{_FOOTER}\n"
 
     # Attempt 1: full bullets, all top_k.
-    bullets = [
-        b for b in (
-            _render_bullet(p, r, knowledge_dir) for p, _score, r in sliced
-        ) if b
-    ]
+    bullets = [b for b in (_render_bullet(p, r, knowledge_dir) for p, _score, r in sliced) if b]
     if not bullets:
         return ""
     full = _join(bullets)
@@ -469,10 +466,9 @@ def _assemble_output(
 
     # Attempt 2: title-only bullets.
     bullets_terse = [
-        b for b in (
-            _render_bullet(p, r, knowledge_dir, title_only=True)
-            for p, _score, r in sliced
-        ) if b
+        b
+        for b in (_render_bullet(p, r, knowledge_dir, title_only=True) for p, _score, r in sliced)
+        if b
     ]
     terse = _join(bullets_terse)
     if len(terse) <= char_budget:
@@ -533,7 +529,8 @@ def refresh_hot_context(
             return None
 
         hits = _hybrid_search(
-            knowledge_dir, rolling_buffer_text,
+            knowledge_dir,
+            rolling_buffer_text,
             # Pull a few extras so the reinforcement boost can promote a
             # low-BM25-but-heavily-reinforced entry into the top_k.
             k=max(top_k * 2, top_k + 3),
@@ -548,8 +545,10 @@ def refresh_hot_context(
 
         ranked = _boost_with_reinforcement(hits)
         body = _assemble_output(
-            ranked, knowledge_dir,
-            top_k=top_k, char_budget=char_budget,
+            ranked,
+            knowledge_dir,
+            top_k=top_k,
+            char_budget=char_budget,
         )
         if not body:
             return None

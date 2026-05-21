@@ -15,13 +15,16 @@ The SDK exposes each tool to the model as
 ``mcp__<server_name>__<tool_name>``. ``allowed_tools`` entries in
 llm.py whitelist the canonical names.
 """
+
 from __future__ import annotations
 
 import logging
 import re
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List
 
+if TYPE_CHECKING:
+    from claude_agent_sdk.types import McpServerConfig
 
 log = logging.getLogger("agent_mem_daemon.library_tools")
 
@@ -46,7 +49,7 @@ def fully_qualified_tool_name() -> str:
     return fully_qualified_bm25_name()
 
 
-def make_library_mcp_server(knowledge_dir: Path):
+def make_library_mcp_server(knowledge_dir: Path) -> McpServerConfig:
     """Build and return an SDK MCP server config exposing BM25 search.
 
     Returns the value to pass into ``ClaudeAgentOptions.mcp_servers``
@@ -78,52 +81,30 @@ def make_library_mcp_server(knowledge_dir: Path):
         except (TypeError, ValueError):
             k = 5
         if not query:
-            return {
-                "content": [
-                    {"type": "text", "text": "(bm25_search: empty query)"}
-                ]
-            }
+            return {"content": [{"type": "text", "text": "(bm25_search: empty query)"}]}
 
         try:
             from bm25 import load_or_build  # provided by agent-mem-search
         except ImportError as e:
             log.warning("bm25 package not importable: %s", e)
-            return {
-                "content": [
-                    {"type": "text", "text": "(bm25 backend unavailable)"}
-                ]
-            }
+            return {"content": [{"type": "text", "text": "(bm25 backend unavailable)"}]}
 
         if not root.exists():
             return {
-                "content": [
-                    {"type": "text", "text": "(library is empty — no entries to search)"}
-                ]
+                "content": [{"type": "text", "text": "(library is empty — no entries to search)"}]
             }
 
         try:
             index = load_or_build(root)
         except FileNotFoundError:
-            return {
-                "content": [
-                    {"type": "text", "text": "(library has no entries yet)"}
-                ]
-            }
+            return {"content": [{"type": "text", "text": "(library has no entries yet)"}]}
         except Exception as e:
             log.exception("bm25 index load/build failed")
-            return {
-                "content": [
-                    {"type": "text", "text": f"(bm25 backend error: {e})"}
-                ]
-            }
+            return {"content": [{"type": "text", "text": f"(bm25 backend error: {e})"}]}
 
         hits = index.search(query, k=max(1, min(20, k)))
         if not hits:
-            return {
-                "content": [
-                    {"type": "text", "text": f"(no results for {query!r})"}
-                ]
-            }
+            return {"content": [{"type": "text", "text": f"(no results for {query!r})"}]}
 
         lines = [
             f"{Path(p).relative_to(root) if Path(p).is_absolute() else p}  "
@@ -206,9 +187,7 @@ def _safe_inside(root: Path, candidate: Path) -> bool:
     return True
 
 
-def _rewrite_wikilinks_in_text(
-    text: str, mapping: Dict[str, str]
-) -> tuple[str, int]:
+def _rewrite_wikilinks_in_text(text: str, mapping: Dict[str, str]) -> tuple[str, int]:
     """Rewrite every [[link]]/[[link|alias]] whose target matches a key
     in ``mapping`` to the corresponding value. Preserves the alias.
     Returns (new_text, rewrites_count)."""
@@ -235,6 +214,7 @@ def _move_entries_impl(root: Path, args: Dict[str, Any]) -> Dict[str, Any]:
     everywhere in the library, and returns a textual summary the LLM
     can read.
     """
+
     def err(msg: str) -> Dict[str, Any]:
         return {"content": [{"type": "text", "text": f"(move_entries error) {msg}"}]}
 
@@ -299,9 +279,7 @@ def _move_entries_impl(root: Path, args: Dict[str, Any]) -> Dict[str, Any]:
             return err(f"could not read {src.relative_to(root)}: {e}")
         dst.write_text(content, encoding="utf-8")
         src.unlink()
-        moved_paths.append(
-            f"{src.relative_to(root)} → {dst.relative_to(root)}"
-        )
+        moved_paths.append(f"{src.relative_to(root)} → {dst.relative_to(root)}")
 
     # Rewrite inbound wikilinks across the whole library.
     rewrite_summary: List[str] = []
@@ -324,9 +302,10 @@ def _move_entries_impl(root: Path, args: Dict[str, Any]) -> Dict[str, Any]:
     lines.append(f"  moved {len(moved_paths)} file(s):")
     for m in moved_paths:
         lines.append(f"    - {m}")
-    lines.append(f"  rewrote {total_rewrites} inbound wikilink(s)" + (
-        ":" if rewrite_summary else " (no inbound links found)"
-    ))
+    lines.append(
+        f"  rewrote {total_rewrites} inbound wikilink(s)"
+        + (":" if rewrite_summary else " (no inbound links found)")
+    )
     for r in rewrite_summary:
         lines.append(f"    - {r}")
     return {"content": [{"type": "text", "text": "\n".join(lines)}]}

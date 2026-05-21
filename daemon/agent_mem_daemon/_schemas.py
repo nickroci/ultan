@@ -21,6 +21,7 @@ Discipline:
   ``Field(discriminator=...)``). Unknown action strings are rejected at
   parse time so the Scholar never sees a phantom action type.
 """
+
 from __future__ import annotations
 
 import json
@@ -28,7 +29,6 @@ from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing_extensions import Annotated
-
 
 # ── Common building blocks (kept for backward compat: the Librarian's
 # interrupt path is unchanged and tests for the response_parser may still
@@ -116,7 +116,10 @@ class WriteEntry(_BaseAction):
     approving."""
 
     action: Literal["write_entry"] = "write_entry"
-    path: str = Field(default="", description="Target path for the new entry, relative to knowledge/.")
+    path: str = Field(
+        default="",
+        description="Target path for the new entry, relative to knowledge/.",
+    )
     body: str = Field(default="", description="Full markdown body including frontmatter.")
 
 
@@ -126,7 +129,10 @@ class UpdateEntry(_BaseAction):
 
     action: Literal["update_entry"] = "update_entry"
     path: str = Field(default="", description="Existing entry path, relative to knowledge/.")
-    new_body: str = Field(default="", description="Full replacement markdown body (frontmatter + body).")
+    new_body: str = Field(
+        default="",
+        description="Full replacement markdown body (frontmatter + body).",
+    )
 
 
 class MergeEntries(_BaseAction):
@@ -141,7 +147,7 @@ class MergeEntries(_BaseAction):
     action: Literal["merge_entries"] = "merge_entries"
     source_paths: List[str] = Field(
         default_factory=list,
-        description="List of existing entry paths (relative to knowledge/) to merge and archive.",
+        description=("List of existing entry paths (relative to knowledge/) to merge and archive."),
     )
     target_path: str = Field(default="", description="Where the merged entry should live.")
     target_body: str = Field(default="", description="Full markdown body of the merged result.")
@@ -189,8 +195,14 @@ class DeprecateEntry(_BaseAction):
     entry is wrong, irrelevant, or has no successor."""
 
     action: Literal["deprecate_entry"] = "deprecate_entry"
-    path: str = Field(default="", description="Older entry to deprecate, relative to knowledge/.")
-    superseded_by: str = Field(default="", description="Newer entry path that supersedes this one, relative to knowledge/.")
+    path: str = Field(
+        default="",
+        description="Older entry to deprecate, relative to knowledge/.",
+    )
+    superseded_by: str = Field(
+        default="",
+        description=("Newer entry path that supersedes this one, relative to knowledge/."),
+    )
 
 
 class UpdateReadme(_BaseAction):
@@ -200,8 +212,16 @@ class UpdateReadme(_BaseAction):
     or ``""`` for the root README)."""
 
     action: Literal["update_readme"] = "update_readme"
-    folder_path: str = Field(default="", description='Folder path relative to knowledge/, or "" for the root README.')
-    new_body: str = Field(default="", description="Prose only — daemon auto-maintains the child listing below the marker comments.")
+    folder_path: str = Field(
+        default="",
+        description=('Folder path relative to knowledge/, or "" for the root README.'),
+    )
+    new_body: str = Field(
+        default="",
+        description=(
+            "Prose only — daemon auto-maintains the child listing below the marker comments."
+        ),
+    )
 
 
 class AddWikilink(_BaseAction):
@@ -212,8 +232,14 @@ class AddWikilink(_BaseAction):
     is relevant (rendered alongside the link itself)."""
 
     action: Literal["add_wikilink"] = "add_wikilink"
-    from_path: str = Field(default="", description="Entry whose Related section gets the new link (relative to knowledge/).")
-    to_path: str = Field(default="", description="Target entry path (relative to knowledge/).")
+    from_path: str = Field(
+        default="",
+        description=("Entry whose Related section gets the new link (relative to knowledge/)."),
+    )
+    to_path: str = Field(
+        default="",
+        description="Target entry path (relative to knowledge/).",
+    )
     context: str = Field(default="", description="One-sentence why the link is relevant.")
 
 
@@ -226,10 +252,16 @@ class SplitFolder(_BaseAction):
     subfolder."""
 
     action: Literal["split_folder"] = "split_folder"
-    folder_path: str = Field(default="", description="Folder to restructure, relative to knowledge/.")
+    folder_path: str = Field(
+        default="",
+        description="Folder to restructure, relative to knowledge/.",
+    )
     into: Dict[str, List[str]] = Field(
         default_factory=dict,
-        description="Mapping of new subfolder name → list of entry paths (relative to knowledge/) to move into it.",
+        description=(
+            "Mapping of new subfolder name → list of entry paths "
+            "(relative to knowledge/) to move into it."
+        ),
     )
 
 
@@ -264,9 +296,18 @@ class LibrarianInterrupt(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    lesson_id: Optional[str] = Field(default=None, description="Frontmatter `id` from the applies-when table.")
-    lesson_path: Optional[str] = Field(default=None, description="Path of the matched lesson, relative to knowledge/.")
-    matching_applies_when: Optional[str] = Field(default=None, description="The exact applies-when phrase that matched the buffer.")
+    lesson_id: Optional[str] = Field(
+        default=None,
+        description="Frontmatter `id` from the applies-when table.",
+    )
+    lesson_path: Optional[str] = Field(
+        default=None,
+        description="Path of the matched lesson, relative to knowledge/.",
+    )
+    matching_applies_when: Optional[str] = Field(
+        default=None,
+        description="The exact applies-when phrase that matched the buffer.",
+    )
     evidence: List[EvidenceItem] = Field(
         default_factory=list,
         description=(
@@ -274,8 +315,14 @@ class LibrarianInterrupt(BaseModel):
             "{turn_id, role, quote}. Emit at least one verbatim turn quote."
         ),
     )
-    match_score: Optional[float] = Field(default=None, description="0.0 to 1.0 — how strongly the buffer matched the applies-when phrase.")
-    librarian_confidence: Optional[float] = Field(default=None, description="0.0 to 1.0 — how confident the Librarian is this is worth interrupting on.")
+    match_score: Optional[float] = Field(
+        default=None,
+        description=("0.0 to 1.0 — how strongly the buffer matched the applies-when phrase."),
+    )
+    librarian_confidence: Optional[float] = Field(
+        default=None,
+        description=("0.0 to 1.0 — how confident the Librarian is this is worth interrupting on."),
+    )
 
     @field_validator("evidence", mode="before")
     @classmethod

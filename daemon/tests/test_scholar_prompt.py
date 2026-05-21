@@ -1,15 +1,13 @@
 """Tests for the Scholar prompt assembly + JSON parsing + nudge writing
 + hierarchy invariants checker."""
+
 from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
-
 from agent_mem_daemon import scholar_prompt
-
 
 # ── prompt assembly ───────────────────────────────────────────────────
 
@@ -42,9 +40,16 @@ def test_build_prompt_includes_proposals_and_library_snapshot():
     assert "VETO" in prompt
     assert "FINAL OUTPUT" in prompt
     # Action vocabulary must be present.
-    for action in ("write_entry", "merge_entries", "split_folder",
-                   "archive_entry", "add_wikilink", "update_readme",
-                   "move_entry", "update_entry"):
+    for action in (
+        "write_entry",
+        "merge_entries",
+        "split_folder",
+        "archive_entry",
+        "add_wikilink",
+        "update_readme",
+        "move_entry",
+        "update_entry",
+    ):
         assert action in prompt, f"action {action!r} missing from Scholar prompt"
 
 
@@ -69,7 +74,8 @@ def test_build_prompt_annotates_action_indices():
         },
     ]
     prompt = scholar_prompt.build_prompt(
-        packets, library_snapshot="(empty)",
+        packets,
+        library_snapshot="(empty)",
     )
     # Flat indexing across packets: 0, 1, 2.
     assert '"_action_index": 0' in prompt
@@ -87,15 +93,18 @@ def test_build_prompt_handles_empty_proposals():
 
 
 def test_parse_response_plain_json():
-    text = json.dumps({
-        "decisions": [
-            {"action_index": 0, "decision": "approve", "veto_reason": ""},
-            {"action_index": 1, "decision": "veto", "veto_reason": "thin evidence"},
-        ],
-        "interrupts_processed": [],
-    })
+    text = json.dumps(
+        {
+            "decisions": [
+                {"action_index": 0, "decision": "approve", "veto_reason": ""},
+                {"action_index": 1, "decision": "veto", "veto_reason": "thin evidence"},
+            ],
+            "interrupts_processed": [],
+        }
+    )
     parsed, ok = scholar_prompt.parse_response(text)
     assert ok is True
+    assert parsed is not None
     assert parsed["decisions"][0]["decision"] == "approve"
     assert parsed["decisions"][1]["decision"] == "veto"
     assert parsed["decisions"][1]["veto_reason"] == "thin evidence"
@@ -110,9 +119,10 @@ def test_parse_response_fenced_json():
 
 
 def test_parse_response_trailing_object_fallback():
-    text = "Prose blathering ...\n{\"decisions\": [], \"interrupts_processed\": []}"
+    text = 'Prose blathering ...\n{"decisions": [], "interrupts_processed": []}'
     parsed, ok = scholar_prompt.parse_response(text)
     assert ok is True
+    assert parsed is not None
     assert parsed["decisions"] == []
 
 
@@ -132,10 +142,12 @@ def test_parse_response_unknown_decision_rejected_via_default():
     """Pydantic literal: any decision other than 'approve'/'veto' falls
     back to the default ('veto'). Better to drop than to silently
     approve."""
-    text = json.dumps({
-        "decisions": [{"action_index": 0, "decision": "maybe"}],
-        "interrupts_processed": [],
-    })
+    text = json.dumps(
+        {
+            "decisions": [{"action_index": 0, "decision": "maybe"}],
+            "interrupts_processed": [],
+        }
+    )
     parsed, ok = scholar_prompt.parse_response(text)
     # Should reject because Literal["approve","veto"] doesn't accept
     # "maybe" — Pydantic raises ValidationError.
@@ -154,7 +166,9 @@ def test_summarise_decisions_counts_actions():
             {"action_index": 3, "decision": "veto"},
         ],
         "interrupts_processed": [
-            {"action": "approve"}, {"action": "veto"}, {"action": "veto"},
+            {"action": "approve"},
+            {"action": "veto"},
+            {"action": "veto"},
         ],
     }
     counters = scholar_prompt.summarise_decisions(parsed)
@@ -228,8 +242,10 @@ def test_append_nudges_appends_not_overwrites(tmp_path: Path):
     parsed = {
         "interrupts_processed": [
             {
-                "lesson_id": "x", "lesson_path": "x/path",
-                "action": "approve", "text": "Newly written nudge.",
+                "lesson_id": "x",
+                "lesson_path": "x/path",
+                "action": "approve",
+                "text": "Newly written nudge.",
             }
         ],
     }
@@ -294,7 +310,7 @@ def _valid_frontmatter(*, id_: str, scope: str = "global") -> str:
         "applies-when: |\n"
         "  designing things\n"
         "keywords: [a, b, c]\n"
-        f"title: \"{id_}\"\n"
+        f'title: "{id_}"\n'
         "created: 2026-05-19\n"
         "updated: 2026-05-19\n"
         "fired: 0\n"
@@ -312,7 +328,8 @@ def test_check_invariants_clean_tree(tmp_path: Path):
     (k / "global" / "README.md").write_text("# g\n", encoding="utf-8")
     (k / "global" / "tooling" / "README.md").write_text("# t\n", encoding="utf-8")
     (k / "global" / "tooling" / "uv-basics.md").write_text(
-        _valid_frontmatter(id_="uv-basics"), encoding="utf-8",
+        _valid_frontmatter(id_="uv-basics"),
+        encoding="utf-8",
     )
     out = scholar_prompt.check_invariants(k)
     assert out == [], f"expected clean, got: {out}"
@@ -322,7 +339,8 @@ def test_check_invariants_missing_readme(tmp_path: Path):
     k = tmp_path / "knowledge"
     (k / "global" / "tooling").mkdir(parents=True)
     (k / "global" / "tooling" / "uv-basics.md").write_text(
-        _valid_frontmatter(id_="uv-basics"), encoding="utf-8",
+        _valid_frontmatter(id_="uv-basics"),
+        encoding="utf-8",
     )
     out = scholar_prompt.check_invariants(k)
     # Both the global/ dir and global/tooling/ dir lack READMEs.
@@ -338,7 +356,8 @@ def test_check_invariants_too_many_entries(tmp_path: Path):
     (k / "global" / "tooling" / "README.md").write_text("# t\n", encoding="utf-8")
     for i in range(6):
         (k / "global" / "tooling" / f"e{i}.md").write_text(
-            _valid_frontmatter(id_=f"e{i}"), encoding="utf-8",
+            _valid_frontmatter(id_=f"e{i}"),
+            encoding="utf-8",
         )
     out = scholar_prompt.check_invariants(k)
     assert any("global/tooling/" in v and "6 entry" in v for v in out)
@@ -365,8 +384,7 @@ def test_check_invariants_archive_wikilink_allowed(tmp_path: Path):
     (k / "global" / "README.md").write_text("# g\n", encoding="utf-8")
     (k / "global" / "tooling" / "README.md").write_text("# t\n", encoding="utf-8")
     (k / "global" / "tooling" / "uv-basics.md").write_text(
-        _valid_frontmatter(id_="uv-basics")
-        + "Old: [[_archive/global/tooling/old]]\n",
+        _valid_frontmatter(id_="uv-basics") + "Old: [[_archive/global/tooling/old]]\n",
         encoding="utf-8",
     )
     out = scholar_prompt.check_invariants(k)
@@ -396,7 +414,8 @@ def test_check_invariants_missing_frontmatter_fields(tmp_path: Path):
     (k / "global" / "README.md").write_text("# g\n", encoding="utf-8")
     (k / "global" / "tooling" / "README.md").write_text("# t\n", encoding="utf-8")
     (k / "global" / "tooling" / "incomplete.md").write_text(
-        "---\nid: incomplete\nscope: global\n---\n# x\n", encoding="utf-8",
+        "---\nid: incomplete\nscope: global\n---\n# x\n",
+        encoding="utf-8",
     )
     out = scholar_prompt.check_invariants(k)
     assert any("missing frontmatter fields" in v and "incomplete.md" in v for v in out)
@@ -410,11 +429,13 @@ def test_check_invariants_excludes_archive_tree(tmp_path: Path):
     (k / "global" / "README.md").write_text("# g\n", encoding="utf-8")
     (k / "global" / "tooling" / "README.md").write_text("# t\n", encoding="utf-8")
     (k / "global" / "tooling" / "uv-basics.md").write_text(
-        _valid_frontmatter(id_="uv-basics"), encoding="utf-8",
+        _valid_frontmatter(id_="uv-basics"),
+        encoding="utf-8",
     )
     # Archive entry with bad frontmatter — must NOT be flagged.
     (k / "_archive" / "tooling" / "old.md").write_text(
-        "no frontmatter here", encoding="utf-8",
+        "no frontmatter here",
+        encoding="utf-8",
     )
     out = scholar_prompt.check_invariants(k)
     assert out == []
@@ -428,7 +449,8 @@ def test_check_invariants_broken_wikilink_in_readme(tmp_path: Path):
     (k / "projects" / "daemon").mkdir(parents=True)
     (k / "README.md").write_text("# root\n[[daemon/]]\n", encoding="utf-8")
     (k / "projects" / "README.md").write_text(
-        "# projects\n[[daemon/]]\n", encoding="utf-8",
+        "# projects\n[[daemon/]]\n",
+        encoding="utf-8",
     )
     (k / "projects" / "daemon" / "README.md").write_text(
         "# daemon\n[[error-handling-exception-preservation]]\n",  # broken!
@@ -440,8 +462,7 @@ def test_check_invariants_broken_wikilink_in_readme(tmp_path: Path):
     )
     out = scholar_prompt.check_invariants(k)
     assert any(
-        "broken wikilink" in v and "error-handling-exception-preservation" in v
-        for v in out
+        "broken wikilink" in v and "error-handling-exception-preservation" in v for v in out
     ), f"expected broken-wikilink error, got: {out}"
 
 
@@ -453,7 +474,8 @@ def test_check_invariants_sibling_wikilink_resolves(tmp_path: Path):
     (k / "README.md").write_text("# root\n", encoding="utf-8")
     (k / "projects" / "README.md").write_text("# projects\n", encoding="utf-8")
     (k / "projects" / "daemon" / "README.md").write_text(
-        "# daemon\n[[error-handling]]\n", encoding="utf-8",
+        "# daemon\n[[error-handling]]\n",
+        encoding="utf-8",
     )
     (k / "projects" / "daemon" / "error-handling.md").write_text(
         _valid_frontmatter(id_="error-handling", scope="project:daemon"),
@@ -471,8 +493,7 @@ def test_check_invariants_empty_body_flagged(tmp_path: Path):
     (k / "global" / "tooling" / "README.md").write_text("# t\n", encoding="utf-8")
     # Frontmatter is complete but body is just a one-word heading.
     (k / "global" / "tooling" / "stub.md").write_text(
-        _valid_frontmatter(id_="stub").rsplit("---", 1)[0]
-        + "---\n\n# x\n",
+        _valid_frontmatter(id_="stub").rsplit("---", 1)[0] + "---\n\n# x\n",
         encoding="utf-8",
     )
     out = scholar_prompt.check_invariants(k)
@@ -498,7 +519,8 @@ def test_reconcile_creates_missing_readmes(tmp_path: Path):
     k = tmp_path / "knowledge"
     (k / "global" / "python").mkdir(parents=True)
     (k / "global" / "python" / "use-uv.md").write_text(
-        _valid_frontmatter(id_="use-uv"), encoding="utf-8",
+        _valid_frontmatter(id_="use-uv"),
+        encoding="utf-8",
     )
     # No READMEs anywhere.
     changes = scholar_prompt.reconcile_readmes(k)
@@ -513,11 +535,13 @@ def test_reconcile_updates_children_section(tmp_path: Path):
     k = tmp_path / "knowledge"
     (k / "global" / "python").mkdir(parents=True)
     (k / "global" / "python" / "use-uv.md").write_text(
-        _valid_frontmatter(id_="use-uv"), encoding="utf-8",
+        _valid_frontmatter(id_="use-uv"),
+        encoding="utf-8",
     )
     # README already exists with stale content (no children listed yet).
     (k / "global" / "python" / "README.md").write_text(
-        "# Python\n\nPython-related lessons.\n", encoding="utf-8",
+        "# Python\n\nPython-related lessons.\n",
+        encoding="utf-8",
     )
     (k / "global" / "README.md").write_text("# Global\n", encoding="utf-8")
     (k / "README.md").write_text("# Knowledge\n", encoding="utf-8")
@@ -538,7 +562,8 @@ def test_reconcile_is_idempotent(tmp_path: Path):
     k = tmp_path / "knowledge"
     (k / "global" / "python").mkdir(parents=True)
     (k / "global" / "python" / "use-uv.md").write_text(
-        _valid_frontmatter(id_="use-uv"), encoding="utf-8",
+        _valid_frontmatter(id_="use-uv"),
+        encoding="utf-8",
     )
     first = scholar_prompt.reconcile_readmes(k)
     second = scholar_prompt.reconcile_readmes(k)
@@ -550,7 +575,8 @@ def test_reconcile_preserves_prose_outside_markers(tmp_path: Path):
     k = tmp_path / "knowledge"
     (k / "global" / "python").mkdir(parents=True)
     (k / "global" / "python" / "use-uv.md").write_text(
-        _valid_frontmatter(id_="use-uv"), encoding="utf-8",
+        _valid_frontmatter(id_="use-uv"),
+        encoding="utf-8",
     )
     # README with prose, no markers yet — reconcile must append, not erase.
     (k / "global" / "python" / "README.md").write_text(
@@ -570,7 +596,8 @@ def test_reconcile_removes_archived_entry_from_listing(tmp_path: Path):
     k = tmp_path / "knowledge"
     (k / "global" / "python").mkdir(parents=True)
     (k / "global" / "python" / "use-uv.md").write_text(
-        _valid_frontmatter(id_="use-uv"), encoding="utf-8",
+        _valid_frontmatter(id_="use-uv"),
+        encoding="utf-8",
     )
     scholar_prompt.reconcile_readmes(k)  # initial state with use-uv listed
     # Archive the entry by moving it.
@@ -598,22 +625,27 @@ def test_apply_reinforcement_bumps_counter_on_existing_entry(tmp_path: Path):
     entry = k / "global" / "tooling" / "use-uv.md"
     entry.write_text(_valid_frontmatter(id_="use-uv"), encoding="utf-8")
 
-    packets = [{
-        "session_id": "s1",
-        "proposals": [{
-            "action": "update_entry",
-            "salience_signal": "reinforces",
-            "existing_entry": "global/tooling/use-uv.md",
-            "path": "global/tooling/use-uv.md",
-            "new_body": "...",
-            "reasoning": "user reaffirmed",
-        }],
-    }]
+    packets = [
+        {
+            "session_id": "s1",
+            "proposals": [
+                {
+                    "action": "update_entry",
+                    "salience_signal": "reinforces",
+                    "existing_entry": "global/tooling/use-uv.md",
+                    "path": "global/tooling/use-uv.md",
+                    "new_body": "...",
+                    "reasoning": "user reaffirmed",
+                }
+            ],
+        }
+    ]
 
     changes = scholar_prompt.apply_reinforcement_counters(packets, k)
     assert any("global/tooling/use-uv.md" in c for c in changes)
 
     import yaml as _yaml
+
     text = entry.read_text(encoding="utf-8")
     fm = _yaml.safe_load(text.split("---", 2)[1])
     assert fm.get("reinforced") == 1
@@ -627,25 +659,36 @@ def test_apply_reinforcement_dedupes_within_batch(tmp_path: Path):
     entry.write_text(_valid_frontmatter(id_="use-uv"), encoding="utf-8")
 
     # Two proposals both reinforce the same entry in one batch.
-    packets = [{
-        "session_id": "s1",
-        "proposals": [
-            {"action": "update_entry", "salience_signal": "reinforces",
-             "existing_entry": "global/tooling/use-uv.md",
-             "path": "global/tooling/use-uv.md", "new_body": "", "reasoning": ""},
-            {"action": "update_entry", "salience_signal": "reinforces",
-             "existing_entry": "global/tooling/use-uv.md",
-             "path": "global/tooling/use-uv.md", "new_body": "", "reasoning": ""},
-        ],
-    }]
+    packets = [
+        {
+            "session_id": "s1",
+            "proposals": [
+                {
+                    "action": "update_entry",
+                    "salience_signal": "reinforces",
+                    "existing_entry": "global/tooling/use-uv.md",
+                    "path": "global/tooling/use-uv.md",
+                    "new_body": "",
+                    "reasoning": "",
+                },
+                {
+                    "action": "update_entry",
+                    "salience_signal": "reinforces",
+                    "existing_entry": "global/tooling/use-uv.md",
+                    "path": "global/tooling/use-uv.md",
+                    "new_body": "",
+                    "reasoning": "",
+                },
+            ],
+        }
+    ]
 
     changes = scholar_prompt.apply_reinforcement_counters(packets, k)
     assert len(changes) == 1  # deduped
 
     import yaml as _yaml
-    fm = _yaml.safe_load(
-        entry.read_text(encoding="utf-8").split("---", 2)[1]
-    )
+
+    fm = _yaml.safe_load(entry.read_text(encoding="utf-8").split("---", 2)[1])
     assert fm.get("reinforced") == 1  # not 2
 
 
@@ -655,15 +698,21 @@ def test_apply_reinforcement_rejects_path_traversal(tmp_path: Path):
     outside = tmp_path / "outside.md"
     outside.write_text("---\nid: x\n---\n", encoding="utf-8")
 
-    packets = [{
-        "session_id": "s1",
-        "proposals": [{
-            "action": "update_entry",
-            "salience_signal": "reinforces",
-            "existing_entry": "../outside.md",
-            "path": "../outside.md", "new_body": "", "reasoning": "",
-        }],
-    }]
+    packets = [
+        {
+            "session_id": "s1",
+            "proposals": [
+                {
+                    "action": "update_entry",
+                    "salience_signal": "reinforces",
+                    "existing_entry": "../outside.md",
+                    "path": "../outside.md",
+                    "new_body": "",
+                    "reasoning": "",
+                }
+            ],
+        }
+    ]
 
     changes = scholar_prompt.apply_reinforcement_counters(packets, k)
     assert changes == []
@@ -677,17 +726,28 @@ def test_apply_reinforcement_skips_non_reinforces_signals(tmp_path: Path):
     entry = k / "global" / "tooling" / "use-uv.md"
     entry.write_text(_valid_frontmatter(id_="use-uv"), encoding="utf-8")
 
-    packets = [{
-        "session_id": "s1",
-        "proposals": [
-            {"action": "write_entry", "salience_signal": "novel",
-             "path": "x", "body": "", "reasoning": ""},
-            {"action": "deprecate_entry", "salience_signal": "contradicts",
-             "existing_entry": "global/tooling/use-uv.md",
-             "path": "global/tooling/use-uv.md",
-             "superseded_by": "x", "reasoning": ""},
-        ],
-    }]
+    packets = [
+        {
+            "session_id": "s1",
+            "proposals": [
+                {
+                    "action": "write_entry",
+                    "salience_signal": "novel",
+                    "path": "x",
+                    "body": "",
+                    "reasoning": "",
+                },
+                {
+                    "action": "deprecate_entry",
+                    "salience_signal": "contradicts",
+                    "existing_entry": "global/tooling/use-uv.md",
+                    "path": "global/tooling/use-uv.md",
+                    "superseded_by": "x",
+                    "reasoning": "",
+                },
+            ],
+        }
+    ]
 
     changes = scholar_prompt.apply_reinforcement_counters(packets, k)
     assert changes == []

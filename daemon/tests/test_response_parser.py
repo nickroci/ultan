@@ -9,12 +9,12 @@ Covers:
   - balanced-brace extraction (braces inside string literals shouldn't
     confuse the depth counter)
 """
+
 from __future__ import annotations
 
 import json
 
-import pytest
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from agent_mem_daemon._response_parser import (
     ParseDiagnostic,
@@ -192,14 +192,18 @@ def test_parse_diagnostic_carries_repaired_blob():
 def test_evidence_coerces_none_to_empty_list():
     from agent_mem_daemon._schemas import LibrarianInterrupt
 
-    interrupt = LibrarianInterrupt(evidence=None)
+    # model_validate is the right entry point for testing drift-tolerant
+    # coercion: it accepts arbitrary dict input (which is how the LLM's
+    # JSON output gets parsed in production), whereas the constructor
+    # type-checks against the declared field types.
+    interrupt = LibrarianInterrupt.model_validate({"evidence": None})
     assert interrupt.evidence == []
 
 
 def test_evidence_coerces_bare_string_to_single_quote_item():
     from agent_mem_daemon._schemas import LibrarianInterrupt
 
-    interrupt = LibrarianInterrupt(evidence="user said this matters")
+    interrupt = LibrarianInterrupt.model_validate({"evidence": "user said this matters"})
     assert len(interrupt.evidence) == 1
     assert interrupt.evidence[0].quote == "user said this matters"
     assert interrupt.evidence[0].turn_id is None
@@ -209,8 +213,8 @@ def test_evidence_coerces_bare_string_to_single_quote_item():
 def test_evidence_coerces_single_dict_to_one_item_list():
     from agent_mem_daemon._schemas import LibrarianInterrupt
 
-    interrupt = LibrarianInterrupt(
-        evidence={"turn_id": 3, "role": "user", "quote": "hello"}
+    interrupt = LibrarianInterrupt.model_validate(
+        {"evidence": {"turn_id": 3, "role": "user", "quote": "hello"}}
     )
     assert len(interrupt.evidence) == 1
     assert interrupt.evidence[0].turn_id == 3
@@ -221,7 +225,7 @@ def test_evidence_coerces_single_dict_to_one_item_list():
 def test_evidence_coerces_list_of_strings_to_quote_items():
     from agent_mem_daemon._schemas import LibrarianInterrupt
 
-    interrupt = LibrarianInterrupt(evidence=["one", "two", "three"])
+    interrupt = LibrarianInterrupt.model_validate({"evidence": ["one", "two", "three"]})
     assert [e.quote for e in interrupt.evidence] == ["one", "two", "three"]
     assert all(e.turn_id is None and e.role is None for e in interrupt.evidence)
 
@@ -233,7 +237,7 @@ def test_evidence_list_of_dicts_passes_through_unchanged():
         {"turn_id": 1, "role": "user", "quote": "alpha"},
         {"turn_id": 2, "role": "assistant", "quote": "beta"},
     ]
-    interrupt = LibrarianInterrupt(evidence=src)
+    interrupt = LibrarianInterrupt.model_validate({"evidence": src})
     assert len(interrupt.evidence) == 2
     assert interrupt.evidence[0].turn_id == 1
     assert interrupt.evidence[1].quote == "beta"
@@ -245,7 +249,7 @@ def test_evidence_mixed_list_of_strings_and_dicts():
     from agent_mem_daemon._schemas import LibrarianInterrupt
 
     src = ["plain quote", {"turn_id": 5, "quote": "structured"}]
-    interrupt = LibrarianInterrupt(evidence=src)
+    interrupt = LibrarianInterrupt.model_validate({"evidence": src})
     assert len(interrupt.evidence) == 2
     assert interrupt.evidence[0].quote == "plain quote"
     assert interrupt.evidence[0].turn_id is None

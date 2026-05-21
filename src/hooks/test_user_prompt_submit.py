@@ -11,6 +11,7 @@ The hook script uses a hyphenated filename (``user-prompt-submit.py``)
 because that matches what Claude Code's settings.json conventions
 expect; we exercise it via subprocess rather than importing.
 """
+
 from __future__ import annotations
 
 import json
@@ -35,7 +36,6 @@ if str(_THIS_DIR) not in sys.path:
 import _nudges  # noqa: E402
 import _priming_client  # noqa: E402
 
-
 HOOK_SCRIPT = _THIS_DIR / "user-prompt-submit.py"
 
 
@@ -59,8 +59,15 @@ def _seed_lib(root: Path) -> Path:
         (k / sub / "README.md").write_text(f"# {sub}\n", encoding="utf-8")
     (k / "README.md").write_text("# knowledge\n", encoding="utf-8")
 
-    def _entry(path: Path, *, title: str, applies_when: str, keywords: list,
-               reinforced: int = 0, body: str = "") -> None:
+    def _entry(
+        path: Path,
+        *,
+        title: str,
+        applies_when: str,
+        keywords: list,
+        reinforced: int = 0,
+        body: str = "",
+    ) -> None:
         lines = [
             "---",
             f"id: {path.stem}",
@@ -78,19 +85,25 @@ def _seed_lib(root: Path) -> Path:
         lines += ["---", "", body or f"# {title}", ""]
         path.write_text("\n".join(lines), encoding="utf-8")
 
-    _entry(k / "global" / "python" / "use-uv-not-pip.md",
-           title="Always use uv for python",
-           applies_when="installing python deps",
-           keywords=["python", "uv", "pip"],
-           reinforced=3)
-    _entry(k / "global" / "python" / "type-hints.md",
-           title="Use type hints",
-           applies_when="writing python functions",
-           keywords=["python", "types"])
-    _entry(k / "global" / "git" / "no-force-push.md",
-           title="Never force-push",
-           applies_when="pushing to git remotes",
-           keywords=["git", "push"])
+    _entry(
+        k / "global" / "python" / "use-uv-not-pip.md",
+        title="Always use uv for python",
+        applies_when="installing python deps",
+        keywords=["python", "uv", "pip"],
+        reinforced=3,
+    )
+    _entry(
+        k / "global" / "python" / "type-hints.md",
+        title="Use type hints",
+        applies_when="writing python functions",
+        keywords=["python", "types"],
+    )
+    _entry(
+        k / "global" / "git" / "no-force-push.md",
+        title="Never force-push",
+        applies_when="pushing to git remotes",
+        keywords=["git", "push"],
+    )
     return k
 
 
@@ -378,6 +391,7 @@ def _run_hook(stdin_payload: dict, env_overrides: dict) -> subprocess.CompletedP
     }
     # Inherit just enough so Python can find its stdlib.
     import os
+
     for k in ("HOME", "PYTHONPATH", "VIRTUAL_ENV", "PATH", "PYTHONHOME"):
         if k in os.environ:
             env[k] = os.environ[k]
@@ -487,8 +501,9 @@ def test_get_priming_socket_success_short_circuits_fallback(tmp_path: Path, monk
     monkeypatch.setattr(_priming_client, "_priming_socket_path", lambda: socket_path)
 
     canned = "## Library priming (you may know more about this than you think)\n\n- [[FROM_DAEMON]] — canned\n\n*Tip-of-the-tongue? `/ultan-advisor <q>` pulls the full entry.*\n"
-    server = _FakeRpcServer(socket_path, lambda req: {"ok": True, "priming_md": canned,
-                                                       "took_ms": 5, "lane": "hybrid"})
+    server = _FakeRpcServer(
+        socket_path, lambda req: {"ok": True, "priming_md": canned, "took_ms": 5, "lane": "hybrid"}
+    )
     try:
         server.start_and_wait()
         out = _priming_client.get_priming("python uv")
@@ -579,8 +594,12 @@ def test_get_priming_socket_round_trip_is_fast(tmp_path: Path, monkeypatch):
 
     server = _FakeRpcServer(
         socket_path,
-        lambda req: {"ok": True, "priming_md": "## Ultan — your library says\n\n- [[x]]\n\n*Tip*\n",
-                     "took_ms": 1, "lane": "hybrid"},
+        lambda req: {
+            "ok": True,
+            "priming_md": "## Ultan — your library says\n\n- [[x]]\n\n*Tip*\n",
+            "took_ms": 1,
+            "lane": "hybrid",
+        },
     )
     try:
         server.start_and_wait()

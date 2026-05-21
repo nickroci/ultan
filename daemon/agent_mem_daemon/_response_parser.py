@@ -15,6 +15,7 @@ The fall-back chain matters: ``json_repair`` handles trailing commas,
 unquoted keys, smart-quote substitution, and other Haiku/Opus quirks
 without us having to anticipate them.
 """
+
 from __future__ import annotations
 
 import json
@@ -24,7 +25,6 @@ from typing import Optional, Tuple, Type, TypeVar
 
 from json_repair import repair_json
 from pydantic import BaseModel, ValidationError
-
 
 log = logging.getLogger("agent_mem_daemon._response_parser")
 

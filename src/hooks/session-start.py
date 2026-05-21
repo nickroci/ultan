@@ -33,14 +33,13 @@ if str(_SCRIPTS_DIR) not in sys.path:
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
+from _events import append_event  # noqa: E402
 from config import (  # noqa: E402
     DAILY_DIR,
     INDEX_FILE,
     ensure_store_dirs,
 )
 from scope import current_project_slug  # noqa: E402
-
-from _events import append_event  # noqa: E402
 
 ensure_store_dirs()
 

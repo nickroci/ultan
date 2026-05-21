@@ -14,12 +14,12 @@ Used by:
   - scholar_prompt.check_invariants (post-write validator)
   - llm._make_path_guard (pre-write Scholar guard, when added)
 """
+
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 from typing import Iterable, List
-
 
 # Matches a wikilink target + optional alias.
 # Group 1 = target text, Group 2 = "|alias" suffix (may be missing).
@@ -33,9 +33,10 @@ _FRONTMATTER_RE = re.compile(r"\A---\r?\n.*?\r?\n---\r?\n", re.DOTALL)
 @dataclass(frozen=True)
 class WikilinkHit:
     """A wikilink found in prose (non-code) markdown."""
-    target: str          # the link target, with .md stripped (e.g. "global/user/foo")
-    alias: str | None    # the alias if `[[target|alias]]` was used, else None
-    raw: str             # the original `[[…]]` substring as it appeared
+
+    target: str  # the link target, with .md stripped (e.g. "global/user/foo")
+    alias: str | None  # the alias if `[[target|alias]]` was used, else None
+    raw: str  # the original `[[…]]` substring as it appeared
 
 
 def _strip_frontmatter(text: str) -> str:

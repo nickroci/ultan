@@ -1,8 +1,8 @@
 """JSONL tail behaviour: append, rotation, truncation, partial lines."""
+
 from __future__ import annotations
 
 import json
-import os
 import shutil
 from pathlib import Path
 
@@ -11,18 +11,19 @@ import pytest
 from agent_mem_daemon.buffer import Event
 from agent_mem_daemon.ingest import JsonlTailer, parse_event_line
 
-
 # ---- parser -------------------------------------------------------
 
 
 def test_parse_full_event():
-    line = json.dumps({
-        "ts": 1234567890.0,
-        "session_id": "s1",
-        "type": "PostToolUse",
-        "cwd": "/repo",
-        "payload": {"tool": "Read"},
-    })
+    line = json.dumps(
+        {
+            "ts": 1234567890.0,
+            "session_id": "s1",
+            "type": "PostToolUse",
+            "cwd": "/repo",
+            "payload": {"tool": "Read"},
+        }
+    )
     ev = parse_event_line(line)
     assert ev is not None
     assert ev.session_id == "s1"
@@ -33,11 +34,13 @@ def test_parse_full_event():
 
 
 def test_parse_iso_timestamp():
-    line = json.dumps({
-        "ts": "2026-05-19T10:30:00Z",
-        "session_id": "s1",
-        "type": "Stop",
-    })
+    line = json.dumps(
+        {
+            "ts": "2026-05-19T10:30:00Z",
+            "session_id": "s1",
+            "type": "Stop",
+        }
+    )
     ev = parse_event_line(line)
     assert ev is not None
     assert ev.ts > 0  # parsed something
@@ -292,7 +295,7 @@ def test_tail_skips_bad_json_without_crashing(events_file):
     with open(events_file, "a", encoding="utf-8") as f:
         f.write("this is not json\n")
         f.write(json.dumps({"ts": 1.0, "session_id": "s1", "type": "Stop"}) + "\n")
-        f.write('{"incomplete":\n')   # malformed JSON on its own line
+        f.write('{"incomplete":\n')  # malformed JSON on its own line
         f.write(json.dumps({"ts": 2.0, "session_id": "s2", "type": "Stop"}) + "\n")
 
     tailer.poll_once()

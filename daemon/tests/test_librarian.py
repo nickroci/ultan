@@ -8,6 +8,7 @@ The LLM call is monkey-patched. We pin:
 - The audit transcript ends up in the AGENT_MEM_HOME tmp dir.
 - User-asserted payload flag propagates through the prompt.
 """
+
 from __future__ import annotations
 
 import json
@@ -15,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_mem_daemon import librarian, librarian_prompt as lp, llm
+from agent_mem_daemon import librarian, llm
 
 
 @pytest.fixture
@@ -30,13 +31,19 @@ def _payload_snap(session_id: str, exchanges: list[tuple[str, str]]):
     turns = []
     for role, text in exchanges:
         typ = "UserPromptSubmit" if role == "user" else "PostToolUse"
-        ev = {"ts": 1.0, "type": typ, "cwd": "/repo/acme-widget-svc",
-              "payload": {"text": text, "role": role}}
-        turns.append({
-            "events": [ev, {"ts": 2.0, "type": "Stop", "cwd": "/repo", "payload": {}}],
-            "started_at": 1.0,
-            "sealed_at": 2.0,
-        })
+        ev = {
+            "ts": 1.0,
+            "type": typ,
+            "cwd": "/repo/acme-widget-svc",
+            "payload": {"text": text, "role": role},
+        }
+        turns.append(
+            {
+                "events": [ev, {"ts": 2.0, "type": "Stop", "cwd": "/repo", "payload": {}}],
+                "started_at": 1.0,
+                "sealed_at": 2.0,
+            }
+        )
     return {
         "session_id": session_id,
         "cwd": "/repo/acme-widget-svc",
@@ -111,7 +118,7 @@ def test_scan_happy_path_proposals_and_interrupts(home, monkeypatch):
                     "status: provisional\nconfidence: 0.7\n"
                     "applies-when: |\n  writing tests against a service that has a factory\n"
                     "keywords: [testing, stub, factory]\n"
-                    "title: \"Stub the factory not the service\"\n"
+                    'title: "Stub the factory not the service"\n'
                     "created: 2026-05-19\nupdated: 2026-05-19\n"
                     "fired: 0\nfired-helpful: 0\nsources:\n  - daily/2026-05-19.md\n"
                     "---\n\n# Stub the factory\nBody.\n"
@@ -125,8 +132,7 @@ def test_scan_happy_path_proposals_and_interrupts(home, monkeypatch):
                 "lesson_path": "global/tooling/factory-pattern-for-apis.md",
                 "matching_applies_when": "designing or building any new API",
                 "evidence": [
-                    {"turn_id": 1, "role": "user",
-                     "quote": "wiring up the new ReportingService"}
+                    {"turn_id": 1, "role": "user", "quote": "wiring up the new ReportingService"}
                 ],
                 "match_score": 0.92,
                 "librarian_confidence": 0.88,
@@ -141,10 +147,16 @@ def test_scan_happy_path_proposals_and_interrupts(home, monkeypatch):
 
     monkeypatch.setattr(llm, "run_librarian_call", fake_llm)
 
-    snap = _payload_snap("sess-123", [
-        ("user", "I'm wiring up the new ReportingService. Should I just call new ReportingService(db, cache)?"),
-        ("assistant", "Use a factory. Stub the factory, not the service."),
-    ])
+    snap = _payload_snap(
+        "sess-123",
+        [
+            (
+                "user",
+                "I'm wiring up the new ReportingService. Should I just call new ReportingService(db, cache)?",
+            ),
+            ("assistant", "Use a factory. Stub the factory, not the service."),
+        ],
+    )
     packet = librarian.scan(snap)
 
     assert packet["session_id"] == "sess-123"
@@ -185,19 +197,25 @@ def test_scan_user_asserted_event_propagates_to_prompt(home, monkeypatch):
     snap = {
         "session_id": "ultan-abc",
         "cwd": "/repo/x",
-        "turns": [{
-            "started_at": 1.0,
-            "sealed_at": 2.0,
-            "events": [
-                {"ts": 1.0, "type": "UserPromptSubmit", "cwd": "/repo/x",
-                 "payload": {
-                     "text": "always wrap upstream errors at the boundary",
-                     "role": "user",
-                     "user_asserted": True,
-                 }},
-                {"ts": 2.0, "type": "Stop", "cwd": "/repo/x", "payload": {}},
-            ],
-        }],
+        "turns": [
+            {
+                "started_at": 1.0,
+                "sealed_at": 2.0,
+                "events": [
+                    {
+                        "ts": 1.0,
+                        "type": "UserPromptSubmit",
+                        "cwd": "/repo/x",
+                        "payload": {
+                            "text": "always wrap upstream errors at the boundary",
+                            "role": "user",
+                            "user_asserted": True,
+                        },
+                    },
+                    {"ts": 2.0, "type": "Stop", "cwd": "/repo/x", "payload": {}},
+                ],
+            }
+        ],
     }
     librarian.scan(snap)
     p = captured["prompt"]
@@ -208,9 +226,11 @@ def test_scan_user_asserted_event_propagates_to_prompt(home, monkeypatch):
 
 def test_scan_writes_audit_jsonl(home, monkeypatch):
     monkeypatch.setattr(
-        llm, "run_librarian_call",
+        llm,
+        "run_librarian_call",
         lambda prompt, *, cwd=None, timeout_s=60.0: (
-            '{"proposals": [], "interrupts": []}', 0.0,
+            '{"proposals": [], "interrupts": []}',
+            0.0,
         ),
     )
     snap = _payload_snap("sess-audit", [("user", "Always wrap upstream errors.")])
@@ -236,7 +256,8 @@ def test_scan_writes_audit_jsonl(home, monkeypatch):
 
 def test_scan_malformed_json_returns_empty_packet(home, monkeypatch):
     monkeypatch.setattr(
-        llm, "run_librarian_call",
+        llm,
+        "run_librarian_call",
         lambda prompt, *, cwd=None, timeout_s=60.0: ("not valid json at all", 0.0),
     )
     snap = _payload_snap("s-bad", [("user", "Always wrap upstream errors.")])
@@ -245,9 +266,7 @@ def test_scan_malformed_json_returns_empty_packet(home, monkeypatch):
     assert packet["interrupts"] == []
     assert packet["session_id"] == "s-bad"
 
-    row = json.loads(
-        (home / "runs").glob("*.jsonl").__next__().read_text().strip()
-    )
+    row = json.loads((home / "runs").glob("*.jsonl").__next__().read_text().strip())
     assert row["parsed_ok"] is False
     assert row["decisions"].get("parse_failed") == 1
 
@@ -275,9 +294,7 @@ def test_scan_sdk_timeout_swallowed(home, monkeypatch):
     packet = librarian.scan(snap)
     assert packet["proposals"] == []
     assert packet["interrupts"] == []
-    row = json.loads(
-        (home / "runs").glob("*.jsonl").__next__().read_text().strip()
-    )
+    row = json.loads((home / "runs").glob("*.jsonl").__next__().read_text().strip())
     assert row["decisions"].get("llm_timeout") == 1
 
 
@@ -288,7 +305,8 @@ def test_evidence_packet_has_only_expected_top_level_keys(home, monkeypatch):
     """The packet's top-level keys must be exactly the TypedDict's set,
     so the scheduler can rely on the contract."""
     monkeypatch.setattr(
-        llm, "run_librarian_call",
+        llm,
+        "run_librarian_call",
         lambda prompt, *, cwd=None, timeout_s=60.0: (
             '{"proposals": [{"action": "archive_entry", "path": "x.md", "reasoning": "old"}], "interrupts": []}',
             0.0,

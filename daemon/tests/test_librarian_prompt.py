@@ -4,16 +4,14 @@ JSON response parsing.
 
 No SDK calls. No I/O outside tmp_path.
 """
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
 from textwrap import dedent
 
-import pytest
-
 from agent_mem_daemon import librarian_prompt as lp
-
 
 # ── flatten_buffer / format_rolling_buffer ────────────────────────────
 
@@ -27,21 +25,21 @@ def _snap(turns_events):
         "session_id": "s1",
         "cwd": "/repo/acme-widget-svc",
         "ended": False,
-        "turns": [
-            {"events": evs, "started_at": 0.0, "sealed_at": 1.0}
-            for evs in turns_events
-        ],
+        "turns": [{"events": evs, "started_at": 0.0, "sealed_at": 1.0} for evs in turns_events],
     }
 
 
 def test_flatten_buffer_assigns_monotonic_turn_ids_and_skips_seal_events():
-    snap = _snap([
-        [_ev("UserPromptSubmit", {"text": "hello"}),
-         _ev("PostToolUse", {"tool": "Read", "arguments": {"path": "x"}}),
-         _ev("Stop")],
-        [_ev("UserPromptSubmit", {"text": "follow up"}),
-         _ev("SessionEnd")],
-    ])
+    snap = _snap(
+        [
+            [
+                _ev("UserPromptSubmit", {"text": "hello"}),
+                _ev("PostToolUse", {"tool": "Read", "arguments": {"path": "x"}}),
+                _ev("Stop"),
+            ],
+            [_ev("UserPromptSubmit", {"text": "follow up"}), _ev("SessionEnd")],
+        ]
+    )
     flat = lp.flatten_buffer(snap)
     # Stop / SessionEnd dropped; PostToolUse synthesised to "Read(path)".
     assert [t for t, _r, _x, _u in flat] == [1, 2, 3]
@@ -58,9 +56,7 @@ def test_flatten_buffer_assigns_monotonic_turn_ids_and_skips_seal_events():
 
 
 def test_flatten_buffer_user_asserted_flag_propagates():
-    snap = _snap([
-        [_ev("UserPromptSubmit", {"text": "always wrap errors", "user_asserted": True})]
-    ])
+    snap = _snap([[_ev("UserPromptSubmit", {"text": "always wrap errors", "user_asserted": True})]])
     flat = lp.flatten_buffer(snap)
     assert len(flat) == 1
     assert flat[0][3] is True
@@ -125,7 +121,9 @@ def test_seed_extraction_finds_imperatives_and_directives():
 
 
 def test_seed_extraction_dedupes_substrings():
-    txt = "Always wrap upstream errors at the boundary. Always wrap upstream errors at the boundary."
+    txt = (
+        "Always wrap upstream errors at the boundary. Always wrap upstream errors at the boundary."
+    )
     seeds = lp.extract_seed_phrases(txt)
     assert len(seeds) == 1
 
@@ -190,13 +188,21 @@ def test_format_bm25_seeds_empty_message():
 
 
 def test_format_bm25_seeds_includes_hits_and_no_hit_marker():
-    s = lp.format_bm25_seeds([
-        {"seed": "use a factory", "hits": [
-            {"entry_id": "factory-pattern-for-apis", "score": 14.8,
-             "path": "global/tooling/factory-pattern-for-apis.md"},
-        ]},
-        {"seed": "renamed file", "hits": []},
-    ])
+    s = lp.format_bm25_seeds(
+        [
+            {
+                "seed": "use a factory",
+                "hits": [
+                    {
+                        "entry_id": "factory-pattern-for-apis",
+                        "score": 14.8,
+                        "path": "global/tooling/factory-pattern-for-apis.md",
+                    },
+                ],
+            },
+            {"seed": "renamed file", "hits": []},
+        ]
+    )
     assert 'seed: "use a factory"' in s
     assert "hit 1: entry_id=factory-pattern-for-apis" in s
     assert "score=14.8" in s
@@ -214,9 +220,7 @@ def test_read_index_md_missing_returns_sentinel(tmp_path):
 def test_read_index_md_returns_file_contents(tmp_path):
     k = tmp_path / "knowledge"
     k.mkdir()
-    (k / "index.md").write_text(
-        "# Knowledge Base Index\n\n| Article | ... |\n", encoding="utf-8"
-    )
+    (k / "index.md").write_text("# Knowledge Base Index\n\n| Article | ... |\n", encoding="utf-8")
     out = lp.read_index_md(k)
     assert "Knowledge Base Index" in out
 
@@ -229,9 +233,7 @@ def _write_entry(kdir: Path, rel: str, status: str, applies_when: list[str], sco
         f"id: {Path(rel).stem}\n"
         f"scope: {scope}\n"
         f"status: {status}\n"
-        "applies-when: |\n"
-        + "".join(f"  {ln}\n" for ln in applies_when)
-        + "---\n\n# title\n"
+        "applies-when: |\n" + "".join(f"  {ln}\n" for ln in applies_when) + "---\n\n# title\n"
     )
     p.write_text(body, encoding="utf-8")
 
@@ -239,13 +241,17 @@ def _write_entry(kdir: Path, rel: str, status: str, applies_when: list[str], sco
 def test_build_applies_when_table_only_confirmed(tmp_path):
     k = tmp_path / "knowledge"
     k.mkdir()
-    _write_entry(k, "global/tooling/factory.md", "confirmed",
-                 ["designing or building any new API",
-                  "decisions about how clients construct service objects"])
-    _write_entry(k, "global/tooling/draft.md", "provisional",
-                 ["this should not appear"])
-    _write_entry(k, "_archive/tooling/old.md", "confirmed",
-                 ["never surface archived entries"])
+    _write_entry(
+        k,
+        "global/tooling/factory.md",
+        "confirmed",
+        [
+            "designing or building any new API",
+            "decisions about how clients construct service objects",
+        ],
+    )
+    _write_entry(k, "global/tooling/draft.md", "provisional", ["this should not appear"])
+    _write_entry(k, "_archive/tooling/old.md", "confirmed", ["never surface archived entries"])
     out = lp.build_applies_when_table(k)
     lines = out.splitlines()
     assert any("factory | global | designing or building any new API" in ln for ln in lines)
@@ -274,21 +280,15 @@ def test_library_snapshot_renders_tree_and_readmes(tmp_path):
     (k / "README.md").write_text(
         "# agent-mem knowledge\n\nThe top-level index.\n", encoding="utf-8"
     )
-    (k / "global" / "README.md").write_text(
-        "# Global\nCross-project lessons.\n", encoding="utf-8"
-    )
+    (k / "global" / "README.md").write_text("# Global\nCross-project lessons.\n", encoding="utf-8")
     (k / "global" / "tooling" / "README.md").write_text(
         "# Tooling\nNotes about toolchains.\n", encoding="utf-8"
     )
     (k / "global" / "tooling" / "uv-basics.md").write_text(
         "---\nid: uv-basics\n---\n# uv basics\n", encoding="utf-8"
     )
-    (k / "projects" / "README.md").write_text(
-        "# Projects\nPer-repo entries.\n", encoding="utf-8"
-    )
-    (k / "index.md").write_text(
-        "# Knowledge Base Index\n\n| Article | Scope |\n", encoding="utf-8"
-    )
+    (k / "projects" / "README.md").write_text("# Projects\nPer-repo entries.\n", encoding="utf-8")
+    (k / "index.md").write_text("# Knowledge Base Index\n\n| Article | Scope |\n", encoding="utf-8")
     out = lp.build_library_snapshot(k)
     # Tree must show the structure.
     assert "## Tree" in out
@@ -343,9 +343,9 @@ def test_derive_project_slug_from_explicit_field():
 
 
 def test_derive_project_slug_from_event_payload():
-    snap = {"turns": [{"events": [
-        {"type": "PostToolUse", "payload": {"project_slug": "my-proj"}}
-    ]}]}
+    snap = {
+        "turns": [{"events": [{"type": "PostToolUse", "payload": {"project_slug": "my-proj"}}]}]
+    }
     assert lp.derive_project_slug(snap) == "my-proj"
 
 
@@ -385,9 +385,14 @@ def test_template_describes_all_action_types():
         applies_when_table="(empty)",
     )
     for action in (
-        "write_entry", "update_entry", "merge_entries",
-        "move_entry", "archive_entry", "update_readme",
-        "add_wikilink", "split_folder",
+        "write_entry",
+        "update_entry",
+        "merge_entries",
+        "move_entry",
+        "archive_entry",
+        "update_readme",
+        "add_wikilink",
+        "split_folder",
     ):
         assert action in p, f"action type {action!r} missing from assembled prompt"
 
@@ -436,15 +441,29 @@ def test_parse_proposal_with_all_action_types():
         "proposals": [
             {"action": "write_entry", "path": "a.md", "body": "x", "reasoning": "r"},
             {"action": "update_entry", "path": "b.md", "new_body": "x", "reasoning": "r"},
-            {"action": "merge_entries", "source_paths": ["c.md", "d.md"],
-             "target_path": "c.md", "target_body": "x", "reasoning": "r"},
+            {
+                "action": "merge_entries",
+                "source_paths": ["c.md", "d.md"],
+                "target_path": "c.md",
+                "target_body": "x",
+                "reasoning": "r",
+            },
             {"action": "move_entry", "from_path": "e.md", "to_path": "f.md", "reasoning": "r"},
             {"action": "archive_entry", "path": "g.md", "reasoning": "r"},
             {"action": "update_readme", "folder_path": "global", "new_body": "x", "reasoning": "r"},
-            {"action": "add_wikilink", "from_path": "h.md", "to_path": "i.md",
-             "context": "see also", "reasoning": "r"},
-            {"action": "split_folder", "folder_path": "global/big",
-             "into": {"sub1": ["a.md", "b.md"]}, "reasoning": "r"},
+            {
+                "action": "add_wikilink",
+                "from_path": "h.md",
+                "to_path": "i.md",
+                "context": "see also",
+                "reasoning": "r",
+            },
+            {
+                "action": "split_folder",
+                "folder_path": "global/big",
+                "into": {"sub1": ["a.md", "b.md"]},
+                "reasoning": "r",
+            },
         ],
         "interrupts": [],
     }
@@ -452,8 +471,14 @@ def test_parse_proposal_with_all_action_types():
     assert out is not None
     assert len(out["proposals"]) == 8
     assert [p["action"] for p in out["proposals"]] == [
-        "write_entry", "update_entry", "merge_entries", "move_entry",
-        "archive_entry", "update_readme", "add_wikilink", "split_folder",
+        "write_entry",
+        "update_entry",
+        "merge_entries",
+        "move_entry",
+        "archive_entry",
+        "update_readme",
+        "add_wikilink",
+        "split_folder",
     ]
 
 
