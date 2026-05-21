@@ -12,7 +12,7 @@ separate deliverable.
 
 ```bash
 cd /Users/nicholasholden/agent-mem/daemon
-uv sync --extra dev
+uv sync --group dev
 uv run pytest                 # unit tests
 uv run agent-mem-daemon -v    # foreground; logs to ~/.agent-mem/daemon.log + stderr
 ```

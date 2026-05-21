@@ -9,14 +9,32 @@ dependencies = [
     "tzdata>=2024.1",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=8.0",
-]
-
 [tool.ruff]
 line-length = 100
+target-version = "py312"
+extend-exclude = [".venv", "build", "dist", "_dot_claude_disabled"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/test_*.py" = ["E501"]
+
+[tool.pyright]
+include = ["hooks", "scripts"]
+exclude = [".venv", "**/__pycache__", "build", "dist", "_dot_claude_disabled"]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
+reportMissingTypeStubs = false
+reportMissingImports = "warning"
 
 [tool.pytest.ini_options]
 testpaths = ["hooks"]
 addopts = "-ra"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pyright>=1.1.409",
+    "ruff>=0.15.14",
+]

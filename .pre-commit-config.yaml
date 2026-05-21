@@ -1,0 +1,75 @@
+# Repo-wide pre-commit gate: lint (ruff) + types (pyright) + tests (pytest).
+#
+# Each Python package (daemon, tools/search, src) has its own uv venv and its
+# own pyproject.toml config. ruff is shared via the upstream pre-commit repo;
+# pyright and pytest run as local hooks so they pick up each package's venv.
+#
+# Pyright + ruff run on staged files only — existing baseline issues in
+# untouched files don't block commits, but touching a file forces cleanup.
+# pytest runs the full package suite at pre-push (not pre-commit) so a fast
+# local edit/commit loop isn't blocked by the test suite.
+#
+# Install once per clone:  uv tool install pre-commit && pre-commit install
+#   (installs both pre-commit and pre-push git hooks, per the list below)
+# Run on the whole repo:   pre-commit run --all-files
+default_install_hook_types: [pre-commit, pre-push]
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.14
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      # Pyright per package. Pre-commit passes repo-relative paths; we strip
+      # the leading "<pkg>/" so pyright (running with cwd=<pkg>) gets the
+      # package-relative paths it expects.
+      - id: pyright-daemon
+        name: pyright (daemon)
+        language: system
+        entry: bash -c 'cd daemon && uv run --frozen pyright "${@#daemon/}"' --
+        files: ^daemon/.*\.py$
+        pass_filenames: true
+
+      - id: pyright-tools-search
+        name: pyright (tools/search)
+        language: system
+        entry: bash -c 'cd tools/search && uv run --frozen pyright "${@#tools/search/}"' --
+        files: ^tools/search/.*\.py$
+        pass_filenames: true
+
+      - id: pyright-src
+        name: pyright (src)
+        language: system
+        entry: bash -c 'cd src && uv run --frozen pyright "${@#src/}"' --
+        files: ^src/.*\.py$
+        pass_filenames: true
+
+      # Pytest per package — runs at pre-push, not pre-commit. Full suite,
+      # only when something in that package changed since the last push.
+      - id: pytest-daemon
+        name: pytest (daemon)
+        language: system
+        entry: bash -c 'cd daemon && uv run --frozen pytest'
+        files: ^daemon/
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: pytest-tools-search
+        name: pytest (tools/search)
+        language: system
+        entry: bash -c 'cd tools/search && uv run --frozen pytest'
+        files: ^tools/search/
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: pytest-src
+        name: pytest (src)
+        language: system
+        entry: bash -c 'cd src && uv run --frozen pytest'
+        files: ^src/
+        pass_filenames: false
+        stages: [pre-push]
