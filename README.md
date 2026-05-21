@@ -58,6 +58,17 @@ The agent can't afford to query the library for everything it's about to do, and
 
 The Scholar still owns a **soft nudge pipeline** orthogonal to these — when the Librarian sees a stored preference matching the rolling buffer, the Scholar can approve a nudge to `pending-nudges.md` for injection on the next turn. Budget: 1/turn, 3/session.
 
+### The library is a graph
+
+The library is structurally a graph: folder hierarchy gives the tree, wikilinks (`[[path/to/entry]]`) give cross-links that turn it into a DAG. The Scholar maintains both as first-class objects — `add_wikilink` is one of its action verbs, every folder README's child listing is auto-reconciled between marker comments, and every wikilink is validated on write (the Librarian's proposal is dropped if a link doesn't resolve).
+
+Retrieval over the graph is split across tiers:
+
+- **Tier 1 (priming) is text-only** — hybrid BM25 + sentence-transformer embeddings merged via RRF, boosted by the `reinforced` counter. The retriever does not traverse the graph; it returns top-k entries by text similarity, with wikilinks appearing in the output as *hints*.
+- **Tier 2 (deliberate recall) is agent-driven graph traversal.** The agent sees wikilinks in priming context and follows them via the `ultan-search` skill, which returns the entry plus its local neighborhood — siblings, subfolders, parent README — in one read. The agent decides which edges to follow and when to stop, the same "memory as tools" pattern Letta and Wire have shown beats pre-baked retrieval expansion on cross-document queries.
+
+The deliberate choice: deterministic-and-cheap text retrieval at always-on Tier 1, semantic-and-expensive graph traversal at on-demand Tier 2. PageRank-style structural expansion at Tier 1 is a possible addition (see *Roadmap*), not a current capability.
+
 ---
 
 ## Quick start
@@ -204,6 +215,83 @@ Storage on disk:
 For pay-as-you-go API users this adds up — easily $5-20/day for active dogfooding. **If you're on Max/Pro**, the cost lands against your quota rather than your card; the latency cost remains.
 
 If that's too rich for your workflow: turn off the daemon entirely and use just the slash commands (`/ultan`, `/ultan-advisor`) — the curator stops running, but the explicit-write and explicit-query paths still work. You lose ambient priming, automatic extraction, and proactive nudges, but you keep the markdown library and the on-demand advisor.
+
+## Roadmap
+
+Two known gaps relative to where the bio framing points.
+
+### Tier 1 graph signal
+
+Tier 1 priming is currently text-only (BM25 + embeddings + RRF + `reinforced`). Two cheap structural signals sit unused:
+
+- **Folder-scope prior** — entries under `projects/<current-cwd-slug>/` should rank higher on text-similarity ties.
+- **Wikilink-density boost** — heavily inbound-linked entries are load-bearing (PageRank's intuition, cheap to compute on a few-thousand-entry library). One extra term in the RRF fusion.
+
+Neither requires architectural change — both are reranker tweaks in `priming.py`. The agent-driven Tier 2 traversal stays as-is; this is purely about giving Tier 1 a structural prior.
+
+### Forgetting (LTD) with surprise-calibrated encoding strength
+
+Ultan models LTP (the `reinforced` counter) but not LTD. Memory without decay accumulates noise, and the bio-faithful retention model has two coupled parts the current architecture is missing:
+
+**1. Encoding strength is set at write time by surprise magnitude — not a binary write/skip.** Prediction-error doesn't just *gate* encoding; its magnitude scales how strongly the trace is laid down (Rouhani, Norman & Niv 2018; Greve et al. 2017), and initial encoding strength sets the slope of the forgetting curve (Wixted 2004). Highly surprising contradictions and identity-defining preferences deserve a flatter decay than incremental novelty. McGaugh's amygdala-modulated consolidation (2000) is the same idea via the emotional/arousal channel — high arousal at encoding biases what survives consolidation. The von Restorff effect (1933) is the behavioural signature: distinctive items outlast typical ones in the same set.
+
+**2. Strong traces self-reinforce via reactivation.** A high-encoding-strength entry surfaces in priming more often, gets used more often, and each reactivation extends its life further (Sinclair & Barense 2019, already cited). This is the loop that makes load-bearing memories durable — and the same loop, unchecked, produces intrusive/traumatic over-persistence (PTSD as the pathological extreme).
+
+The honest caveat is the **flashbulb-memory problem** (Talarico & Rubin 2003): extremity reinforces *persistence* of the trace, not its *truthfulness*. A surprising-but-wrong entry can ossify. The architectural guard: a `contradicts` signal on any entry should *reset* (or substantially shorten) its decay timer regardless of accumulated reinforcement — accuracy beats salience when they conflict.
+
+A second correction worth stating outright: biology doesn't have a "decide this is irrelevant, prune it" signal you can fire on a strong memory. Default biology is "weak unused memories fade; strong unused memories **intrude** and update via **reconsolidation**" (Nader, Schafe & LeDoux 2000 Nature; Schiller et al. 2010 Nature; Lee, Nader & Schiller 2017 TICS). Every retrieval is also a partial re-write. So the high-strength branch of Ultan's retention model is mutation, not decay.
+
+### Mechanisms to capture
+
+We don't need to replicate biology exactly. We need the mechanisms to be *present* so the system can self-correct — the right test is "does Ultan have an analog of each load-bearing memory mechanism," not "does Ultan map 1:1 to neural circuits."
+
+| Biological mechanism | Ultan analog | Status |
+|---|---|---|
+| Surprise-calibrated encoding strength (Greve et al. 2017; Rouhani, Norman & Niv 2018; Wixted 2004) | `encoding_strength` stamped by Scholar at write time, calibrated from the salience-signal mix; sets the entry's initial decay slope | TODO |
+| LTP — reactivation strengthens the trace (Roediger & Karpicke 2006 testing effect; Bjork & Bjork 1992) | `reinforced` counter bumped on reuse | **Done** |
+| LTD — passive decay of unused weak traces (Ebbinghaus 1885; Wixted 2004; Bear & Malenka 1994) | Half-life on each entry as `f(encoding_strength, reinforced_count)`; only effective for low/moderate strength entries | TODO |
+| **Prefrontal inhibition of retrieval** (Anderson & Green 2001 Nature, Think/No-Think paradigm) | **Agent seeing a surfaced memory and not acting on it is functionally a no-think signal.** Counts as weak negative evidence — accelerates decay for low/moderate-strength entries; for high-strength entries it triggers a reconsolidation/update review (relevance-drift, not irrelevance). Asymmetric: "agent explicitly cited / `ultan-search`-fetched" is *strong positive* evidence; "surfaced but ignored" is *weak negative* evidence, requiring multiple instances. Mirrors the brain's asymmetric weighting of presence-of-use vs absence-of-use. | TODO |
+| **Reconsolidation** — retrieved memories become labile and are re-stored mutated (Nader et al. 2000; Schiller et al. 2010; Lee et al. 2017; Hupbach et al. 2007) | Librarian gets a `drift` salience signal alongside `contradicts`/`novel`/`reinforces`: *"high-strength entry [[X]] keeps surfacing in contexts that don't quite match its current text — propose an `update`."* Scholar evaluates as a partial mutation, not full replacement. Closest published OSS analog: A-MEM's Zettelkasten evolution (Xu et al., NeurIPS 2025). | Partial — `update` action exists; drift-driven proposal pathway does not |
+| Sleep-based selective consolidation (Diekelmann & Born 2010; Stickgold 2005; Wilhelm et al. 2011) | The Scholar's batch reconciliation phase plays this role architecturally — periodic, deliberate, prioritises high-salience entries; no behavioural analog of replay yet | Partial |
+| Rational analysis of memory — retention tracks environmental utility (Anderson & Schooler 1991) | The whole loop is enacting this if encoding-strength + decay + use-tracking work together. The Anderson & Schooler framing is the cleanest theoretical anchor for the system as a whole. | Emergent if the rest lands |
+| Arousal modulation of consolidation (McGaugh 2000) | Folded into `encoding_strength` rather than a separate field — keep schema lean | TODO |
+| Active accuracy override (truth beats salience) | `contradicts` from a new entry sharply discounts the target's effective strength regardless of accumulated reinforcement; flashbulb-memory guard | TODO |
+| Distinctiveness effect — isolated/unusual items outlast typical ones (von Restorff 1933) | Subsumed by surprise-calibrated `encoding_strength` | TODO |
+| Decayed-not-deleted (audit trail; resurrectable on later contradiction) | Decayed entries archive to `_archive/` rather than delete | Partial — `_archive/` exists |
+
+**Open implementation questions:**
+
+- What concrete signal does Ultan use to detect "surfaced but ignored"? Candidates: entry appeared in `additionalContext` priming N times in last K days *and* was never `ultan-search`-fetched *and* doesn't appear (as wikilink or paraphrase) in the agent's outputs in those sessions. Likely needs a lightweight surfaced-vs-used log alongside `runs/`.
+- How does the Librarian detect drift for the reconsolidation pathway? Probably: high-`reinforced` entry whose recent surfacing contexts have low text-similarity to the entry itself — i.e. the entry is being surfaced for the right reasons by BM25/embeddings but the *frame* around it keeps shifting.
+
+Prior art worth borrowing from: **MemoryBank** (Zhong et al., 2024) applies the Ebbinghaus curve to retrieval weighting; **FadeMem** (2025) does biologically-inspired decay end-to-end. Neither (as far as we've seen) couples decay with surprise-calibrated encoding strength + a prefrontal-inhibition analog + a reconsolidation pathway. That combination is the contribution.
+
+### Forgetting references
+
+- Ebbinghaus, H. (1885). *Memory: A Contribution to Experimental Psychology.*
+- von Restorff, H. (1933). *Über die Wirkung von Bereichsbildungen im Spurenfeld.* Psychologische Forschung, 18, 299–342.
+- Anderson, J.R. & Schooler, L.J. (1991). *Reflections of the environment in memory.* Psychological Science, 2(6), 396–408.
+- Bjork, R.A. & Bjork, E.L. (1992). *A new theory of disuse and an old theory of stimulus fluctuation.* In *From learning processes to cognitive processes: Essays in honor of William K. Estes.*
+- Bear, M.F. & Malenka, R.C. (1994). *Synaptic plasticity: LTP and LTD.* Current Opinion in Neurobiology, 4(3), 389–399.
+- Nader, K., Schafe, G.E. & LeDoux, J.E. (2000). *Fear memories require protein synthesis in the amygdala for reconsolidation after retrieval.* Nature, 406(6797), 722–726.
+- McGaugh, J.L. (2000). *Memory — a century of consolidation.* Science, 287(5451), 248–251.
+- Anderson, M.C. & Green, C. (2001). *Suppressing unwanted memories by executive control.* Nature, 410(6826), 366–369.
+- Anderson, M.C. (2003). *Rethinking interference theory: Executive control and the mechanisms of forgetting.* Journal of Memory and Language, 49(4), 415–445.
+- Talarico, J.M. & Rubin, D.C. (2003). *Confidence, not consistency, characterizes flashbulb memories.* Psychological Science, 14(5), 455–461.
+- Wixted, J.T. (2004). *The psychology and neuroscience of forgetting.* Annual Review of Psychology, 55, 235–269.
+- Roediger, H.L. & Karpicke, J.D. (2006). *Test-enhanced learning: Taking memory tests improves long-term retention.* Psychological Science, 17(3), 249–255.
+- Hupbach, A., Gomez, R., Hardt, O. & Nadel, L. (2007). *Reconsolidation of episodic memories: A subtle reminder triggers integration of new information.* Learning & Memory, 14(1–2), 47–53.
+- Stickgold, R. (2005). *Sleep-dependent memory consolidation.* Nature, 437(7063), 1272–1278.
+- Diekelmann, S. & Born, J. (2010). *The memory function of sleep.* Nature Reviews Neuroscience, 11(2), 114–126.
+- Schiller, D., Monfils, M.-H., Raio, C.M., Johnson, D.C., LeDoux, J.E. & Phelps, E.A. (2010). *Preventing the return of fear in humans using reconsolidation update mechanisms.* Nature, 463(7277), 49–53.
+- Wilhelm, I., Diekelmann, S., Molzow, I., Ayoub, A., Mölle, M. & Born, J. (2011). *Sleep selectively enhances memory expected to be of future relevance.* Journal of Neuroscience, 31(5), 1563–1569.
+- Hardt, O., Nader, K. & Nadel, L. (2013). *Decay happens: the role of active forgetting in memory.* Trends in Cognitive Sciences, 17(3), 111–120.
+- Nørby, S. (2015). *Why forget? On the adaptive value of memory loss.* Perspectives on Psychological Science, 10(5), 551–578.
+- Greve, A., Cooper, E., Kaula, A., Anderson, M.C. & Henson, R. (2017). *Does prediction error drive one-shot declarative learning?* Journal of Memory and Language, 94, 149–165.
+- Lee, J.L.C., Nader, K. & Schiller, D. (2017). *An update on memory reconsolidation updating.* Trends in Cognitive Sciences, 21(7), 531–545.
+- Rouhani, N., Norman, K.A. & Niv, Y. (2018). *Dissociable effects of surprising rewards on learning and memory.* Journal of Experimental Psychology: Learning, Memory, and Cognition, 44(9), 1430–1443.
+
+---
 
 ## Status
 
