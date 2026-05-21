@@ -48,7 +48,156 @@ class LLMTimeout(RuntimeError):
     pass
 
 
-def _make_path_guard(boundary: Path, *, allow_writes: bool):
+def _resolve_wikilink(link: str, knowledge_root: Path, file_being_written: Path) -> bool:
+    """Same resolution rules as scholar_prompt.check_invariants. Returns
+    True if the link resolves to an existing file under knowledge_root.
+    """
+    if link.startswith("_archive/") or "/_archive/" in link:
+        return True
+    if link.startswith("daily/"):
+        return True
+    if link.endswith("/"):
+        target = knowledge_root / link / "README.md"
+    else:
+        target = knowledge_root / (link if link.endswith(".md") else f"{link}.md")
+    if target.exists():
+        return True
+    # Sibling fallback — link is relative to the file's own dir.
+    parent = file_being_written.parent if file_being_written.parent.exists() else knowledge_root
+    if link.endswith("/"):
+        sibling = parent / link / "README.md"
+    else:
+        sibling = parent / (link if link.endswith(".md") else f"{link}.md")
+    return sibling.exists()
+
+
+def _find_unique_leaf(leaf: str, knowledge_root: Path) -> str | None:
+    """Look up a wikilink target by its leaf (final path segment).
+
+    Returns the canonical wikilink target (knowledge-root-relative, no
+    .md suffix) if exactly one .md file in the tree has that leaf;
+    None otherwise (zero or multiple matches → ambiguous, don't repair).
+    """
+    if "/" in leaf:
+        # Already a multi-segment path — caller wanted full-path lookup,
+        # which we've already tried. Skip leaf-mode.
+        return None
+    if leaf.endswith(".md"):
+        leaf = leaf[:-3]
+    matches = list(knowledge_root.rglob(f"{leaf}.md"))
+    matches = [m for m in matches if "_archive" not in m.parts]
+    if len(matches) != 1:
+        return None
+    rel = matches[0].relative_to(knowledge_root)
+    return rel.with_suffix("").as_posix()
+
+
+def _check_and_repair_writes(
+    tool_name: str,
+    tool_input: dict,
+    knowledge_root: Path,
+) -> tuple[str, dict | None, str]:
+    """Validate any wikilinks in a Write/Edit payload before it lands on
+    disk. Returns a (status, payload, info) triple:
+
+      - ("allow",             tool_input,  "")
+            no changes needed.
+      - ("allow_with_repair", new_input,   summary)
+            broken links found, all auto-resolvable by unique-leaf
+            lookup; ``new_input`` is the rewritten tool input.
+      - ("deny",              None,        message)
+            broken links found that we can't auto-fix.
+
+    Skips log.md (audit-trail; quoted paths are not navigation).
+    """
+    from . import markdown_utils
+
+    file_path = tool_input.get("file_path")
+    if not file_path:
+        return "allow", tool_input, ""
+    target_file = Path(str(file_path)).expanduser().resolve()
+    if target_file.name == "log.md":
+        return "allow", tool_input, ""
+
+    # What content is being placed on disk?
+    if tool_name == "Write":
+        content = tool_input.get("content")
+        content_key = "content"
+    elif tool_name == "Edit":
+        content = tool_input.get("new_string")
+        content_key = "new_string"
+    else:
+        return "allow", tool_input, ""
+    if not isinstance(content, str) or not content.strip():
+        return "allow", tool_input, ""
+
+    hits = markdown_utils.extract_wikilinks(content)
+    if not hits:
+        return "allow", tool_input, ""
+
+    repairs: list[tuple[str, str]] = []   # (broken, fixed)
+    unresolvable: list[str] = []          # broken with no auto-fix
+
+    for hit in hits:
+        link = hit.target
+        if not link:
+            continue
+        if _resolve_wikilink(link, knowledge_root, target_file):
+            continue
+        # Broken — try leaf-name lookup for auto-repair.
+        leaf = link.rsplit("/", 1)[-1]
+        canonical = _find_unique_leaf(leaf, knowledge_root)
+        if canonical is None or canonical == link:
+            unresolvable.append(link)
+        else:
+            repairs.append((link, canonical))
+
+    if unresolvable:
+        repair_note = ""
+        if repairs:
+            repair_note = (
+                " (note: " + ", ".join(f"[[{b}]] → [[{f}]]" for b, f in repairs)
+                + " would auto-resolve, but the unresolvable links above also "
+                "need to be corrected before the write can proceed)"
+            )
+        msg = (
+            f"Write to {target_file.name} rejected — these wikilinks do not "
+            f"resolve and no unique leaf-name match was found in the library: "
+            + ", ".join(f"[[{u}]]" for u in unresolvable)
+            + repair_note
+            + ". Use Glob/Grep/bm25_search to locate the intended target, "
+            "or remove the link if the entry doesn't exist yet."
+        )
+        return "deny", None, msg
+
+    if repairs:
+        new_content = content
+        for broken, fixed in repairs:
+            new_content = _rewrite_link_in_text(new_content, broken, fixed)
+        new_input = dict(tool_input)
+        new_input[content_key] = new_content
+        summary = ", ".join(f"[[{b}]] → [[{f}]]" for b, f in repairs)
+        return "allow_with_repair", new_input, summary
+
+    return "allow", tool_input, ""
+
+
+def _rewrite_link_in_text(text: str, broken: str, fixed: str) -> str:
+    """Rewrite `[[broken]]` and `[[broken|alias]]` to use ``fixed`` while
+    preserving any alias. Mirrors library_tools._rewrite_wikilinks_in_text
+    but for a single (broken, fixed) pair."""
+    import re as _re
+
+    # Match `[[broken]]` or `[[broken|alias]]` or `[[broken.md]]` (with
+    # alias). Escape the broken target for regex use.
+    escaped = _re.escape(broken)
+    pattern = _re.compile(
+        r"\[\[" + escaped + r"(?:\.md)?(\|[^\[\]]*)?\]\]"
+    )
+    return pattern.sub(lambda m: f"[[{fixed}{m.group(1) or ''}]]", text)
+
+
+def _make_path_guard(boundary: Path, *, allow_writes: bool, check_wikilinks: bool = False):
     """Return a ``can_use_tool`` callback that rejects any tool call
     referencing a path outside ``boundary``.
 
@@ -65,6 +214,12 @@ def _make_path_guard(boundary: Path, *, allow_writes: bool):
         allow_writes: if False, Write/Edit are denied outright (read-only
             role like the Librarian). Read/Glob/Grep are always
             path-constrained.
+        check_wikilinks: if True (Scholar), also parse the proposed
+            content of every Write/Edit for wikilinks. Auto-repair
+            broken-but-unique-leaf-resolvable links by mutating the tool
+            input; deny writes that introduce unresolvable links.
+            Catches the "Scholar references an old path after a move"
+            class of bug before it lands on disk.
     """
     root = boundary.expanduser().resolve()
 
@@ -86,6 +241,10 @@ def _make_path_guard(boundary: Path, *, allow_writes: bool):
     # validation.
     PATH_FREE_TOOLS = {
         "mcp__agent_mem_library__bm25_search",
+        # move_entries validates every path against the knowledge root
+        # internally (``_safe_inside``), so it's safe to allow without
+        # the guard's per-key path validation.
+        "mcp__agent_mem_library__move_entries",
     }
 
     async def _can_use_tool(tool_name, tool_input, context):  # noqa: ARG001
@@ -129,6 +288,25 @@ def _make_path_guard(boundary: Path, *, allow_writes: bool):
                         f"Use a path under {root} instead."
                     ),
                 )
+
+        # Wikilink check on writes (Scholar only). Parses the proposed
+        # content, auto-repairs links whose target moved to a new unique
+        # path, and denies writes that introduce unresolvable links —
+        # closes the "Scholar references an old path post-move" gap that
+        # the post-write validator only logged about.
+        if check_wikilinks and tool_name in WRITE_TOOLS:
+            status, payload, info = _check_and_repair_writes(
+                tool_name, tool_input, root,
+            )
+            if status == "deny":
+                return PermissionResultDeny(message=info)
+            if status == "allow_with_repair":
+                log.warning(
+                    "path guard: auto-repaired broken wikilinks in %s: %s",
+                    tool_input.get("file_path"), info,
+                )
+                return PermissionResultAllow(updated_input=payload)
+            # status == "allow" — fall through to the default Allow.
 
         return PermissionResultAllow(updated_input=tool_input)
 
@@ -252,9 +430,12 @@ def run_librarian_call(
         model=model,
         allowed_tools=librarian_tools,
         mcp_servers=mcp_servers,
-        # 10 turns: ~6 Read/Glob/bm25 calls + the JSON emission. Plenty of
-        # slack without letting Haiku wander.
-        max_turns=10,
+        # Same budget as Scholar — observed traces show the Librarian
+        # legitimately needs 30+ Read/Glob/bm25 calls on complex sessions
+        # (multi-file dedup, cross-folder lookup) before emitting JSON;
+        # capping lower was triggering "Reached maximum number of turns"
+        # errors on real work.
+        max_turns=100,
         env=_recursion_guard_env(),
         # The claude_code preset is what lets Read/Glob work end-to-end.
         # Without it the SDK exposes the tools but the model's harness
@@ -296,17 +477,28 @@ def run_scholar_call(
     caller logs and skips the batch.
     """
     from claude_agent_sdk import ClaudeAgentOptions
+    from . import library_tools
 
     # Scholar's cwd is the agent-mem home (so prompt-relative paths like
     # ``knowledge/index.md`` resolve correctly). The guard's boundary is
     # the narrower ``knowledge/`` subdir — Scholar must not touch
     # events.jsonl, daemon.log, runs/, cost.json, etc.
     boundary = cwd / "knowledge"
+    # Register the in-process library MCP server so the Scholar can call
+    # the atomic move_entries tool (which rewrites inbound wikilinks
+    # programmatically — the LLM should NEVER move files by hand).
+    mcp_servers = {
+        library_tools._SERVER_NAME: library_tools.make_library_mcp_server(boundary),
+    }
     options = ClaudeAgentOptions(
         model=model,
         cwd=str(cwd),
         system_prompt={"type": "preset", "preset": "claude_code"},
-        allowed_tools=["Read", "Write", "Edit", "Glob", "Grep"],
+        allowed_tools=[
+            "Read", "Write", "Edit", "Glob", "Grep",
+            library_tools.fully_qualified_move_name(),
+        ],
+        mcp_servers=mcp_servers,
         permission_mode="acceptEdits",
         max_turns=100,
         env=_recursion_guard_env(),
@@ -314,7 +506,9 @@ def run_scholar_call(
         # rejected if its path resolves outside the knowledge dir.
         # Stops the "Scholar edits the wrong store" class of bug at
         # the SDK layer, independent of whatever the prompt says.
-        can_use_tool=_make_path_guard(boundary, allow_writes=True),
+        can_use_tool=_make_path_guard(
+            boundary, allow_writes=True, check_wikilinks=True,
+        ),
     )
     log.debug(
         "scholar SDK call: model=%s cwd=%s prompt_chars=%d",

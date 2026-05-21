@@ -1,37 +1,49 @@
-"""In-process MCP tools the Librarian (and optionally Scholar) can call.
+"""In-process MCP tools the Librarian and Scholar can call.
 
-Right now this exposes a single ``bm25_search`` tool that wraps the
-existing ``agent-mem-search`` BM25 indexer. The Librarian uses it to
-find entries semantically related to a phrase or concept — complements
-the SDK's built-in ``Glob`` (filename pattern) and ``Grep`` (literal
-regex) tools.
+This module exposes two SDK MCP tools, both running in-process so there
+is no subprocess, no HTTP, no extra deps:
 
-We register the tools as an SDK MCP server (``McpSdkServerConfig``) so
-they run in the same Python process as the daemon — no subprocess, no
-HTTP, no extra deps. The Librarian's prompt is told they exist; the
-SDK's ``allowed_tools`` list whitelists the canonical
-``mcp__<server>__<tool>`` name.
+- ``bm25_search`` (Librarian + Scholar): wraps ``agent-mem-search`` BM25.
+- ``move_entries`` (Scholar only): atomic multi-file move that creates
+  the destination folder if missing, optionally writes its README, and
+  rewrites every inbound wikilink in the library so the graph stays
+  intact. Replaces the Scholar's old "Read + Write + Edit + remember to
+  fix every back-reference" dance, which had been the dominant source
+  of broken-wikilink violations.
+
+The SDK exposes each tool to the model as
+``mcp__<server_name>__<tool_name>``. ``allowed_tools`` entries in
+llm.py whitelist the canonical names.
 """
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 
 log = logging.getLogger("agent_mem_daemon.library_tools")
 
 
-# Server + tool naming. The SDK exposes MCP tools to the model as
-# ``mcp__<server_name>__<tool_name>``. Keep these stable; allowed_tools
-# entries in llm.py refer to them.
+# Server + tool naming. Keep stable; allowed_tools entries in llm.py
+# refer to them.
 _SERVER_NAME = "agent_mem_library"
-_TOOL_NAME = "bm25_search"
+_BM25_TOOL_NAME = "bm25_search"
+_MOVE_TOOL_NAME = "move_entries"
+
+
+def fully_qualified_bm25_name() -> str:
+    return f"mcp__{_SERVER_NAME}__{_BM25_TOOL_NAME}"
+
+
+def fully_qualified_move_name() -> str:
+    return f"mcp__{_SERVER_NAME}__{_MOVE_TOOL_NAME}"
 
 
 def fully_qualified_tool_name() -> str:
-    """The string to put in ``allowed_tools`` for the model to see the tool."""
-    return f"mcp__{_SERVER_NAME}__{_TOOL_NAME}"
+    """Backwards-compat shim — returns the bm25 name."""
+    return fully_qualified_bm25_name()
 
 
 def make_library_mcp_server(knowledge_dir: Path):
@@ -47,7 +59,7 @@ def make_library_mcp_server(knowledge_dir: Path):
     root = knowledge_dir.expanduser().resolve()
 
     @tool(
-        _TOOL_NAME,
+        _BM25_TOOL_NAME,
         (
             "Search the agent-mem knowledge library by content relevance "
             "(BM25 ranking). Returns the top-K most relevant entries as "
@@ -127,8 +139,194 @@ def make_library_mcp_server(knowledge_dir: Path):
             ]
         }
 
+    @tool(
+        _MOVE_TOOL_NAME,
+        (
+            "Atomically move one or more entries into a destination folder, "
+            "rewriting every inbound wikilink in the library so the graph "
+            "stays intact. Creates the destination folder if it does not "
+            "exist, and (optionally) writes its README.md. Use this for "
+            "BOTH single-file moves and split_folder operations — never "
+            "move entries with Read+Write+Edit, wikilinks will break.\n\n"
+            "Inputs (all paths relative to the knowledge root):\n"
+            "  to_folder: destination folder (e.g. 'global/user/profile').\n"
+            "  files: list of .md files to move into to_folder.\n"
+            "  readme: optional content for to_folder/README.md. Skipped "
+            "if a README already exists at that path.\n\n"
+            "Returns: a summary of files moved, READMEs created, and "
+            "wikilinks rewritten."
+        ),
+        {"to_folder": str, "files": list, "readme": str},
+    )
+    async def move_entries(args: Dict[str, Any]) -> Dict[str, Any]:
+        return _move_entries_impl(root, args)
+
     return create_sdk_mcp_server(
         name=_SERVER_NAME,
         version="1.0.0",
-        tools=[bm25_search],
+        tools=[bm25_search, move_entries],
     )
+
+
+# ── move_entries implementation (pure-Python, no LLM in the loop) ─────
+
+
+# Matches [[link]] or [[link|alias]]. Captures the link target (group 1)
+# and the optional alias (group 2 incl. leading pipe, may be empty).
+_WIKILINK_RE = re.compile(r"\[\[([^\[\]\|]+?)(\|[^\[\]]*)?\]\]")
+
+
+def _normalize_link(target: str) -> str:
+    """Strip the optional .md suffix from a wikilink target."""
+    t = target.strip()
+    if t.endswith(".md"):
+        t = t[:-3]
+    return t
+
+
+def _path_to_wikilink(path: Path, root: Path) -> str:
+    """Convert an absolute file path to a wikilink target (no .md, posix)."""
+    rel = path.resolve().relative_to(root)
+    if rel.name.lower() == "readme.md":
+        # Folder-shaped wikilinks: [[some/folder/]] resolves to its README.
+        # Don't rewrite README files this way; callers shouldn't pass them
+        # to move_entries anyway.
+        return rel.as_posix()
+    if rel.suffix == ".md":
+        rel = rel.with_suffix("")
+    return rel.as_posix()
+
+
+def _safe_inside(root: Path, candidate: Path) -> bool:
+    """True iff ``candidate`` resolves inside ``root`` (no path escape)."""
+    try:
+        candidate.resolve().relative_to(root)
+    except (ValueError, OSError):
+        return False
+    return True
+
+
+def _rewrite_wikilinks_in_text(
+    text: str, mapping: Dict[str, str]
+) -> tuple[str, int]:
+    """Rewrite every [[link]]/[[link|alias]] whose target matches a key
+    in ``mapping`` to the corresponding value. Preserves the alias.
+    Returns (new_text, rewrites_count)."""
+    count = 0
+
+    def repl(m: "re.Match[str]") -> str:
+        nonlocal count
+        raw_target = m.group(1)
+        alias = m.group(2) or ""
+        norm = _normalize_link(raw_target)
+        new = mapping.get(norm)
+        if new is None:
+            return m.group(0)
+        count += 1
+        return f"[[{new}{alias}]]"
+
+    return _WIKILINK_RE.sub(repl, text), count
+
+
+def _move_entries_impl(root: Path, args: Dict[str, Any]) -> Dict[str, Any]:
+    """Pure-Python implementation of move_entries — see tool docstring.
+
+    Validates inputs, performs the moves, rewrites inbound wikilinks
+    everywhere in the library, and returns a textual summary the LLM
+    can read.
+    """
+    def err(msg: str) -> Dict[str, Any]:
+        return {"content": [{"type": "text", "text": f"(move_entries error) {msg}"}]}
+
+    raw_to = str(args.get("to_folder") or "").strip()
+    raw_files = args.get("files")
+    raw_readme = args.get("readme")
+    # The SDK passes typed-list args through as Python lists already.
+    if not raw_to:
+        return err("missing required arg 'to_folder'")
+    if not isinstance(raw_files, list) or not raw_files:
+        return err("'files' must be a non-empty list of .md paths")
+
+    # Resolve destination folder. Reject path-escape and non-relative paths.
+    to_folder = (root / raw_to).resolve()
+    if not _safe_inside(root, to_folder):
+        return err(f"to_folder {raw_to!r} resolves outside the knowledge root")
+
+    # Resolve each source path, build (old_link → new_link) mapping.
+    moves: List[tuple[Path, Path]] = []
+    link_mapping: Dict[str, str] = {}
+    for raw in raw_files:
+        if not isinstance(raw, str) or not raw.strip():
+            return err(f"each entry in 'files' must be a non-empty string; got {raw!r}")
+        src = (root / raw).resolve()
+        if not _safe_inside(root, src):
+            return err(f"source {raw!r} resolves outside the knowledge root")
+        if not src.exists():
+            return err(f"source {raw!r} does not exist")
+        if not src.is_file():
+            return err(f"source {raw!r} is not a regular file")
+        if src.suffix != ".md":
+            return err(f"source {raw!r} is not a .md file")
+        dst = (to_folder / src.name).resolve()
+        if dst.exists() and dst != src:
+            return err(f"destination {dst.relative_to(root)} already exists; refusing to overwrite")
+        moves.append((src, dst))
+        link_mapping[_path_to_wikilink(src, root)] = _path_to_wikilink(dst, root)
+
+    # Create destination folder.
+    to_folder.mkdir(parents=True, exist_ok=True)
+
+    # Optional README.
+    readme_action = "skipped"
+    if isinstance(raw_readme, str) and raw_readme.strip():
+        readme_path = to_folder / "README.md"
+        if readme_path.exists():
+            readme_action = f"left existing {readme_path.relative_to(root)} untouched"
+        else:
+            readme_path.write_text(raw_readme, encoding="utf-8")
+            readme_action = f"wrote {readme_path.relative_to(root)} ({len(raw_readme)} chars)"
+
+    # Perform moves (read-write-unlink so a partial failure is detectable;
+    # shutil.move would work too but this gives us encoding control).
+    moved_paths: List[str] = []
+    for src, dst in moves:
+        if src == dst:
+            moved_paths.append(f"{src.relative_to(root)} (already at destination)")
+            continue
+        try:
+            content = src.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            return err(f"could not read {src.relative_to(root)}: {e}")
+        dst.write_text(content, encoding="utf-8")
+        src.unlink()
+        moved_paths.append(
+            f"{src.relative_to(root)} → {dst.relative_to(root)}"
+        )
+
+    # Rewrite inbound wikilinks across the whole library.
+    rewrite_summary: List[str] = []
+    total_rewrites = 0
+    for md in sorted(root.rglob("*.md")):
+        try:
+            text = md.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        new_text, n = _rewrite_wikilinks_in_text(text, link_mapping)
+        if n > 0:
+            md.write_text(new_text, encoding="utf-8")
+            rewrite_summary.append(f"{md.relative_to(root)}: {n} link(s) rewritten")
+            total_rewrites += n
+
+    # Build the summary the LLM sees.
+    lines = ["move_entries: ok"]
+    lines.append(f"  destination: {to_folder.relative_to(root)}/")
+    lines.append(f"  readme: {readme_action}")
+    lines.append(f"  moved {len(moved_paths)} file(s):")
+    for m in moved_paths:
+        lines.append(f"    - {m}")
+    lines.append(f"  rewrote {total_rewrites} inbound wikilink(s)" + (
+        ":" if rewrite_summary else " (no inbound links found)"
+    ))
+    for r in rewrite_summary:
+        lines.append(f"    - {r}")
+    return {"content": [{"type": "text", "text": "\n".join(lines)}]}

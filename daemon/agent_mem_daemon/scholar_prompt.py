@@ -25,6 +25,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import yaml
 
+from . import markdown_utils
+
 from . import _response_parser
 from ._schemas import ScholarReview
 from .librarian import EvidencePacket
@@ -192,11 +194,11 @@ A. PROPOSALS.
      3. On APPROVE:
           - Execute the action via Write/Edit/Glob.
           - For ``write_entry`` / ``update_entry`` / ``merge_entries``: write the file at the specified path.
-          - For ``move_entry``: read the source, write to the destination, then delete the source (use Write with empty content then verify, or use Bash if available — but Bash is not in your allowed tools, so prefer Read+Write+Edit). When you cannot delete a file with your tools, leave the source as a stub redirect note instead.
+          - For ``move_entry``: call ``mcp__agent_mem_library__move_entries`` with ``to_folder`` set to the destination folder, ``files`` containing the source path, and ``readme`` omitted (unless you want to seed a README in a brand-new destination folder). The tool atomically moves the file AND rewrites every inbound wikilink in the library — do NOT do this with Read+Write+Edit, the wikilinks will silently break.
           - For ``archive_entry``: read the source, write a copy under ``_archive/<original-relative-path>``, then mark the source's frontmatter ``status: stale`` via Edit (do not delete — archive means moved out of active rotation).
           - For ``update_readme``: write/overwrite the README.md at the folder_path. Write ONLY the prose (heading + description of what this folder is for). Do not write a child-listing — the daemon's reconciler appends `<!-- ULTAN:children (auto) -->` block automatically after every batch.
           - For ``add_wikilink``: use Edit on ``from_path`` to add the link in a Related section.
-          - For ``split_folder``: create the new subfolders (with READMEs) and move the listed entries.
+          - For ``split_folder``: call ``mcp__agent_mem_library__move_entries`` ONCE per destination subfolder, with ``to_folder`` set to the new subfolder, ``files`` containing every entry going into it, and ``readme`` optionally seeded with a brief description. The tool creates the folder, writes the README, moves the files, and rewrites all inbound wikilinks in a single deterministic call. Do NOT manually move files — wikilinks WILL break (this has been the dominant source of broken-wikilink violations historically).
           - After every approved action, update knowledge/index.md and append to knowledge/log.md.
      4. On VETO:
           - Do nothing on disk.
@@ -516,10 +518,6 @@ _REQUIRED_FRONTMATTER_FIELDS = (
 )
 
 
-# Wikilink regex — matches [[path/to/entry]] and [[path/to/entry|alias]].
-_WIKILINK_RE = re.compile(r"\[\[([^\]]+?)\]\]")
-
-
 # How many entry .md files per directory we permit before flagging.
 MAX_FLAT_DIR_ENTRIES = 5
 
@@ -588,10 +586,13 @@ def check_invariants(knowledge_dir_path: Path) -> List[str]:
             )
 
     # Check 3: wikilink resolution.
-    # Scan READMEs and index.md — those are the primary places real
-    # navigation wikilinks live. Skip log.md: it's an audit trail that
-    # quotes proposed-but-vetoed paths verbatim in veto reasons; treating
-    # those quoted strings as wikilinks produces false positives.
+    # We parse each file as markdown (via ``markdown_utils.extract_wikilinks``)
+    # so that links inside code spans / fenced code blocks / YAML
+    # frontmatter are excluded — those were the source of historic
+    # false positives (e.g. an entry literally about wikilinks writing
+    # ``\\`[[wikilinks]]\\``` as an inline-code example). Skip log.md
+    # outright: it's an audit trail that quotes vetoed paths verbatim
+    # and the markdown there has no graph meaning.
     for md in all_md_files:
         if md.name == "log.md":
             continue
@@ -599,8 +600,8 @@ def check_invariants(knowledge_dir_path: Path) -> List[str]:
             text = md.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        for m in _WIKILINK_RE.finditer(text):
-            link = m.group(1).split("|", 1)[0].strip()
+        for hit in markdown_utils.extract_wikilinks(text):
+            link = hit.target
             if not link:
                 continue
             # Allow archive links (per AGENTS.md §1.2 those are intentional).

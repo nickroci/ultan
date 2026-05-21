@@ -21,6 +21,10 @@ dependencies = [
   "json-repair>=0.25",
   "agent-mem-search",
   "opentelemetry-api>=1.42.0",
+  # Markdown AST parsing for wikilink validation (skip code spans / code
+  # fences natively). Don't rely on the transitive copy that ships with
+  # claude-agent-sdk via rich — pin our own.
+  "markdown-it-py>=4.0",
 ]
 
 [project.optional-dependencies]
