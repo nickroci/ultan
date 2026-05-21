@@ -15,6 +15,7 @@ The BM25 backend is the real ``bm25`` package from ``agent-mem-search``
 (declared as a path dep in ``daemon/pyproject.toml``). We let it run
 against on-disk fixtures rather than mocking — keeps the test honest.
 """
+
 from __future__ import annotations
 
 import os
@@ -24,7 +25,6 @@ from typing import List, Optional
 import pytest
 
 from agent_mem_daemon import priming
-
 
 # ── Fixture helpers ───────────────────────────────────────────────────
 
@@ -459,7 +459,9 @@ def test_refresh_never_raises_on_garbage_inputs(tmp_path):
     priming.refresh_hot_context(tmp_path / "does-not-exist", "x", out)
     # Non-string buffer.
     priming.refresh_hot_context(
-        tmp_path, None, out  # type: ignore[arg-type]
+        tmp_path,
+        None,  # type: ignore[arg-type]
+        out,
     )
     # No assertion needed — the test passes if no exception escapes.
 
@@ -499,9 +501,7 @@ def test_bullet_format_includes_summary_and_count(tmp_path):
     out = tmp_path / "hot-context.md"
     priming.refresh_hot_context(
         k,
-        rolling_buffer_text=(
-            "installing vinglex frobnitz and the qwoxlate cromulent situation"
-        ),
+        rolling_buffer_text=("installing vinglex frobnitz and the qwoxlate cromulent situation"),
         out_path=out,
         top_k=2,
     )

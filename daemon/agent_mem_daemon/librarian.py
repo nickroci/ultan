@@ -19,16 +19,15 @@ are frozen contracts the scheduler depends on. The dict contents
 change to carry ``proposals`` (new) and ``interrupts`` (unchanged), but
 the function signature does not.
 """
+
 from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List, TypedDict
 
 from . import librarian_prompt as lp
-from . import llm
-from . import runs
-from .paths import knowledge_dir, ensure_home
-
+from . import llm, runs
+from .paths import ensure_home, knowledge_dir
 
 log = logging.getLogger("agent_mem_daemon.librarian")
 
@@ -36,12 +35,15 @@ log = logging.getLogger("agent_mem_daemon.librarian")
 _LIBRARIAN_TIMEOUT_S = llm.LIBRARIAN_TIMEOUT_S
 
 
-class EvidencePacket(TypedDict, total=False):
+class EvidencePacket(TypedDict):
     """Frozen shape the Scholar reads.
 
     Items inside ``proposals`` match the ``LibrarianProposal.proposals``
     schema (see ``_schemas.py``); items inside ``interrupts`` match
     ``LibrarianInterrupt``.
+
+    All three keys are always set by ``_empty_packet`` — there is no
+    valid packet missing any of them.
     """
 
     session_id: str
@@ -76,8 +78,7 @@ def scan(buffer_snapshot: Dict[str, Any]) -> EvidencePacket:
         # If the buffer has no quotable text at all, short-circuit.
         if not flat:
             log.debug(
-                "librarian.scan: session=%s has no quotable turns; "
-                "skipping LLM call",
+                "librarian.scan: session=%s has no quotable turns; skipping LLM call",
                 session_id,
             )
             record.parsed_ok = True
@@ -108,7 +109,10 @@ def scan(buffer_snapshot: Dict[str, Any]) -> EvidencePacket:
 
         log.debug(
             "librarian.scan: session=%s slug=%s turns=%d prompt_chars=%d",
-            session_id, slug, len(flat), len(prompt),
+            session_id,
+            slug,
+            len(flat),
+            len(prompt),
         )
 
         # The Librarian needs cwd set to the knowledge dir so its
@@ -125,7 +129,6 @@ def scan(buffer_snapshot: Dict[str, Any]) -> EvidencePacket:
             record.decisions = {
                 "proposals": 0,
                 "interrupts": 0,
-
                 "llm_timeout": 1,
             }
             return packet
@@ -135,7 +138,6 @@ def scan(buffer_snapshot: Dict[str, Any]) -> EvidencePacket:
             record.decisions = {
                 "proposals": 0,
                 "interrupts": 0,
-
                 "llm_error": 1,
             }
             return packet
@@ -147,15 +149,14 @@ def scan(buffer_snapshot: Dict[str, Any]) -> EvidencePacket:
         parsed = lp.parse_librarian_json(response_text)
         if parsed is None:
             log.warning(
-                "librarian returned unparseable JSON (session=%s, chars=%d); "
-                "emitting empty packet",
-                session_id, len(response_text or ""),
+                "librarian returned unparseable JSON (session=%s, chars=%d); emitting empty packet",
+                session_id,
+                len(response_text or ""),
             )
             record.parsed_ok = False
             record.decisions = {
                 "proposals": 0,
                 "interrupts": 0,
-
                 "parse_failed": 1,
             }
             return packet

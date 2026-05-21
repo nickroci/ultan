@@ -122,7 +122,9 @@ def test_load_or_build_caches_and_rebuilds() -> None:
         text = target.read_text(encoding="utf-8")
         target.write_text(text + "\n\nNew sentence added for cache-invalidation test.\n")
         # Force mtime to advance noticeably.
-        import os, time
+        import os
+        import time
+
         future = time.time() + 5
         os.utime(target, (future, future))
 

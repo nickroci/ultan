@@ -27,6 +27,10 @@ pythonVersion = "3.12"
 typeCheckingMode = "basic"
 reportMissingTypeStubs = false
 reportMissingImports = "warning"
+# Hook and script files use sys.path manipulation at runtime to import sibling
+# modules from src/scripts/ (e.g. `import config`, `import scope`). Adding the
+# directories to extraPaths lets pyright resolve those imports without ignores.
+extraPaths = ["hooks", "scripts"]
 
 [tool.pytest.ini_options]
 testpaths = ["hooks"]

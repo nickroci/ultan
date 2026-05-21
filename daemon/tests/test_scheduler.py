@@ -11,6 +11,7 @@ invoked. All assertions are racy-by-nature but the timing windows
 are kept short enough to keep the suite fast (target: each test
 under 2 s).
 """
+
 from __future__ import annotations
 
 import logging
@@ -21,12 +22,12 @@ from typing import Any, Dict, List
 import pytest
 
 from agent_mem_daemon.buffer import Event, RollingBuffer
+from agent_mem_daemon.librarian import EvidencePacket
 from agent_mem_daemon.scheduler import (
     DebounceScheduler,
     Scheduler,
     SchedulerConfig,
 )
-
 
 # ---- helpers --------------------------------------------------------
 
@@ -35,21 +36,20 @@ def _ev(ts: float, sid: str, typ: str) -> Event:
     return Event(ts=ts, session_id=sid, type=typ, cwd="/repo", payload={})
 
 
-def _empty_packet(snap: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "session_id": snap["session_id"],
-        "proposals": [],
-        "interrupts": [],
-    }
+def _empty_packet(snap: Dict[str, Any]) -> EvidencePacket:
+    return EvidencePacket(
+        session_id=snap["session_id"],
+        proposals=[],
+        interrupts=[],
+    )
 
 
-def _proposal_packet(snap: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "session_id": snap["session_id"],
-        "proposals": [{"action": "archive_entry", "path": "x.md",
-                       "reasoning": "test"}],
-        "interrupts": [],
-    }
+def _proposal_packet(snap: Dict[str, Any]) -> EvidencePacket:
+    return EvidencePacket(
+        session_id=snap["session_id"],
+        proposals=[{"action": "archive_entry", "path": "x.md", "reasoning": "test"}],
+        interrupts=[],
+    )
 
 
 def _wait_for(condition, *, timeout: float = 2.0, interval: float = 0.02):
@@ -182,8 +182,10 @@ def test_debounce_collapses_repeated_stops(quick_config):
         return _empty_packet(snap)
 
     sched = Scheduler(
-        buffer=buf, config=quick_config,
-        librarian=_lib, scholar=lambda batch: None,
+        buffer=buf,
+        config=quick_config,
+        librarian=_lib,
+        scholar=lambda batch: None,
     )
     sched.start()
     try:
@@ -212,8 +214,10 @@ def test_separated_stops_each_fire_librarian(quick_config):
         return _empty_packet(snap)
 
     sched = Scheduler(
-        buffer=buf, config=quick_config,
-        librarian=_lib, scholar=lambda batch: None,
+        buffer=buf,
+        config=quick_config,
+        librarian=_lib,
+        scholar=lambda batch: None,
     )
     sched.start()
     try:
@@ -238,22 +242,22 @@ def test_session_end_uses_shorter_debounce(quick_config):
         return _empty_packet(snap)
 
     sched = Scheduler(
-        buffer=buf, config=quick_config,
-        librarian=_lib, scholar=lambda batch: None,
+        buffer=buf,
+        config=quick_config,
+        librarian=_lib,
+        scholar=lambda batch: None,
     )
     sched.start()
     started = time.monotonic()
     try:
-        sched.on_event(_ev(1.0, "s1", "Stop"))   # arms 0.10s window
+        sched.on_event(_ev(1.0, "s1", "Stop"))  # arms 0.10s window
         time.sleep(0.01)
         sched.on_event(_ev(2.0, "s1", "SessionEnd"))  # shortens to 0.02s
         _wait_for(lambda: len(lib_calls) == 1, timeout=1.0)
         # Should have fired close to session_end_debounce, well before
         # the 0.10s Stop window would have allowed.
         elapsed = lib_calls[0] - started
-        assert elapsed < 0.08, (
-            f"SessionEnd should have shortened window; got {elapsed:.3f}s"
-        )
+        assert elapsed < 0.08, f"SessionEnd should have shortened window; got {elapsed:.3f}s"
     finally:
         sched.stop()
 
@@ -291,8 +295,10 @@ def test_parallel_librarian_workers_run_concurrently(quick_config):
         sweep_interval_secs=999.0,
     )
     sched = Scheduler(
-        buffer=buf, config=cfg,
-        librarian=_slow_lib, scholar=lambda batch: None,
+        buffer=buf,
+        config=cfg,
+        librarian=_slow_lib,
+        scholar=lambda batch: None,
     )
     sched.start()
     started = time.monotonic()
@@ -305,12 +311,10 @@ def test_parallel_librarian_workers_run_concurrently(quick_config):
         # Serial would be ≥ 3 × 0.30 = 0.90 s + debounce. Parallel
         # should be closer to 1 × 0.30 + debounce ≈ 0.40 s.
         assert elapsed < 0.80, (
-            f"workers did not run in parallel; wall-clock={elapsed:.3f}s "
-            f"(serial would be ≥0.90s)"
+            f"workers did not run in parallel; wall-clock={elapsed:.3f}s (serial would be ≥0.90s)"
         )
         assert peak_in_flight[0] >= 2, (
-            f"expected ≥2 concurrent librarians, observed peak="
-            f"{peak_in_flight[0]}"
+            f"expected ≥2 concurrent librarians, observed peak={peak_in_flight[0]}"
         )
     finally:
         sched.stop()
@@ -328,8 +332,10 @@ def test_scholar_batches_rapid_packets(quick_config):
             sch_batches.append(list(batch))
 
     sched = Scheduler(
-        buffer=buf, config=quick_config,
-        librarian=_proposal_packet, scholar=_sch,
+        buffer=buf,
+        config=quick_config,
+        librarian=_proposal_packet,
+        scholar=_sch,
     )
     sched.start()
     try:
@@ -359,8 +365,10 @@ def test_scholar_fires_on_timer_for_single_packet(quick_config):
             sch_batches.append(len(batch))
 
     sched = Scheduler(
-        buffer=buf, config=quick_config,
-        librarian=_proposal_packet, scholar=_sch,
+        buffer=buf,
+        config=quick_config,
+        librarian=_proposal_packet,
+        scholar=_sch,
     )
     sched.start()
     try:
@@ -394,8 +402,10 @@ def test_scholar_max_batch_caps_burst(quick_config):
             sch_batches.append(len(batch))
 
     sched = Scheduler(
-        buffer=buf, config=cfg,
-        librarian=_proposal_packet, scholar=_sch,
+        buffer=buf,
+        config=cfg,
+        librarian=_proposal_packet,
+        scholar=_sch,
     )
     sched.start()
     try:
@@ -408,9 +418,7 @@ def test_scholar_max_batch_caps_burst(quick_config):
         )
         with sch_lock:
             sizes = list(sch_batches)
-        assert all(s <= 5 for s in sizes), (
-            f"batch larger than cap: sizes={sizes}"
-        )
+        assert all(s <= 5 for s in sizes), f"batch larger than cap: sizes={sizes}"
         assert sum(sizes) == 15
     finally:
         sched.stop()
@@ -423,10 +431,10 @@ def test_backpressure_drops_packet_on_full_queue(caplog):
         librarian_concurrency=2,
         librarian_debounce_secs=0.02,
         session_end_debounce_secs=0.02,
-        scholar_every_k=100,    # don't drain
+        scholar_every_k=100,  # don't drain
         scholar_every_m_secs=999.0,
         scholar_max_batch=10,
-        queue_ceiling=2,        # tiny ceiling
+        queue_ceiling=2,  # tiny ceiling
         sweep_interval_secs=999.0,
     )
     buf = RollingBuffer()
@@ -467,7 +475,7 @@ def test_shutdown_drains_queued_packets():
         librarian_concurrency=2,
         librarian_debounce_secs=0.02,
         session_end_debounce_secs=0.02,
-        scholar_every_k=100,        # never fire on count
+        scholar_every_k=100,  # never fire on count
         scholar_every_m_secs=999.0,  # never fire on time
         scholar_max_batch=10,
         queue_ceiling=100,
@@ -482,8 +490,10 @@ def test_shutdown_drains_queued_packets():
             sch_batches.append(len(batch))
 
     sched = Scheduler(
-        buffer=buf, config=cfg,
-        librarian=_proposal_packet, scholar=_sch,
+        buffer=buf,
+        config=cfg,
+        librarian=_proposal_packet,
+        scholar=_sch,
     )
     sched.start()
     try:
@@ -500,9 +510,7 @@ def test_shutdown_drains_queued_packets():
         sched.stop()
     # After stop(), the final drain must have flushed all 4 packets.
     with sch_lock:
-        assert sum(sch_batches) == 4, (
-            f"final drain incomplete; batches={sch_batches}"
-        )
+        assert sum(sch_batches) == 4, f"final drain incomplete; batches={sch_batches}"
 
 
 def test_librarian_exception_does_not_crash_pool(quick_config, caplog):
@@ -522,8 +530,10 @@ def test_librarian_exception_does_not_crash_pool(quick_config, caplog):
         return _empty_packet(snap)
 
     sched = Scheduler(
-        buffer=buf, config=quick_config,
-        librarian=_flaky, scholar=lambda batch: None,
+        buffer=buf,
+        config=quick_config,
+        librarian=_flaky,
+        scholar=lambda batch: None,
     )
     sched.start()
     caplog.set_level(logging.WARNING)
@@ -533,8 +543,7 @@ def test_librarian_exception_does_not_crash_pool(quick_config, caplog):
         _wait_for(lambda: len(successful) == 2, timeout=3.0)
         assert set(successful) == {"good1", "good2"}
         # Exception was logged.
-        assert any("librarian callable raised" in r.message
-                   for r in caplog.records)
+        assert any("librarian callable raised" in r.message for r in caplog.records)
     finally:
         sched.stop()
 
@@ -552,8 +561,10 @@ def test_scholar_exception_does_not_crash_worker(quick_config, caplog):
                 raise RuntimeError("scholar boom")
 
     sched = Scheduler(
-        buffer=buf, config=quick_config,
-        librarian=_proposal_packet, scholar=_flaky_sch,
+        buffer=buf,
+        config=quick_config,
+        librarian=_proposal_packet,
+        scholar=_flaky_sch,
     )
     sched.start()
     caplog.set_level(logging.WARNING)
@@ -567,8 +578,7 @@ def test_scholar_exception_does_not_crash_worker(quick_config, caplog):
         for sid in ("t1", "t2", "t3"):
             sched.on_event(_ev(2.0, sid, "Stop"))
         _wait_for(lambda: sch_attempts[0] >= 2, timeout=3.0)
-        assert any("scholar callable raised" in r.message
-                   for r in caplog.records)
+        assert any("scholar callable raised" in r.message for r in caplog.records)
     finally:
         sched.stop()
 
@@ -584,8 +594,10 @@ def test_on_event_non_stop_does_not_arm_debounce(quick_config):
         return _empty_packet(snap)
 
     sched = Scheduler(
-        buffer=buf, config=quick_config,
-        librarian=_lib, scholar=lambda batch: None,
+        buffer=buf,
+        config=quick_config,
+        librarian=_lib,
+        scholar=lambda batch: None,
     )
     sched.start()
     try:
@@ -612,8 +624,10 @@ def test_queue_size_reports_scholar_queue(quick_config):
     )
     buf = RollingBuffer()
     sched = Scheduler(
-        buffer=buf, config=cfg,
-        librarian=_proposal_packet, scholar=lambda batch: None,
+        buffer=buf,
+        config=cfg,
+        librarian=_proposal_packet,
+        scholar=lambda batch: None,
     )
     sched.start()
     try:
@@ -644,8 +658,10 @@ def test_force_scholar_drains_immediately():
         sch_batches.append(len(batch))
 
     sched = Scheduler(
-        buffer=buf, config=cfg,
-        librarian=_proposal_packet, scholar=_sch,
+        buffer=buf,
+        config=cfg,
+        librarian=_proposal_packet,
+        scholar=_sch,
     )
     sched.start()
     try:
@@ -663,8 +679,10 @@ def test_tick_is_noop_for_backcompat(quick_config):
     """``tick`` is a no-op in v2 but the symbol must still exist."""
     buf = RollingBuffer()
     sched = Scheduler(
-        buffer=buf, config=quick_config,
-        librarian=_empty_packet, scholar=lambda batch: None,
+        buffer=buf,
+        config=quick_config,
+        librarian=_empty_packet,
+        scholar=lambda batch: None,
     )
     sched.tick()  # must not raise
     sched.tick(now=1234.0)

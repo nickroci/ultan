@@ -48,6 +48,7 @@ in-flight work to drain (no SIGKILL of the SDK calls — they finish or
 hit their own timeout), then forces one final Scholar drain so nothing
 queued is lost.
 """
+
 from __future__ import annotations
 
 import logging
@@ -55,28 +56,26 @@ import queue
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
-from .buffer import RollingBuffer
 from . import librarian as librarian_mod
 from . import scholar as scholar_mod
+from .buffer import RollingBuffer
 from .librarian import EvidencePacket
-
 
 log = logging.getLogger("agent_mem_daemon.scheduler")
 
 
 # Defaults — see scope brief / __main__.py for CLI knobs.
-DEFAULT_LIBRARIAN_CONCURRENCY = 2     # parallel Haiku calls
+DEFAULT_LIBRARIAN_CONCURRENCY = 2  # parallel Haiku calls
 DEFAULT_LIBRARIAN_DEBOUNCE_SECS = 30.0  # collapse bursty Stops
 DEFAULT_SESSION_END_DEBOUNCE_SECS = 5.0  # SessionEnd: session is over
-DEFAULT_SCHOLAR_EVERY_K = 3           # Scholar runs every K packets...
-DEFAULT_SCHOLAR_EVERY_M_SECS = 60.0   # ...or every M seconds, whichever first
-DEFAULT_SCHOLAR_MAX_BATCH = 10        # cap batch size for runaway bursts
-DEFAULT_QUEUE_CEILING = 100           # bounded queue capacity
-DEFAULT_SWEEP_INTERVAL_SECS = 300.0   # buffer.sweep cadence
+DEFAULT_SCHOLAR_EVERY_K = 3  # Scholar runs every K packets...
+DEFAULT_SCHOLAR_EVERY_M_SECS = 60.0  # ...or every M seconds, whichever first
+DEFAULT_SCHOLAR_MAX_BATCH = 10  # cap batch size for runaway bursts
+DEFAULT_QUEUE_CEILING = 100  # bounded queue capacity
+DEFAULT_SWEEP_INTERVAL_SECS = 300.0  # buffer.sweep cadence
 
 
 LibrarianFn = Callable[[Dict[str, Any]], EvidencePacket]
@@ -145,18 +144,14 @@ class DebounceScheduler:
         requires."""
         fire_at = time.monotonic() + max(delay_secs, 0.0)
         with self._cond:
-            existing = self._timers.get(session_id)
             # The brief says: "If another Stop lands before the timer
             # fires, reset (extend) the timer." We honour that by
-            # taking the max of (existing, new) — never shortening a
-            # window that's already been set, only pushing it out.
-            # SessionEnd's short window does *not* override a longer
-            # Stop-driven window because SessionEnd merely shortens —
-            # but the brief says SessionEnd shortens to 5 s, so we
-            # explicitly let SessionEnd undercut by taking the *min*
-            # via a separate code path below. ``arm`` therefore
-            # always pushes the timer to fire_at (overwrite), and
-            # ``arm_shorter`` is the dedicated "session is over" path.
+            # simply overwriting the existing fire_at — every new Stop
+            # pushes the window out to the new value.
+            # SessionEnd's short window does *not* override via this
+            # path; it uses ``arm_shorter`` below which takes the
+            # *min* of existing and new so an already-ended session
+            # doesn't have to wait for the Stop debounce.
             self._timers[session_id] = fire_at
             self._cond.notify_all()
 
@@ -209,10 +204,7 @@ class DebounceScheduler:
                     self._cond.wait(timeout=wait_for)
                     continue
                 # Collect everyone due.
-                due = [
-                    sid for sid, fire_at in self._timers.items()
-                    if fire_at <= now
-                ]
+                due = [sid for sid, fire_at in self._timers.items() if fire_at <= now]
                 for sid in due:
                     self._timers.pop(sid, None)
             # Fire outside the lock — the callback enqueues into another
@@ -261,7 +253,9 @@ class ScholarWorker:
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread = threading.Thread(
-            target=self._loop, name="scholar-worker", daemon=True,
+            target=self._loop,
+            name="scholar-worker",
+            daemon=True,
         )
         self._last_drain = time.monotonic()
         # Used by ``force_drain`` to ensure the final shutdown batch is
@@ -324,9 +318,9 @@ class ScholarWorker:
                 self._last_drain = time.monotonic()
                 return
             log.info(
-                "scholar-worker: draining batch of %d packet(s) "
-                "(queue_remaining=%d)",
-                len(batch), self._q.qsize(),
+                "scholar-worker: draining batch of %d packet(s) (queue_remaining=%d)",
+                len(batch),
+                self._q.qsize(),
             )
             try:
                 self._fn(batch)
@@ -468,7 +462,9 @@ class Scheduler:
         self._debounce.start()
         self._scholar_worker.start()
         self._sweep_thread = threading.Thread(
-            target=self._sweep_loop, name="buffer-sweep", daemon=True,
+            target=self._sweep_loop,
+            name="buffer-sweep",
+            daemon=True,
         )
         self._sweep_thread.start()
         log.info(
@@ -485,11 +481,11 @@ class Scheduler:
 
     def stop(self) -> None:
         """Clean shutdown:
-          1. Stop the debounce thread (no new librarian work).
-          2. Wait for in-flight librarian futures to complete (the SDK
-             call has its own timeout — we don't kill it).
-          3. Stop the scholar worker, letting it drain whatever's queued.
-          4. Stop the sweep thread.
+        1. Stop the debounce thread (no new librarian work).
+        2. Wait for in-flight librarian futures to complete (the SDK
+           call has its own timeout — we don't kill it).
+        3. Stop the scholar worker, letting it drain whatever's queued.
+        4. Stop the sweep thread.
         """
         if not self._started:
             return
@@ -553,8 +549,7 @@ class Scheduler:
                 delay_secs=self.config.session_end_debounce_secs,
             )
             log.debug(
-                "scheduler: armed SessionEnd debounce (session=%s "
-                "delay=%.1fs)",
+                "scheduler: armed SessionEnd debounce (session=%s delay=%.1fs)",
                 sealed_sess.session_id,
                 self.config.session_end_debounce_secs,
             )
@@ -564,8 +559,7 @@ class Scheduler:
                 delay_secs=self.config.librarian_debounce_secs,
             )
             log.debug(
-                "scheduler: armed Librarian debounce (session=%s "
-                "delay=%.1fs)",
+                "scheduler: armed Librarian debounce (session=%s delay=%.1fs)",
                 sealed_sess.session_id,
                 self.config.librarian_debounce_secs,
             )
@@ -584,8 +578,7 @@ class Scheduler:
         sess = self.buffer.session(session_id)
         if sess is None:
             log.debug(
-                "debounce fired for %s but session no longer present "
-                "(swept?); skipping",
+                "debounce fired for %s but session no longer present (swept?); skipping",
                 session_id,
             )
             return
@@ -596,7 +589,8 @@ class Scheduler:
             log.warning(
                 "BACKPRESSURE: librarian queue full (cap=%d); dropping "
                 "session=%s — buffer keeps the events, we lose this pass",
-                self.config.queue_ceiling, session_id,
+                self.config.queue_ceiling,
+                session_id,
             )
             return
         sess.needs_librarian = False
@@ -647,7 +641,8 @@ class Scheduler:
         if not isinstance(packet, dict):
             log.warning(
                 "librarian returned non-dict %r; ignoring (session=%s)",
-                type(packet), session_id,
+                type(packet),
+                session_id,
             )
             return
         # Normalise — keep parity with v1 contract for downstream Scholar.
@@ -663,7 +658,8 @@ class Scheduler:
             log.warning(
                 "BACKPRESSURE: scholar queue full (cap=%d); dropping "
                 "packet for session=%s — Librarian pass wasted",
-                self.config.queue_ceiling, session_id,
+                self.config.queue_ceiling,
+                session_id,
             )
             return
         self.stats.packets_queued_total += 1
@@ -674,8 +670,7 @@ class Scheduler:
         # Wake the scholar so it can re-evaluate triggers.
         self._scholar_worker.notify()
         log.debug(
-            "librarian worker: emitted packet for session=%s "
-            "(scholar_queue=%d, runs=%d)",
+            "librarian worker: emitted packet for session=%s (scholar_queue=%d, runs=%d)",
             session_id,
             self._scholar_queue.qsize(),
             self.stats.librarian_runs,
@@ -694,7 +689,8 @@ class Scheduler:
                 if dropped:
                     log.info(
                         "sweep dropped %d idle session(s): %s",
-                        len(dropped), dropped,
+                        len(dropped),
+                        dropped,
                     )
                 self.stats.last_sweep_ts = time.time()
             except Exception:

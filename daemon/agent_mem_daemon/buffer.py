@@ -23,6 +23,7 @@ reading methods on :class:`RollingBuffer` acquire an internal
 :class:`threading.RLock` so multiple threads can safely call
 ``ingest``, ``snapshot``, ``sweep`` etc. without external locking.
 """
+
 from __future__ import annotations
 
 import threading
@@ -30,7 +31,6 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, List, Optional
-
 
 DEFAULT_MAX_TURNS = 20
 DEFAULT_INACTIVITY_SECONDS = 60 * 60  # 1 hour
@@ -40,9 +40,9 @@ DEFAULT_INACTIVITY_SECONDS = 60 * 60  # 1 hour
 class Event:
     """One parsed line from the events JSONL."""
 
-    ts: float                # unix seconds; falls back to receipt time
+    ts: float  # unix seconds; falls back to receipt time
     session_id: str
-    type: str                # PostToolUse | Stop | SessionEnd | ...
+    type: str  # PostToolUse | Stop | SessionEnd | ...
     cwd: Optional[str] = None
     payload: Dict[str, Any] = field(default_factory=dict)
     raw: Dict[str, Any] = field(default_factory=dict)

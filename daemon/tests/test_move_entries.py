@@ -4,14 +4,15 @@ The tool runs deterministic Python — no LLM in the loop — so we can
 test the implementation function directly without spinning up the
 Claude Agent SDK.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
 
 from agent_mem_daemon.library_tools import (
     _move_entries_impl,
-    _rewrite_wikilinks_in_text,
     _path_to_wikilink,
+    _rewrite_wikilinks_in_text,
 )
 
 
@@ -126,10 +127,7 @@ def test_existing_readme_is_left_untouched(tmp_path: Path) -> None:
     text = _text(result)
     assert "left existing" in text
     # README content was NOT replaced.
-    assert (
-        (root / "global/user/profile/README.md").read_text()
-        == "# Pre-existing\n"
-    )
+    assert (root / "global/user/profile/README.md").read_text() == "# Pre-existing\n"
 
 
 def test_rejects_path_escape(tmp_path: Path) -> None:
@@ -165,7 +163,8 @@ def test_rejects_overwrite(tmp_path: Path) -> None:
     root = _seed_library(tmp_path)
     (root / "global/user/profile").mkdir(parents=True)
     (root / "global/user/profile/foo.md").write_text(
-        "preexisting", encoding="utf-8",
+        "preexisting",
+        encoding="utf-8",
     )
 
     result = _move_entries_impl(
@@ -179,9 +178,7 @@ def test_rejects_overwrite(tmp_path: Path) -> None:
     assert "already exists" in _text(result)
     # Both source and destination untouched.
     assert (root / "global/user/foo.md").exists()
-    assert (
-        (root / "global/user/profile/foo.md").read_text() == "preexisting"
-    )
+    assert (root / "global/user/profile/foo.md").read_text() == "preexisting"
 
 
 def test_rewrite_helper_preserves_aliases_and_md_suffix() -> None:

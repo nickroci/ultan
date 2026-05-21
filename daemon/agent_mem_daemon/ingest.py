@@ -22,6 +22,7 @@ Robustness requirements:
 4. **Cooperative shutdown.** ``run_forever`` checks ``stop_event``
    between polls so SIGTERM/SIGINT can drain in one poll interval.
 """
+
 from __future__ import annotations
 
 import json
@@ -35,7 +36,6 @@ from typing import Callable, Optional, TextIO
 
 from .buffer import Event
 
-
 log = logging.getLogger("agent_mem_daemon.ingest")
 
 # How long to wait when there's nothing new on the file. Short enough
@@ -46,15 +46,23 @@ DEFAULT_POLL_INTERVAL = 0.25
 # Recognised event types. The ingester accepts anything but logs at
 # DEBUG when it sees a type it doesn't recognise — this is forward-
 # compatibility for the hook author adding UserPromptSubmit etc.
-KNOWN_TYPES = {"PostToolUse", "PreToolUse", "Stop", "SessionEnd", "UserPromptSubmit", "SessionStart"}
+KNOWN_TYPES = {
+    "PostToolUse",
+    "PreToolUse",
+    "Stop",
+    "SessionEnd",
+    "UserPromptSubmit",
+    "SessionStart",
+}
 
 
 @dataclass
 class _OpenFile:
     """The file we're currently tailing, plus identity for rotation
     detection."""
+
     path: Path
-    fh: TextIO   # text-mode file handle from open(path, "r", encoding="utf-8")
+    fh: TextIO  # text-mode file handle from open(path, "r", encoding="utf-8")
     inode: int
     dev: int
     offset: int = 0
@@ -156,7 +164,9 @@ def _open(
         fh.seek(resume_offset)
         log.info(
             "tailer: resuming %s at offset %d (file size %d)",
-            path, resume_offset, st.st_size,
+            path,
+            resume_offset,
+            st.st_size,
         )
     elif start_from_end:
         fh.seek(0, os.SEEK_END)
@@ -165,7 +175,8 @@ def _open(
         if st.st_size > 0:
             log.info(
                 "tailer: opening %s from start (size %d) — no resume state",
-                path, st.st_size,
+                path,
+                st.st_size,
             )
 
     return _OpenFile(
@@ -273,6 +284,7 @@ def _coerce_ts(ts_raw) -> Optional[float]:
         # to '+00:00' before parsing.
         try:
             from datetime import datetime
+
             s = ts_raw.replace("Z", "+00:00")
             return datetime.fromisoformat(s).timestamp()
         except (ValueError, ImportError):
@@ -357,7 +369,9 @@ class JsonlTailer:
             # (catches grow-then-shrink between polls).
             log.info(
                 "events file truncated (size=%d, offset=%d, last_size=%d); re-opening",
-                size, of.offset, of.last_size,
+                size,
+                of.offset,
+                of.last_size,
             )
             self._of = _reopen_from_start(of)
             if self._of is None:
@@ -376,9 +390,7 @@ class JsonlTailer:
             # We could miss this if the rewrite happens to land in the
             # same instant as the last mtime, but at filesystem-ns
             # resolution that's effectively zero.
-            log.info(
-                "events file rewritten in place (mtime advanced, size unchanged); re-opening"
-            )
+            log.info("events file rewritten in place (mtime advanced, size unchanged); re-opening")
             self._of = _reopen_from_start(of)
             if self._of is None:
                 return 0

@@ -14,6 +14,7 @@ Coverage:
   - The daemon's librarian flatten_buffer picks up the
     ``user_asserted=true`` flag from events the script wrote.
 """
+
 from __future__ import annotations
 
 import json
@@ -22,12 +23,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
-
-ULTAN_SCRIPT = (
-    Path(__file__).resolve().parents[2] / "tools" / "ultan" / "remember.py"
-)
+ULTAN_SCRIPT = Path(__file__).resolve().parents[2] / "tools" / "ultan" / "remember.py"
 
 
 def _run_ultan(args, *, env_home: Path, cwd: Path | None = None) -> subprocess.CompletedProcess:
@@ -130,16 +126,19 @@ def test_ultan_event_flows_through_librarian_flatten(tmp_path: Path):
     snap = {
         "session_id": events[0]["session_id"],
         "cwd": events[0].get("cwd"),
-        "turns": [{
-            "started_at": 1.0, "sealed_at": 2.0,
-            "events": [
-                {"ts": 1.0, "type": ev["type"], "cwd": ev.get("cwd"),
-                 "payload": ev["payload"]}
-                for ev in events
-            ],
-        }],
+        "turns": [
+            {
+                "started_at": 1.0,
+                "sealed_at": 2.0,
+                "events": [
+                    {"ts": 1.0, "type": ev["type"], "cwd": ev.get("cwd"), "payload": ev["payload"]}
+                    for ev in events
+                ],
+            }
+        ],
     }
     from agent_mem_daemon import librarian_prompt as lp
+
     flat = lp.flatten_buffer(snap)
     assert len(flat) == 1
     _tid, role, text, user_asserted = flat[0]

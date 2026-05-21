@@ -13,7 +13,6 @@ import pytest
 import cli
 from frontmatter import read as fm_read
 
-
 FIXTURES = Path(__file__).parent / "fixtures" / "knowledge"
 
 
@@ -127,9 +126,7 @@ def test_forget_moves_file_to_archive(knowledge_dir: Path) -> None:
 def test_forget_preserves_project_path(knowledge_dir: Path) -> None:
     rc = cli.cmd_forget(knowledge_dir, "prov-two")
     assert rc == 0
-    archived = (
-        knowledge_dir / "_archive" / "projects" / "example-app" / "concepts" / "prov-two.md"
-    )
+    archived = knowledge_dir / "_archive" / "projects" / "example-app" / "concepts" / "prov-two.md"
     assert archived.exists()
 
 

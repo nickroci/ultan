@@ -17,7 +17,6 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-
 # ── Slug normaliser ────────────────────────────────────────────────────
 
 _SLUG_RE = re.compile(r"[^a-z0-9._-]+")

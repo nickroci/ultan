@@ -48,6 +48,7 @@ embedding model load happens once at first call (lazy import inside
 ``priming._hybrid_search``) — module-level caches in ``embeddings.py``
 mean subsequent requests are warm.
 """
+
 from __future__ import annotations
 
 import json
@@ -63,7 +64,6 @@ from typing import Optional
 
 from . import priming
 from .paths import knowledge_dir, priming_socket_path
-
 
 log = logging.getLogger("agent_mem_daemon.priming_rpc")
 
@@ -171,7 +171,9 @@ def _handle_priming(req: dict) -> dict:
     # low-BM25-but-heavily-reinforced entry into the top_k. Mirrors
     # priming.refresh_hot_context's strategy.
     hits = priming._hybrid_search(
-        kdir, prompt, k=max(k * 2, k + 3),
+        kdir,
+        prompt,
+        k=max(k * 2, k + 3),
     )
     # Best-effort lane detection: if embeddings are unavailable the
     # embedding lane returns []; we report bm25 in that case so the
@@ -188,7 +190,10 @@ def _handle_priming(req: dict) -> dict:
 
     ranked = priming._boost_with_reinforcement(hits)
     body = priming._assemble_output(
-        ranked, kdir, top_k=k, char_budget=char_budget,
+        ranked,
+        kdir,
+        top_k=k,
+        char_budget=char_budget,
     )
     took_ms = int((time.monotonic() - t0) * 1000)
     return {"ok": True, "priming_md": body or "", "took_ms": took_ms, "lane": lane}
@@ -272,12 +277,12 @@ def _handle_fetch_entry(req: dict) -> dict:
     content = target.read_text(encoding="utf-8")
     parent = target.parent
     siblings = sorted(
-        f.name for f in parent.iterdir()
+        f.name
+        for f in parent.iterdir()
         if f.is_file() and f.suffix == ".md" and f.name != target.name
     )
     subdirs = sorted(
-        f.name + "/" for f in parent.iterdir()
-        if f.is_dir() and not f.name.startswith(".")
+        f.name + "/" for f in parent.iterdir() if f.is_dir() and not f.name.startswith(".")
     )
     parent_readme = parent / "README.md"
     parent_readme_excerpt = ""
@@ -333,7 +338,9 @@ def _handle_connection(conn: socket.socket, addr) -> None:
         try:
             body = json.dumps(resp).encode("utf-8")
         except (TypeError, ValueError) as e:
-            body = json.dumps({"ok": False, "error": f"unserializable response: {e}"}).encode("utf-8")
+            body = json.dumps({"ok": False, "error": f"unserializable response: {e}"}).encode(
+                "utf-8"
+            )
 
         try:
             _send_message(conn, body)

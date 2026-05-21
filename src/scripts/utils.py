@@ -31,8 +31,8 @@ from config import (
     STATE_FILE,
 )
 
-
 # ── State management ──────────────────────────────────────────────────
+
 
 def load_state() -> dict:
     """Load persistent state from state.json."""
@@ -49,12 +49,14 @@ def save_state(state: dict) -> None:
 
 # ── File hashing ──────────────────────────────────────────────────────
 
+
 def file_hash(path: Path) -> str:
     """SHA-256 hash of a file (first 16 hex chars)."""
     return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
 
 
 # ── Slug / naming ─────────────────────────────────────────────────────
+
 
 def slugify(text: str) -> str:
     """Convert text to a filename-safe slug."""
@@ -66,6 +68,7 @@ def slugify(text: str) -> str:
 
 
 # ── Wikilink helpers ──────────────────────────────────────────────────
+
 
 def extract_wikilinks(content: str) -> list[str]:
     """Extract all [[wikilinks]] from markdown content."""
@@ -93,6 +96,7 @@ def wiki_article_exists(link: str) -> bool:
 
 
 # ── Wiki content helpers ──────────────────────────────────────────────
+
 
 def read_wiki_index() -> str:
     """Read the knowledge base index file."""
@@ -157,6 +161,7 @@ def list_raw_files() -> list[Path]:
 
 # ── Index helpers ─────────────────────────────────────────────────────
 
+
 def count_inbound_links(target: str, exclude_file: Path | None = None) -> int:
     """Count how many wiki articles link to a given target.
 
@@ -166,7 +171,7 @@ def count_inbound_links(target: str, exclude_file: Path | None = None) -> int:
     """
     alt: str | None = None
     if target.startswith("global/"):
-        alt = target[len("global/"):]
+        alt = target[len("global/") :]
     elif "/" in target and not target.startswith("projects/"):
         alt = f"global/{target}"
 
@@ -189,7 +194,7 @@ def get_article_word_count(path: Path) -> int:
     if content.startswith("---"):
         end = content.find("---", 3)
         if end != -1:
-            content = content[end + 3:]
+            content = content[end + 3 :]
     return len(content.split())
 
 

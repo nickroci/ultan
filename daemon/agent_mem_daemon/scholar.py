@@ -16,19 +16,16 @@ orthogonal and unchanged.
 
 ``review(packets)`` keeps the signature the scheduler depends on.
 """
+
 from __future__ import annotations
 
 import logging
 import time
-from typing import List
+from typing import Any, Mapping, Sequence
 
-from . import priming
-from . import runs
-from . import scholar_prompt
-from .librarian import EvidencePacket
-from .llm import LLMTimeout, SCHOLAR_TIMEOUT_S, run_scholar_call
+from . import priming, runs, scholar_prompt
+from .llm import SCHOLAR_TIMEOUT_S, LLMTimeout, run_scholar_call
 from .paths import ensure_home, hot_context_path, knowledge_dir
-
 
 log = logging.getLogger("agent_mem_daemon.scholar")
 
@@ -36,7 +33,7 @@ log = logging.getLogger("agent_mem_daemon.scholar")
 _HETEROGENEOUS_SESSION_ID = "batch"
 
 
-def _batch_session_id(packets: List[EvidencePacket]) -> str:
+def _batch_session_id(packets: Sequence[Mapping[str, Any]]) -> str:
     sids = {p.get("session_id", "") for p in packets if p.get("session_id")}
     if not sids:
         return _HETEROGENEOUS_SESSION_ID
@@ -45,7 +42,7 @@ def _batch_session_id(packets: List[EvidencePacket]) -> str:
     return _HETEROGENEOUS_SESSION_ID
 
 
-def _all_empty(packets: List[EvidencePacket]) -> bool:
+def _all_empty(packets: Sequence[Mapping[str, Any]]) -> bool:
     """True when every packet has zero proposals AND zero interrupts."""
     for p in packets:
         if p.get("proposals") or p.get("interrupts"):
@@ -53,14 +50,16 @@ def _all_empty(packets: List[EvidencePacket]) -> bool:
     return True
 
 
-def _count_inputs(packets: List[EvidencePacket]) -> tuple[int, int, int]:
+def _count_inputs(
+    packets: Sequence[Mapping[str, Any]],
+) -> tuple[int, int, int]:
     """Returns (n_packets, n_proposals, n_interrupts) for logging."""
     n_props = sum(len(p.get("proposals") or []) for p in packets)
     n_ints = sum(len(p.get("interrupts") or []) for p in packets)
     return len(packets), n_props, n_ints
 
 
-def review(packets: List[EvidencePacket]) -> None:
+def review(packets: Sequence[Mapping[str, Any]]) -> None:
     """Judge a batch of Librarian packets.
 
     Args:
@@ -121,7 +120,8 @@ def review(packets: List[EvidencePacket]) -> None:
     # `salience_signal: "reinforces"` with a valid existing_entry path.
     try:
         reinforced_changes = scholar_prompt.apply_reinforcement_counters(
-            packets, knowledge_dir(),
+            packets,
+            knowledge_dir(),
         )
         if reinforced_changes:
             record.decisions["reinforcement_bumps"] = len(reinforced_changes)
@@ -132,7 +132,10 @@ def review(packets: List[EvidencePacket]) -> None:
 
     log.info(
         "scholar.review: invoking SDK (session=%s packets=%d proposals=%d interrupts=%d)",
-        session_id, n_packets, n_props, n_ints,
+        session_id,
+        n_packets,
+        n_props,
+        n_ints,
     )
 
     try:
@@ -162,7 +165,8 @@ def review(packets: List[EvidencePacket]) -> None:
             log.warning(
                 "scholar.review: final-JSON parse failed "
                 "(session=%s response_chars=%d); continuing without counters",
-                session_id, len(record.output_raw),
+                session_id,
+                len(record.output_raw),
             )
         else:
             decisions = scholar_prompt.summarise_decisions(parsed)
@@ -173,13 +177,13 @@ def review(packets: List[EvidencePacket]) -> None:
             try:
                 written = scholar_prompt.append_nudges_from_response(parsed)
                 if written:
-                    record.decisions["nudges_written"] = (
-                        record.decisions.get("nudges_written", 0) + len(written)
-                    )
+                    record.decisions["nudges_written"] = record.decisions.get(
+                        "nudges_written", 0
+                    ) + len(written)
                     log.info(
-                        "scholar.review: appended %d nudge(s) to pending-nudges.md "
-                        "(ids=%s)",
-                        len(written), [w["id"] for w in written],
+                        "scholar.review: appended %d nudge(s) to pending-nudges.md (ids=%s)",
+                        len(written),
+                        [w["id"] for w in written],
                     )
             except Exception:
                 log.exception("scholar.review: nudge-file append failed")
@@ -237,8 +241,11 @@ def review(packets: List[EvidencePacket]) -> None:
         log.info(
             "scholar.review: done (session=%s duration_ms=%d cost_usd=%.4f "
             "parsed_ok=%s decisions=%s)",
-            session_id, duration_ms, record.cost_usd,
-            record.parsed_ok, record.decisions,
+            session_id,
+            duration_ms,
+            record.cost_usd,
+            record.parsed_ok,
+            record.decisions,
         )
     finally:
         record.finalise()

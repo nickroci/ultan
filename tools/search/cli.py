@@ -47,8 +47,10 @@ from typing import Iterable, TextIO
 from bm25 import load_or_build
 from frontmatter import (
     FrontmatterError,
-    read as fm_read,
     set_status,
+)
+from frontmatter import (
+    read as fm_read,
 )
 
 DEFAULT_AGENT_MEM_ROOT = Path("~/.agent-mem").expanduser()
@@ -228,7 +230,7 @@ async def _run_index_query(knowledge_dir: Path, question: str) -> tuple[str, lis
     cited: list[Path] = []
     for line in answer.splitlines():
         if line.startswith("SOURCE:"):
-            raw = line[len("SOURCE:"):].strip()
+            raw = line[len("SOURCE:") :].strip()
             if raw:
                 p = Path(raw).expanduser()
                 if p.exists():
@@ -549,7 +551,7 @@ def cmd_review(
             if action in {"p", "promote"}:
                 try:
                     set_status(p, "confirmed")
-                    print(f"  -> promoted to confirmed")
+                    print("  -> promoted to confirmed")
                 except Exception as e:  # noqa: BLE001
                     print(f"  ! failed to promote: {e}", file=sys.stderr)
                 break
@@ -563,9 +565,7 @@ def cmd_review(
                 # Re-read to surface user changes before moving on.
                 try:
                     fm_after, _ = fm_read(p)
-                    print(
-                        f"  -> edited (status now: {fm_after.get('status', '?')})"
-                    )
+                    print(f"  -> edited (status now: {fm_after.get('status', '?')})")
                 except FrontmatterError as e:
                     print(f"  ! file no longer parses: {e}", file=sys.stderr)
                 break
@@ -637,8 +637,15 @@ def _run_structural_lint(knowledge_dir: Path) -> tuple[int, str]:
     env["AGENT_MEM_HOME"] = str(knowledge_dir.parent)
     try:
         result = subprocess.run(
-            ["uv", "run", "--directory", str(src_dir), "python",
-             "scripts/lint.py", "--structural-only"],
+            [
+                "uv",
+                "run",
+                "--directory",
+                str(src_dir),
+                "python",
+                "scripts/lint.py",
+                "--structural-only",
+            ],
             env=env,
             capture_output=True,
             text=True,
@@ -676,15 +683,15 @@ class DoctorReport:
 
     lint_rc: int
     lint_output: str
-    daemon_status: str           # "running" | "stale" | "absent"
+    daemon_status: str  # "running" | "stale" | "absent"
     daemon_pid: int | None
     cost_today: float
     cost_lifetime: float
     counts_by_status: dict[str, int]
     counts_by_scope: dict[str, int]
     total_entries: int
-    pending_nudges: int          # -1 if file absent
-    issues: list[str]            # human-readable strings; non-empty ⇒ rc != 0
+    pending_nudges: int  # -1 if file absent
+    issues: list[str]  # human-readable strings; non-empty ⇒ rc != 0
 
 
 def run_doctor(knowledge_dir: Path) -> DoctorReport:
@@ -734,7 +741,8 @@ def run_doctor(knowledge_dir: Path) -> DoctorReport:
             text = nudges_path.read_text(encoding="utf-8")
             # Treat each non-blank line that isn't a header as a nudge.
             pending_nudges = sum(
-                1 for line in text.splitlines()
+                1
+                for line in text.splitlines()
                 if line.strip() and not line.lstrip().startswith("#")
             )
         except OSError:
@@ -856,7 +864,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--knowledge-dir",
-        help="Override the knowledge dir (default: $AGENT_MEM_KNOWLEDGE or ~/.agent-mem/knowledge).",
+        help=(
+            "Override the knowledge dir (default: $AGENT_MEM_KNOWLEDGE or ~/.agent-mem/knowledge)."
+        ),
     )
 
     sub = p.add_subparsers(dest="command", required=True)
@@ -912,7 +922,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "promote",
         help="Set an entry's status to `confirmed`.",
     )
-    promote.add_argument("identifier", help="Entry id or path (absolute / relative to knowledge root).")
+    promote.add_argument(
+        "identifier",
+        help="Entry id or path (absolute / relative to knowledge root).",
+    )
 
     demote = sub.add_parser(
         "demote",
@@ -996,8 +1009,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if not hits and (not llm_answer.strip() or llm_answer.startswith("[")):
         print()
-        print("Nothing matched. The knowledge store may be empty or your query "
-              "doesn't intersect any stored entries.")
+        print(
+            "Nothing matched. The knowledge store may be empty or your query "
+            "doesn't intersect any stored entries."
+        )
     return 0
 
 

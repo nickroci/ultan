@@ -12,14 +12,12 @@ from __future__ import annotations
 
 import os
 import shutil
-import tempfile
 import time
 from pathlib import Path
 
 import pytest
 
 from embeddings import (
-    DEFAULT_MODEL,
     EmbeddingHit,
     EmbeddingIndex,
     _default_index_path,
@@ -155,9 +153,7 @@ def test_archive_subtree_excluded(tmp_path: Path) -> None:
     (knowledge / "global" / "concepts" / "live.md").write_text(
         "# Live entry\n\nThis should be indexed.\n"
     )
-    (knowledge / "_archive" / "old.md").write_text(
-        "# Archived\n\nThis should NOT be indexed.\n"
-    )
+    (knowledge / "_archive" / "old.md").write_text("# Archived\n\nThis should NOT be indexed.\n")
 
     index = build_index(knowledge)
     names = {Path(rec.path).name for rec in index.docs}

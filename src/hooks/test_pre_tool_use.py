@@ -8,6 +8,7 @@ Run from the ``src/`` directory with::
 
     uv run python -m pytest hooks/ -q
 """
+
 from __future__ import annotations
 
 import json
@@ -17,8 +18,6 @@ import sys
 from pathlib import Path
 from textwrap import dedent
 from unittest import mock
-
-import pytest
 
 _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
@@ -153,9 +152,7 @@ def test_edit_file_pattern_blocks(tmp_path: Path):
         """,
     )
     blockers = _blockers.load_blockers(knowledge)
-    match = _blockers.find_match(
-        blockers, "Edit", {"file_path": "/repo/prod/production.env"}
-    )
+    match = _blockers.find_match(blockers, "Edit", {"file_path": "/repo/prod/production.env"})
     assert match is not None
     # Non-matching file_path → allow.
     assert _blockers.find_match(blockers, "Edit", {"file_path": "/repo/dev.env"}) is None
@@ -387,7 +384,10 @@ def test_multiple_triggers_per_entry(tmp_path: Path):
     blockers = _blockers.load_blockers(knowledge)
     assert len(blockers) == 1
     assert len(blockers[0].triggers) == 2
-    assert _blockers.find_match(blockers, "Bash", {"command": "gcloud foo deploy bar prod"}) is not None
+    assert (
+        _blockers.find_match(blockers, "Bash", {"command": "gcloud foo deploy bar prod"})
+        is not None
+    )
     assert _blockers.find_match(blockers, "Edit", {"file_path": "x/production.env"}) is not None
     assert _blockers.find_match(blockers, "Write", {"file_path": "x/production.env"}) is None
 

@@ -34,7 +34,6 @@ from typing import Any, Dict, Optional
 
 from .paths import home
 
-
 log = logging.getLogger("agent_mem_daemon.runs")
 
 
@@ -143,7 +142,7 @@ class InvocationRecord:
     ``finalise()``.
     """
 
-    role: str                      # "librarian" | "scholar"
+    role: str  # "librarian" | "scholar"
     session_id: str
     started_at: float = field(default_factory=time.time)
     input_prompt: str = ""
@@ -172,9 +171,7 @@ class InvocationRecord:
 
     def _transcript_path(self) -> Path:
         d = ensure_runs_dir()
-        ts = datetime.fromtimestamp(self.started_at, tz=timezone.utc).strftime(
-            "%Y%m%dT%H%M%SZ"
-        )
+        ts = datetime.fromtimestamp(self.started_at, tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         sid = _sanitize(self.session_id)
         role = _sanitize(self.role)
         return d / f"{ts}-{role}-{sid}.md"
