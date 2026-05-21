@@ -300,3 +300,7 @@ Prior art worth borrowing from: **MemoryBank** (Zhong et al., 2024) applies the 
 ## License
 
 MIT.
+
+---
+
+![Librarian and Scholar](docs/librarian-and-scholar.png)
