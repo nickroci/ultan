@@ -105,65 +105,100 @@ def _atomic_write_aliases(home: Path, data: Mapping[str, str]) -> None:
     os.replace(tmp_path, path)
 
 
-def ensure_alias_for_cwd(
+def session_bucket(
     home: Path,
     cwd: Path,
     slug: Optional[str],
-) -> Optional[Tuple[str, str]]:
-    """Auto-detect and persist a ``{bucket: slug}`` alias on session start.
+) -> Optional[str]:
+    """Single source of truth: which library bucket does this session
+    belong to?
 
-    Scenario this handles: a repo cloned into folder ``X`` whose git
-    remote produces a slug different from ``X`` (e.g. ``X = agent-mem``
-    but slug = ``github.com-nickroci-ultan``). If a library bucket
-    named ``X`` already exists, write the mapping automatically so the
-    user doesn't have to hand-edit the config.
+    Used by every component that needs to answer "is this entry / nudge
+    / write target part of the current project?" — session-start, the
+    nudge filter, the priming scope-boost, and (in time) the scholar's
+    write-path computation. Centralising the rule keeps the four call
+    sites from drifting.
 
-    No-op (returns ``None``) when any of:
-    - ``slug`` is empty
-    - some existing bucket already resolves (directly or via alias) to
-      ``slug`` — nothing to add
-    - ``cwd`` isn't inside a git repo — the slug then came from cwd
-      basename already, no alias needed (and would be wrong if added)
-    - no library bucket exists with the repo-root basename
-    - that bucket already has an explicit alias entry — never overwrite
+    Resolution order:
 
-    Returns the ``(bucket, slug)`` pair that was added, otherwise ``None``.
+    1. **Existing bucket whose canonical slug matches the session slug.**
+       Iterate ``knowledge/projects/*``; return the first bucket dir
+       whose ``bucket_canonical_slug`` resolves to ``slug``. Covers the
+       steady-state case where the alias file is already set up.
+
+    2. **Derive a bucket-name candidate from cwd.** Walk up to the git
+       repo root if there is one (``agent-mem/daemon`` → ``agent-mem``);
+       otherwise fall back to the immediate cwd basename. Non-git
+       projects naturally get slug == basename, so this branch usually
+       only matters once git is added.
+
+    3. **Auto-add the alias when there's evidence of a real bucket.**
+       If a bucket dir already exists with the candidate name and has
+       no alias entry yet, persist ``{candidate: slug}`` atomically so
+       future priming + nudge filtering picks it up. Never overwrites
+       an existing alias.
+
+    4. **Always return the candidate.** Even when the bucket doesn't
+       exist yet — that's the name the scholar will use when it creates
+       the first entry for this project.
+
+    Returns ``None`` only when ``slug`` is empty (no session context).
     """
     if not slug:
         return None
 
     aliases = load_aliases(home)
     projects_dir = home / "knowledge" / "projects"
-    if not projects_dir.exists():
-        return None
 
-    # Already covered? Check every bucket's canonical slug against the
-    # session slug; if anything matches, no bootstrap needed.
-    for bucket_dir in projects_dir.iterdir():
-        if not bucket_dir.is_dir():
-            continue
-        if bucket_canonical_slug(bucket_dir.name, aliases) == slug:
-            return None
+    # Step 1: existing bucket already resolves to this slug.
+    if projects_dir.exists():
+        for bucket_dir in projects_dir.iterdir():
+            if not bucket_dir.is_dir():
+                continue
+            if bucket_canonical_slug(bucket_dir.name, aliases) == slug:
+                return bucket_dir.name
 
-    # No git -> slug came from cwd basename and either already matches
-    # a bucket (handled above) or there's no bucket yet. Either way we
-    # have nothing to write.
+    # Step 2: derive candidate. Repo root if we're in a git tree, else
+    # the cwd basename (which matches the no-git slug-derivation rule).
     repo_root = _find_repo_root(cwd)
-    if repo_root is None:
-        return None
-
-    bucket_name = repo_root.name
-    if not bucket_name:
-        return None
-    if bucket_name in aliases:
-        return None  # never overwrite
-    if not (projects_dir / bucket_name).is_dir():
-        return None
-
-    new_aliases = dict(aliases)
-    new_aliases[bucket_name] = slug
+    candidate_path = repo_root if repo_root is not None else cwd
     try:
-        _atomic_write_aliases(home, new_aliases)
-    except OSError:
+        candidate = candidate_path.resolve().name
+    except (OSError, RuntimeError):
+        candidate = candidate_path.name
+    if not candidate:
         return None
-    return bucket_name, slug
+
+    # Step 3: if a real bucket exists with this name, auto-bootstrap
+    # the alias so other call sites can find it from this session on.
+    # No-op when candidate == slug (no translation needed) or when an
+    # alias is already in place (don't overwrite — user might have
+    # set it explicitly).
+    bucket_exists = projects_dir.exists() and (projects_dir / candidate).is_dir()
+    if bucket_exists and candidate != slug and candidate not in aliases:
+        try:
+            _atomic_write_aliases(home, {**aliases, candidate: slug})
+        except OSError:
+            pass
+
+    return candidate
+
+
+def ensure_alias_for_cwd(
+    home: Path,
+    cwd: Path,
+    slug: Optional[str],
+) -> Optional[Tuple[str, str]]:
+    """Back-compat shim around :func:`session_bucket`. Returns the
+    ``(bucket, slug)`` pair if a new alias entry was persisted, else
+    ``None``. Prefer ``session_bucket`` in new code — it answers the
+    more useful question ("which bucket?") directly.
+    """
+    aliases_before = load_aliases(home)
+    bucket = session_bucket(home, cwd, slug)
+    if bucket is None or slug is None:
+        return None
+    aliases_after = load_aliases(home)
+    if aliases_after.get(bucket) == slug and aliases_before.get(bucket) != slug:
+        return bucket, slug
+    return None

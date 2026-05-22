@@ -165,6 +165,48 @@ def test_ensure_alias_noop_when_no_matching_bucket(tmp_path: Path):
     assert not aliases.aliases_path(home).exists()
 
 
+def test_session_bucket_returns_existing_bucket_via_alias(tmp_path: Path):
+    """When an alias already maps a bucket to this session slug,
+    session_bucket returns that bucket name directly — no write."""
+    home = tmp_path / "agent-mem-home"
+    home.mkdir()
+    _make_bucket(home, "agent-mem")
+    aliases.aliases_path(home).write_text(
+        '{"agent-mem": "github.com-nickroci-ultan"}', encoding="utf-8"
+    )
+    repo = _make_git_repo(tmp_path / "agent-mem")
+    assert aliases.session_bucket(home, repo, "github.com-nickroci-ultan") == "agent-mem"
+
+
+def test_session_bucket_returns_candidate_when_no_bucket_yet(tmp_path: Path):
+    """First-write scenario: no bucket exists yet, but the cwd basename
+    is the right candidate name. ``session_bucket`` returns it so the
+    scholar can ``mkdir`` and write the first entry there."""
+    home = tmp_path / "agent-mem-home"
+    home.mkdir()
+    repo = _make_git_repo(tmp_path / "new-thing")
+    # No projects/new-thing/ on disk yet.
+    assert aliases.session_bucket(home, repo, "github.com-x-new-thing") == "new-thing"
+
+
+def test_session_bucket_persists_alias_when_bucket_exists(tmp_path: Path):
+    """Existing bucket + matching cwd-basename + no alias yet ->
+    persist the alias as a side-effect, and return the bucket name."""
+    home = tmp_path / "agent-mem-home"
+    home.mkdir()
+    _make_bucket(home, "agent-mem")
+    repo = _make_git_repo(tmp_path / "agent-mem")
+    assert aliases.session_bucket(home, repo, "github.com-nickroci-ultan") == "agent-mem"
+    assert aliases.load_aliases(home) == {"agent-mem": "github.com-nickroci-ultan"}
+
+
+def test_session_bucket_returns_none_when_slug_empty(tmp_path: Path):
+    home = tmp_path / "agent-mem-home"
+    home.mkdir()
+    assert aliases.session_bucket(home, tmp_path, None) is None
+    assert aliases.session_bucket(home, tmp_path, "") is None
+
+
 def test_ensure_alias_adds_when_git_arrives_later(tmp_path: Path):
     """Simulate the 'I added a git remote after the bucket existed'
     flow: first session was no-git so no alias file; then user runs
