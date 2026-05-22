@@ -16,7 +16,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional, cast
+from typing import Any, Optional, cast
 
 _THIS_DIR = Path(__file__).resolve().parent
 _CODE_ROOT = _THIS_DIR.parent
@@ -26,16 +26,9 @@ if str(_SCRIPTS_DIR) not in sys.path:
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-import scope  # noqa: E402
 from _events import HookPayload, append_event  # noqa: E402
 from aliases import session_bucket  # noqa: E402
-
-# Local re-typed view of ``scope.current_project_slug`` — see
-# ``user_prompt_submit.py`` for the rationale.
-_current_project_slug: Callable[[Optional[str]], str] = cast(
-    Callable[[Optional[str]], str],
-    getattr(scope, "current_project_slug"),
-)
+from scope import current_project_slug  # noqa: E402
 
 MAX_CONTEXT_CHARS = 20_000
 MAX_LOG_LINES = 30
@@ -135,7 +128,7 @@ def main() -> None:
 
     hook_cwd: str = raw_cwd if raw_cwd else os.getcwd()
 
-    project_slug = _current_project_slug(hook_cwd)
+    project_slug = current_project_slug(hook_cwd)
 
     # Resolve which library bucket this session belongs to. Same call
     # the nudge filter (and eventually scholar's write path) uses — one

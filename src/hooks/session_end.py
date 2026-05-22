@@ -23,7 +23,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any, Callable, Optional, cast
+from typing import Any, cast
 
 _THIS_DIR = Path(__file__).resolve().parent
 _CODE_ROOT = _THIS_DIR.parent
@@ -33,19 +33,9 @@ if str(_SCRIPTS_DIR) not in sys.path:
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-import scope  # noqa: E402
 from _events import HookPayload, append_event  # noqa: E402
 from _flush_spawn import snapshot_and_spawn_flush  # noqa: E402
-
-# Local re-typed view of ``scope.current_project_slug`` — see
-# ``user_prompt_submit.py`` for the rationale. The upstream signature
-# still uses untyped ``os.PathLike`` so its inferred type leaks
-# Unknown; ``getattr`` + ``cast`` recovers a clean ``str | None ->
-# str`` callable without touching scope.py (owned by another slice).
-_current_project_slug: Callable[[Optional[str]], str] = cast(
-    Callable[[Optional[str]], str],
-    getattr(scope, "current_project_slug"),
-)
+from scope import current_project_slug  # noqa: E402
 
 MIN_TURNS_TO_FLUSH = 1
 
@@ -133,10 +123,10 @@ def main() -> None:
     append_event("SessionEnd", hook_input, payload={})
 
     # Project slug is derived from the host agent's cwd, NOT this
-    # hook's own cwd. Pass it explicitly to ``_current_project_slug``
+    # hook's own cwd. Pass it explicitly to ``current_project_slug``
     # — the hook may be invoked from anywhere depending on shell
     # wrapping.
-    project_slug = _current_project_slug(hook_cwd)
+    project_slug = current_project_slug(hook_cwd)
 
     logging.info(
         "SessionEnd fired: session=%s source=%s project=%s",

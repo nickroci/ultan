@@ -43,7 +43,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any, Callable, Optional, cast
+from typing import Any, Optional, cast
 
 _THIS_DIR = Path(__file__).resolve().parent
 _CODE_ROOT = _THIS_DIR.parent
@@ -53,21 +53,10 @@ if str(_SCRIPTS_DIR) not in sys.path:
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-# Local re-typed view of ``scope.current_project_slug``. The shared
-# ``scope`` module is owned by a different slice and still uses an
-# untyped ``os.PathLike`` parameter, so its inferred signature leaks
-# ``Unknown`` into every caller. We import it via a runtime ``getattr``
-# and cast back to a clean ``str | None -> str`` callable — this keeps
-# strict mode happy without touching upstream.
-import scope  # noqa: E402
 from _events import HookPayload, append_event  # noqa: E402
 from _nudges import render_context, take_nudges  # noqa: E402
 from _priming_client import get_priming  # noqa: E402
-
-current_project_slug: Callable[[Optional[str]], str] = cast(
-    Callable[[Optional[str]], str],
-    getattr(scope, "current_project_slug"),
-)
+from scope import current_project_slug  # noqa: E402
 
 
 def _emit_additional_context(context: str) -> None:
