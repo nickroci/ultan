@@ -21,6 +21,8 @@ import re
 from dataclasses import dataclass
 from typing import Iterable, List
 
+from markdown_it import MarkdownIt
+
 # Matches a wikilink target + optional alias.
 # Group 1 = target text, Group 2 = "|alias" suffix (may be missing).
 _WIKILINK_RE = re.compile(r"\[\[([^\[\]\|]+?)(\|[^\[\]]*)?\]\]")
@@ -63,15 +65,6 @@ def _iter_prose_text(text: str) -> Iterable[str]:
     a code fence is just "ignore tokens of type fence/code_block"; skipping
     an inline code span is "ignore children of type code_inline".
     """
-    try:
-        from markdown_it import MarkdownIt
-    except ImportError:  # pragma: no cover — listed as a direct dep
-        # Fall back to raw text if the parser isn't installed; callers
-        # will get a superset of links (including false positives), which
-        # is worse than nothing but better than crashing.
-        yield text
-        return
-
     md = MarkdownIt("commonmark")
     body = _strip_frontmatter(text)
     tokens = md.parse(body)

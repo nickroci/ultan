@@ -33,7 +33,61 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, TypedDict, cast
+
+# ── Shared TypedDicts ───────────────────────────────────────────────────
+#
+# Claude Code spawns each hook with a JSON object on stdin. The schema is
+# duck-typed across event kinds; the union below captures every field any
+# hook in this slice ever reads. Every key is ``total=False`` because
+# Claude Code is free to omit anything (and synthetic test inputs do).
+
+
+class HookPayload(TypedDict, total=False):
+    """The parsed stdin dict every hook gets from Claude Code.
+
+    Centralised here so every hook in the slice annotates the same shape
+    without forking it. Fields are best-effort: any one may be missing
+    depending on the hook event kind. Callers must defensively coerce
+    (``str(value) if isinstance(value, str) else ...``) — the values
+    arrive from JSON parsing and can be anything that survives ``json.loads``.
+    """
+
+    session_id: str
+    cwd: str
+    transcript_path: str
+    # Tool-call events (PreToolUse / PostToolUse).
+    tool_name: str
+    tool_input: dict[str, Any]
+    tool_response: Any
+    error: Any
+    # UserPromptSubmit.
+    prompt: str
+    # SessionStart (``startup`` | ``resume`` | ``clear`` | ``compact``) /
+    # SessionEnd (``reason``). Some synthetic payloads also pass
+    # ``source`` on SessionEnd; we accept either.
+    source: str
+    reason: str
+
+
+EventPayload = dict[str, Any]
+"""Small dict shipped on the wire as the event's ``payload`` field.
+
+We don't pin a per-event-kind shape: the daemon side already accepts the
+loose ``dict[str, Any]`` and the payloads carry a tiny varying set of
+keys (``tool_name``, ``ok``, ``role``, ``text``, ``summary`` etc.).
+"""
+
+
+class EventLine(TypedDict):
+    """One serialised event line written to ``events.jsonl``."""
+
+    ts: float
+    session_id: str
+    type: str
+    cwd: Optional[str]
+    payload: EventPayload
+
 
 # Make scripts/ importable so we can reuse the AGENT_MEM_HOME helper that
 # already lives in config.py. We import lazily inside _events_path() so a
@@ -61,12 +115,15 @@ def _events_path() -> Path:
     place. Returns the path even if the parent dir doesn't exist yet —
     caller creates it on first write.
     """
-    from config import STORE_DIR  # noqa: E402  — see module docstring
+    # Lazy import: a config import failure (unlikely but possible) must
+    # not break the recursion-guard short-circuit at the top of
+    # :func:`append_event`. See module docstring.
+    from config import STORE_DIR  # noqa: E402,PLC0415
 
     return STORE_DIR / "events.jsonl"
 
 
-def _truncate_payload(payload: Mapping[str, Any], budget: int) -> dict:
+def _truncate_payload(payload: Mapping[str, Any], budget: int) -> dict[str, Any]:
     """Best-effort shrink of payload values to fit in ``budget`` bytes.
 
     Only strings are truncated; other types pass through. The result is
@@ -74,15 +131,101 @@ def _truncate_payload(payload: Mapping[str, Any], budget: int) -> dict:
     just gets back roughly what they passed in. The final length check
     happens at the line level in :func:`append_event`.
     """
-    out: dict = {}
+    out: dict[str, Any] = {}
     for k, v in payload.items():
-        if isinstance(v, str) and len(v) > budget:
-            out[k] = v[: max(0, budget - 3)] + "..."
-        elif isinstance(v, dict):
-            out[k] = _truncate_payload(v, budget=budget)
+        value: Any = v
+        if isinstance(value, str) and len(value) > budget:
+            out[k] = value[: max(0, budget - 3)] + "..."
+        elif isinstance(value, dict):
+            # value is dict[Any, Any] post-narrow; the recursive call
+            # accepts ``Mapping[str, Any]`` and we trust the caller's
+            # contract that payload keys are stringy.
+            nested = cast("Mapping[str, Any]", value)
+            out[k] = _truncate_payload(nested, budget=budget)
         else:
-            out[k] = v
+            out[k] = value
     return out
+
+
+def _dumps(event: Mapping[str, Any]) -> Optional[bytes]:
+    """Compact-ASCII JSON encode; return None on serialisation error."""
+    try:
+        return json.dumps(event, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    except (TypeError, ValueError):
+        return None
+
+
+def _encode_within_budget(event: dict[str, Any]) -> Optional[bytes]:
+    """Serialise ``event`` to a JSON line that fits in ``MAX_LINE_BYTES``.
+
+    Cascade:
+      1. Try as-is.
+      2. If the payload was un-serialisable, drop it and retry.
+      3. If the line is over budget, shrink string values in the payload.
+      4. If still over budget, drop the payload entirely.
+
+    Returns the encoded bytes (without trailing newline) or None if every
+    attempt failed.
+    """
+    empty_payload: dict[str, Any] = {}
+    line = _dumps(event)
+    if line is None:
+        # Un-serialisable payload. Drop and retry — the daemon can still
+        # use the event as a turn marker without payload data.
+        event["payload"] = empty_payload
+        line = _dumps(event)
+        if line is None:
+            return None
+
+    if len(line) + 1 <= MAX_LINE_BYTES:
+        return line
+
+    # Over budget. Shrink string values first.
+    payload_obj: Any = event["payload"]
+    if payload_obj:
+        existing_payload = cast("Mapping[str, Any]", payload_obj)
+        event["payload"] = _truncate_payload(existing_payload, budget=2000)
+        line = _dumps(event)
+        if line is None:
+            return None
+
+    if len(line) + 1 <= MAX_LINE_BYTES:
+        return line
+
+    # Still over. Drop the payload entirely.
+    event["payload"] = empty_payload
+    line = _dumps(event)
+    if line is None or len(line) + 1 > MAX_LINE_BYTES:
+        return None
+    return line
+
+
+def _write_line(line_bytes: bytes) -> None:
+    """Append ``line_bytes + '\\n'`` to the events file. Silently swallows IO."""
+    try:
+        path = _events_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except (OSError, ImportError):
+        return
+
+    # O_APPEND for atomicity. We open low-level, write, close — no
+    # buffering layer to flush. ``os.O_APPEND`` plus a single write()
+    # under PIPE_BUF is atomic across concurrent writers on Linux+macOS
+    # for regular files; see open(2) and write(2).
+    try:
+        fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    except OSError:
+        return
+
+    try:
+        os.write(fd, line_bytes + b"\n")
+    except OSError:
+        pass
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def append_event(
@@ -128,7 +271,7 @@ def append_event(
     # decision pinned by Agent 1.
     cwd = hook_input.get("cwd")
 
-    event: dict = {
+    event: dict[str, Any] = {
         "ts": time.time(),  # unix-float; the daemon also accepts ISO-8601.
         "session_id": str(session_id),
         "type": event_type,
@@ -136,69 +279,7 @@ def append_event(
         "payload": dict(payload) if payload else {},
     }
 
-    # Serialise. ``separators`` keeps the line compact; ``ensure_ascii``
-    # avoids surprising the daemon's parser with non-ASCII (it handles
-    # it fine, but compact ASCII is one fewer thing to worry about over
-    # the wire).
-    try:
-        line = json.dumps(event, separators=(",", ":"), ensure_ascii=False)
-    except (TypeError, ValueError):
-        # Payload contained something un-serialisable. Drop the payload,
-        # keep the event — the daemon can still use it as a turn marker.
-        event["payload"] = {}
-        try:
-            line = json.dumps(event, separators=(",", ":"), ensure_ascii=False)
-        except (TypeError, ValueError):
-            return
-
-    line_bytes = line.encode("utf-8")
-    if len(line_bytes) + 1 > MAX_LINE_BYTES:
-        # Over budget. Try to shrink the payload first.
-        if event["payload"]:
-            shrunk = _truncate_payload(event["payload"], budget=2000)
-            event["payload"] = shrunk
-            try:
-                line = json.dumps(event, separators=(",", ":"), ensure_ascii=False)
-                line_bytes = line.encode("utf-8")
-            except (TypeError, ValueError):
-                return
-        # Still too big? Drop the payload entirely.
-        if len(line_bytes) + 1 > MAX_LINE_BYTES:
-            event["payload"] = {}
-            try:
-                line = json.dumps(event, separators=(",", ":"), ensure_ascii=False)
-                line_bytes = line.encode("utf-8")
-            except (TypeError, ValueError):
-                return
-
-    # Resolve path + ensure parent dir exists. The parent-dir create is
-    # idempotent and cheap (<1 ms) but only happens once per process
-    # because the OS caches the inode.
-    try:
-        path = _events_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-    except (OSError, ImportError):
+    line_bytes = _encode_within_budget(event)
+    if line_bytes is None:
         return
-
-    # O_APPEND for atomicity. We open low-level, write, close — no
-    # buffering layer to flush. ``os.O_APPEND`` plus a single write()
-    # under PIPE_BUF is atomic across concurrent writers on Linux+macOS
-    # for regular files; see open(2) and write(2).
-    try:
-        fd = os.open(
-            str(path),
-            os.O_WRONLY | os.O_APPEND | os.O_CREAT,
-            0o644,
-        )
-    except OSError:
-        return
-
-    try:
-        os.write(fd, line_bytes + b"\n")
-    except OSError:
-        pass
-    finally:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+    _write_line(line_bytes)

@@ -186,6 +186,125 @@ def test_load_or_build_caches_and_rebuilds(tmp_path: Path) -> None:
     assert third.embeddings.shape[0] == len(third.docs) == 5
 
 
+# ── Edge cases that don't need the model loaded ──────────────────────────────
+
+
+def test_search_on_empty_index_returns_empty(tmp_path: Path) -> None:
+    """Built against an empty dir -> structurally empty index, search returns []."""
+    import numpy as np
+
+    from embeddings import EmbeddingIndex
+
+    idx = EmbeddingIndex(
+        knowledge_dir=tmp_path,
+        docs=[],
+        embeddings=np.zeros((0, 0), dtype=np.float32),
+    )
+    assert idx.search("anything") == []
+
+
+def test_search_empty_query_returns_empty(built_index: EmbeddingIndex) -> None:
+    """Blank or whitespace-only query short-circuits before model load."""
+    assert built_index.search("") == []
+    assert built_index.search("   ") == []
+
+
+def test_search_top_k_zero_returns_empty(built_index: EmbeddingIndex) -> None:
+    """``k=0`` short-circuits the result loop."""
+    assert built_index.search("python dependencies", k=0) == []
+
+
+def test_build_index_raises_for_missing_dir(tmp_path: Path) -> None:
+    import pytest
+
+    from embeddings import build_index
+
+    with pytest.raises(FileNotFoundError):
+        build_index(tmp_path / "nope")
+
+
+def test_build_index_empty_corpus_returns_empty(tmp_path: Path) -> None:
+    """Knowledge dir exists but has no markdown -> structurally empty index."""
+    from embeddings import build_index
+
+    empty = tmp_path / "knowledge"
+    empty.mkdir()
+    idx = build_index(empty)
+    assert len(idx.docs) == 0
+    assert idx.embeddings.shape == (0, 0)
+
+
+def test_build_index_skips_unreadable_and_empty(tmp_path: Path, monkeypatch) -> None:
+    """A file that raises UnicodeDecodeError on read is dropped, and a file
+    whose embedded text is whitespace-only is also dropped."""
+    from embeddings import build_index
+
+    knowledge = tmp_path / "knowledge"
+    (knowledge / "global").mkdir(parents=True)
+    bad = knowledge / "global" / "bad.md"
+    bad.write_text("# bad\n", encoding="utf-8")
+    blank = knowledge / "global" / "blank.md"
+    blank.write_text("---\nid: blank\n---\n   \n", encoding="utf-8")
+    good = knowledge / "global" / "good.md"
+    good.write_text("# good\n\nReal body here.\n", encoding="utf-8")
+
+    real_read_text = Path.read_text
+
+    def fake_read_text(self, *a, **kw):
+        if self == bad:
+            raise UnicodeDecodeError("utf-8", b"", 0, 1, "boom")
+        return real_read_text(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", fake_read_text)
+    idx = build_index(knowledge)
+    paths = {Path(rec.path).name for rec in idx.docs}
+    assert "good.md" in paths
+    assert "bad.md" not in paths
+    assert "blank.md" not in paths
+
+
+def test_load_pickled_corrupt_file_returns_none(tmp_path: Path) -> None:
+    from embeddings import _load_pickled
+
+    p = tmp_path / "garbage.idx"
+    p.write_bytes(b"not a pickle stream")
+    assert _load_pickled(p) is None
+
+
+def test_is_stale_detects_new_file(built_index: EmbeddingIndex, tmp_path: Path) -> None:
+    """A file appearing after the index was built is detected as stale."""
+    import shutil as shu
+
+    from embeddings import _is_stale, build_index
+
+    # Build a fresh index against a known corpus.
+    knowledge = tmp_path / "kb"
+    shu.copytree(FIXTURES, knowledge)
+    idx = build_index(knowledge)
+    # Drop in a new file and confirm staleness.
+    new = knowledge / "global" / "concepts" / "extra.md"
+    new.write_text("# extra\n\nNew content.\n", encoding="utf-8")
+    assert _is_stale(idx, knowledge) is True
+
+
+def test_load_or_build_save_failure_returns_in_memory_index(tmp_path: Path, monkeypatch) -> None:
+    """If persisting the index fails, the in-memory index is still returned."""
+    import embeddings as emb
+
+    knowledge = tmp_path / "knowledge"
+    knowledge.mkdir()
+    (knowledge / "x.md").write_text(
+        "# X\n\nA reasonably long body that will be embedded.\n", encoding="utf-8"
+    )
+
+    def fake_save(*a, **kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(emb, "save_index", fake_save)
+    idx = emb.load_or_build(knowledge)
+    assert len(idx.docs) == 1
+
+
 def test_save_and_reload_roundtrip(built_index: EmbeddingIndex, tmp_path: Path) -> None:
     """Persisting and reloading produces an equivalent index."""
     target = tmp_path / ".embeddings.idx"

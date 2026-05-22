@@ -415,6 +415,222 @@ def test_review_sdk_timeout_is_swallowed(monkeypatch, tmp_path, caplog):
 # ── End-to-end via mocked LLM: turn → proposal → approval ──────────
 
 
+def test_review_batch_session_with_no_session_ids_marked_batch(monkeypatch):
+    """If all packets lack a session_id, the audit row gets ``session_id="batch"``."""
+    canned = {"decisions": [], "interrupts_processed": []}
+    monkeypatch.setattr(scholar, "run_scholar_call", _make_canned(json.dumps(canned)))
+    records: List[InvocationRecord] = []
+    orig = scholar.runs.InvocationRecord.finalise
+
+    def _spy(self):
+        records.append(self)
+        orig(self)
+
+    monkeypatch.setattr(scholar.runs.InvocationRecord, "finalise", _spy)
+
+    # Packets with empty session_id — the helper hits the ``if not sids`` branch.
+    scholar.review(
+        [
+            {
+                "session_id": "",
+                "proposals": [{"action": "archive_entry", "path": "x.md", "reasoning": "r"}],
+                "interrupts": [],
+            }
+        ]
+    )
+    assert records[0].session_id == "batch"
+
+
+def test_review_reinforcement_counter_pass_exception_is_swallowed(monkeypatch, caplog):
+    """If apply_reinforcement_counters raises, the Scholar logs and
+    proceeds with the SDK call."""
+    from agent_mem_daemon import scholar_prompt
+
+    def _boom(*a, **kw):
+        raise RuntimeError("simulated reinforcement failure")
+
+    monkeypatch.setattr(scholar_prompt, "apply_reinforcement_counters", _boom)
+    monkeypatch.setattr(
+        scholar,
+        "run_scholar_call",
+        _make_canned(json.dumps({"decisions": [], "interrupts_processed": []})),
+    )
+
+    caplog.set_level(logging.WARNING)
+    scholar.review(
+        [_packet("s1", proposals=[{"action": "archive_entry", "path": "x.md", "reasoning": "r"}])]
+    )
+    assert any("reinforcement-counter pass raised" in r.message for r in caplog.records)
+
+
+def test_review_reinforcement_changes_logged(monkeypatch, tmp_path):
+    """When the reinforcement helper reports changes, the audit row
+    records the count and each change is logged."""
+    from agent_mem_daemon import scholar_prompt
+
+    def _has_changes(packets, kdir):
+        return ["bumped: a", "bumped: b"]
+
+    monkeypatch.setattr(scholar_prompt, "apply_reinforcement_counters", _has_changes)
+    monkeypatch.setattr(
+        scholar,
+        "run_scholar_call",
+        _make_canned(json.dumps({"decisions": [], "interrupts_processed": []})),
+    )
+
+    records: List[InvocationRecord] = []
+    orig = scholar.runs.InvocationRecord.finalise
+
+    def _spy(self):
+        records.append(self)
+        orig(self)
+
+    monkeypatch.setattr(scholar.runs.InvocationRecord, "finalise", _spy)
+
+    scholar.review(
+        [_packet("s1", proposals=[{"action": "archive_entry", "path": "x.md", "reasoning": "r"}])]
+    )
+    assert records[0].decisions.get("reinforcement_bumps") == 2
+
+
+def test_review_nudge_file_append_exception_swallowed(monkeypatch, caplog):
+    from agent_mem_daemon import scholar_prompt
+
+    canned = {
+        "decisions": [{"action_index": 0, "decision": "approve", "veto_reason": ""}],
+        "interrupts_processed": [
+            {
+                "lesson_id": "x",
+                "lesson_path": "x",
+                "action": "approve",
+                "text": "y",
+                "reason": "ok",
+            }
+        ],
+    }
+    monkeypatch.setattr(scholar, "run_scholar_call", _make_canned(json.dumps(canned)))
+
+    def _boom(parsed):
+        raise RuntimeError("simulated nudge append failure")
+
+    monkeypatch.setattr(scholar_prompt, "append_nudges_from_response", _boom)
+    caplog.set_level(logging.WARNING)
+    scholar.review(
+        [
+            _packet(
+                "s1",
+                proposals=[
+                    {"action": "write_entry", "path": "x.md", "body": "x", "reasoning": "r"}
+                ],
+                interrupts=[{"lesson_id": "x"}],
+            )
+        ]
+    )
+    assert any("nudge-file append failed" in r.message for r in caplog.records)
+
+
+def test_review_reconcile_readmes_exception_swallowed(monkeypatch, caplog):
+    from agent_mem_daemon import scholar_prompt
+
+    monkeypatch.setattr(
+        scholar,
+        "run_scholar_call",
+        _make_canned(json.dumps({"decisions": [], "interrupts_processed": []})),
+    )
+
+    def _boom(kdir):
+        raise RuntimeError("simulated reconcile failure")
+
+    monkeypatch.setattr(scholar_prompt, "reconcile_readmes", _boom)
+    caplog.set_level(logging.WARNING)
+    scholar.review(
+        [_packet("s1", proposals=[{"action": "archive_entry", "path": "x.md", "reasoning": "r"}])]
+    )
+    assert any("README reconciliation raised" in r.message for r in caplog.records)
+
+
+def test_review_reconcile_readmes_results_recorded(monkeypatch):
+    from agent_mem_daemon import scholar_prompt
+
+    monkeypatch.setattr(
+        scholar,
+        "run_scholar_call",
+        _make_canned(json.dumps({"decisions": [], "interrupts_processed": []})),
+    )
+    monkeypatch.setattr(
+        scholar_prompt, "reconcile_readmes", lambda kdir: ["a updated", "b updated"]
+    )
+    records: List[InvocationRecord] = []
+    orig = scholar.runs.InvocationRecord.finalise
+
+    def _spy(self):
+        records.append(self)
+        orig(self)
+
+    monkeypatch.setattr(scholar.runs.InvocationRecord, "finalise", _spy)
+
+    scholar.review(
+        [_packet("s1", proposals=[{"action": "archive_entry", "path": "x.md", "reasoning": "r"}])]
+    )
+    assert records[0].decisions.get("readmes_reconciled") == 2
+
+
+def test_review_priming_exception_swallowed(monkeypatch, caplog):
+    from agent_mem_daemon import priming
+
+    monkeypatch.setattr(
+        scholar,
+        "run_scholar_call",
+        _make_canned(json.dumps({"decisions": [], "interrupts_processed": []})),
+    )
+
+    def _boom(*a, **kw):
+        raise RuntimeError("simulated priming failure")
+
+    monkeypatch.setattr(priming, "refresh_hot_context", _boom)
+    caplog.set_level(logging.WARNING)
+    scholar.review(
+        [_packet("s1", proposals=[{"action": "archive_entry", "path": "x.md", "reasoning": "r"}])]
+    )
+    assert any("priming refresh raised" in r.message for r in caplog.records)
+
+
+def test_review_invariants_exception_swallowed(monkeypatch, caplog):
+    from agent_mem_daemon import scholar_prompt
+
+    monkeypatch.setattr(
+        scholar,
+        "run_scholar_call",
+        _make_canned(json.dumps({"decisions": [], "interrupts_processed": []})),
+    )
+
+    def _boom(kdir):
+        raise RuntimeError("simulated invariants failure")
+
+    monkeypatch.setattr(scholar_prompt, "check_invariants", _boom)
+    caplog.set_level(logging.WARNING)
+    scholar.review(
+        [_packet("s1", proposals=[{"action": "archive_entry", "path": "x.md", "reasoning": "r"}])]
+    )
+    assert any("invariants check raised" in r.message for r in caplog.records)
+
+
+def test_review_all_empty_priming_exception_swallowed(monkeypatch, caplog):
+    """The all-empty branch also refreshes priming; if that raises, the
+    Scholar logs and returns cleanly."""
+    from agent_mem_daemon import priming
+
+    def _boom(*a, **kw):
+        raise RuntimeError("simulated priming failure (empty path)")
+
+    monkeypatch.setattr(priming, "refresh_hot_context", _boom)
+    caplog.set_level(logging.WARNING)
+    # All-empty packets — should hit the empty-path branch, then catch
+    # the priming exception.
+    scholar.review([_packet("s1"), _packet("s2")])
+    assert any("priming refresh raised (empty-packet path)" in r.message for r in caplog.records)
+
+
 def test_end_to_end_proposal_approved_writes_entry_to_knowledge_dir(
     monkeypatch,
     tmp_path,

@@ -32,9 +32,27 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional, TextIO
+from typing import Any, Callable, Dict, Optional, TextIO, Tuple, TypedDict, cast
 
 from .buffer import Event
+
+# (st_ino, st_dev, st_size, st_mtime_ns). Native types come from os.stat_result
+# but pyright sees the dynamic attrs as ints; this alias names them at the
+# call boundaries so callers don't have to anchor on the tuple shape.
+StatIdentity = Tuple[int, int, int, int]
+
+
+class _OffsetState(TypedDict, total=False):
+    """Shape of the persisted offset state JSON. All fields optional —
+    we ignore the file on any missing/wrong-shape key (legacy compat)."""
+
+    path: str
+    inode: int
+    dev: int
+    offset: int
+    last_size: int
+    last_mtime_ns: int
+
 
 log = logging.getLogger("agent_mem_daemon.ingest")
 
@@ -76,7 +94,7 @@ class _OpenFile:
     pending: str = ""  # partial-line buffer
 
 
-def _stat_identity(path: Path) -> Optional[tuple]:
+def _stat_identity(path: Path) -> Optional[StatIdentity]:
     try:
         s = path.stat()
     except FileNotFoundError:
@@ -84,12 +102,18 @@ def _stat_identity(path: Path) -> Optional[tuple]:
     return (s.st_ino, s.st_dev, s.st_size, s.st_mtime_ns)
 
 
-def _load_offset_state(state_path: Path) -> Optional[dict]:
+def _load_offset_state(state_path: Path) -> Optional[_OffsetState]:
     """Read the persisted offset state. Returns None if missing/corrupt."""
     try:
-        return json.loads(state_path.read_text(encoding="utf-8"))
+        loaded: object = json.loads(state_path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         return None
+    if not isinstance(loaded, dict):
+        return None
+    # Untyped JSON: trust the writer (us) and surface a TypedDict view.
+    # Mismatched keys/types are tolerated downstream (we re-validate
+    # inode/dev/offset before resuming).
+    return cast(_OffsetState, loaded)
 
 
 def _save_offset_state(state_path: Path, of: "_OpenFile") -> None:
@@ -151,14 +175,15 @@ def _open(
     resume_offset: Optional[int] = None
     if offset_state_path is not None:
         state = _load_offset_state(offset_state_path)
-        if (
-            state is not None
-            and state.get("inode") == st.st_ino
-            and state.get("dev") == st.st_dev
-            and isinstance(state.get("offset"), int)
-            and 0 <= state["offset"] <= st.st_size
-        ):
-            resume_offset = state["offset"]
+        if state is not None:
+            state_offset = state.get("offset")
+            if (
+                state.get("inode") == st.st_ino
+                and state.get("dev") == st.st_dev
+                and isinstance(state_offset, int)
+                and 0 <= state_offset <= st.st_size
+            ):
+                resume_offset = state_offset
 
     if resume_offset is not None:
         fh.seek(resume_offset)
@@ -235,13 +260,14 @@ def parse_event_line(line: str, *, now_fn: Callable[[], float] = time.time) -> O
     if not line:
         return None
     try:
-        obj = json.loads(line)
+        loaded: object = json.loads(line)
     except json.JSONDecodeError as e:
         log.warning("bad JSON in events line: %s (line=%r)", e, line[:200])
         return None
-    if not isinstance(obj, dict):
+    if not isinstance(loaded, dict):
         log.warning("event line is not an object: %r", line[:200])
         return None
+    obj = cast(Dict[str, Any], loaded)
 
     sid = obj.get("session_id")
     typ = obj.get("type")
@@ -249,7 +275,7 @@ def parse_event_line(line: str, *, now_fn: Callable[[], float] = time.time) -> O
         log.warning("event missing session_id/type: %r", obj)
         return None
 
-    ts_raw = obj.get("ts")
+    ts_raw: object = obj.get("ts")
     ts = _coerce_ts(ts_raw)
     if ts is None:
         log.warning("event has no parseable ts, using receipt time: %r", obj)
@@ -258,17 +284,24 @@ def parse_event_line(line: str, *, now_fn: Callable[[], float] = time.time) -> O
     if typ not in KNOWN_TYPES:
         log.debug("unknown event type %r — ingesting anyway", typ)
 
+    cwd_raw = obj.get("cwd")
+    cwd_val = cwd_raw if isinstance(cwd_raw, str) else None
+    payload_raw = obj.get("payload")
+    payload_val: Dict[str, Any] = (
+        cast(Dict[str, Any], payload_raw) if isinstance(payload_raw, dict) else {}
+    )
+
     return Event(
         ts=ts,
         session_id=str(sid),
         type=str(typ),
-        cwd=obj.get("cwd"),
-        payload=obj.get("payload") or {},
+        cwd=cwd_val,
+        payload=payload_val,
         raw=obj,
     )
 
 
-def _coerce_ts(ts_raw) -> Optional[float]:
+def _coerce_ts(ts_raw: object) -> Optional[float]:
     """Accept unix-seconds (int/float) or ISO-8601. Returns float or None."""
     if ts_raw is None:
         return None
@@ -283,7 +316,7 @@ def _coerce_ts(ts_raw) -> Optional[float]:
         # ISO-8601. Python's fromisoformat is strict about 'Z'; rewrite
         # to '+00:00' before parsing.
         try:
-            from datetime import datetime
+            from datetime import datetime  # noqa: PLC0415 — pre-existing local import
 
             s = ts_raw.replace("Z", "+00:00")
             return datetime.fromisoformat(s).timestamp()
@@ -331,6 +364,69 @@ class JsonlTailer:
         if self._of is not None and self._offset_state_path is not None:
             _save_offset_state(self._offset_state_path, self._of)
 
+    def _detach_handle(self) -> None:
+        """Close the current handle (if any) and clear state. Called
+        when the file vanishes between polls."""
+        of = self._of
+        if of is not None:
+            try:
+                of.fh.close()
+            except OSError:
+                pass
+        self._of = None
+
+    def _react_to_rotation(self, of: _OpenFile, ident: StatIdentity) -> Optional[_OpenFile]:
+        """Compare current stat to ``of`` and either re-open from start
+        (rotation / truncation / in-place rewrite) or return ``of``
+        unchanged. Returns ``None`` if a re-open was attempted and failed
+        — caller should give up on this poll."""
+        inode, dev, size, mtime_ns = ident
+        if inode != of.inode or dev != of.dev:
+            log.info("events file rotated (inode %s -> %s); re-opening", of.inode, inode)
+            return _reopen_from_start(of)
+        if size < of.offset or size < of.last_size:
+            # Truncation: current size is below where we last read to,
+            # OR below the size we observed on the previous poll
+            # (catches grow-then-shrink between polls).
+            log.info(
+                "events file truncated (size=%d, offset=%d, last_size=%d); re-opening",
+                size,
+                of.offset,
+                of.last_size,
+            )
+            return _reopen_from_start(of)
+        if (
+            mtime_ns != of.last_mtime_ns
+            and size == of.last_size
+            and of.last_size > 0
+            and of.offset >= size
+        ):
+            # Pathological case: file was truncated and re-written to
+            # the *same* size between two polls. Size comparison can't
+            # see it; mtime advancing while size held constant — and
+            # our read position is at or past EOF — is the giveaway.
+            # We could miss this if the rewrite happens to land in the
+            # same instant as the last mtime, but at filesystem-ns
+            # resolution that's effectively zero.
+            log.info("events file rewritten in place (mtime advanced, size unchanged); re-opening")
+            return _reopen_from_start(of)
+        return of
+
+    def _emit_lines(self, lines: list[str]) -> int:
+        """Parse + forward every complete line. Returns the emit count.
+        Callback errors are logged but don't break the tail."""
+        emitted = 0
+        for line in lines:
+            ev = parse_event_line(line)
+            if ev is None:
+                continue
+            try:
+                self.on_event(ev)
+                emitted += 1
+            except Exception:
+                log.exception("on_event callback raised")
+        return emitted
+
     def poll_once(self) -> int:
         """Drain whatever's been appended since the last poll. Returns
         the number of events emitted (useful for tests).
@@ -349,54 +445,18 @@ class JsonlTailer:
         ident = _stat_identity(of.path)
         if ident is None:
             # File vanished. Drop the handle; next poll will retry.
-            try:
-                of.fh.close()
-            except OSError:
-                pass
-            self._of = None
+            self._detach_handle()
             return 0
 
-        inode, dev, size, mtime_ns = ident
-        if inode != of.inode or dev != of.dev:
-            log.info("events file rotated (inode %s -> %s); re-opening", of.inode, inode)
-            self._of = _reopen_from_start(of)
-            if self._of is None:
-                return 0
-            of = self._of
-        elif size < of.offset or size < of.last_size:
-            # Truncation: current size is below where we last read to,
-            # OR below the size we observed on the previous poll
-            # (catches grow-then-shrink between polls).
-            log.info(
-                "events file truncated (size=%d, offset=%d, last_size=%d); re-opening",
-                size,
-                of.offset,
-                of.last_size,
-            )
-            self._of = _reopen_from_start(of)
-            if self._of is None:
-                return 0
-            of = self._of
-        elif (
-            mtime_ns != of.last_mtime_ns
-            and size == of.last_size
-            and of.last_size > 0
-            and of.offset >= size
-        ):
-            # Pathological case: file was truncated and re-written to
-            # the *same* size between two polls. Size comparison can't
-            # see it; mtime advancing while size held constant — and
-            # our read position is at or past EOF — is the giveaway.
-            # We could miss this if the rewrite happens to land in the
-            # same instant as the last mtime, but at filesystem-ns
-            # resolution that's effectively zero.
-            log.info("events file rewritten in place (mtime advanced, size unchanged); re-opening")
-            self._of = _reopen_from_start(of)
-            if self._of is None:
-                return 0
-            of = self._of
+        reopened = self._react_to_rotation(of, ident)
+        if reopened is None:
+            # We tried to re-open and failed; bail this poll.
+            self._of = None
+            return 0
+        self._of = reopened
+        of = reopened
 
-        emitted = 0
+        _inode, _dev, size, mtime_ns = ident
         try:
             chunk = of.fh.read()
         except OSError as e:
@@ -425,16 +485,7 @@ class JsonlTailer:
             lines = buf.split("\n")
             of.pending = lines.pop()  # last element is the partial
 
-        for line in lines:
-            ev = parse_event_line(line)
-            if ev is None:
-                continue
-            try:
-                self.on_event(ev)
-                emitted += 1
-            except Exception:
-                # Callback errors must not break the tail. Log + carry on.
-                log.exception("on_event callback raised")
+        emitted = self._emit_lines(lines)
         # Persist offset after each successful drain so a daemon restart
         # resumes here instead of seeking to EOF and losing events.
         self._persist()

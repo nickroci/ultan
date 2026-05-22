@@ -55,14 +55,17 @@ import logging
 import queue
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, cast
 
 from . import librarian as librarian_mod
 from . import scholar as scholar_mod
-from .buffer import RollingBuffer
+from .buffer import Event, RollingBuffer
 from .librarian import EvidencePacket
+
+if TYPE_CHECKING:
+    from .ingest import JsonlTailer
 
 log = logging.getLogger("agent_mem_daemon.scheduler")
 
@@ -352,7 +355,7 @@ class TailerThread:
     def __init__(
         self,
         *,
-        tailer,
+        tailer: "JsonlTailer",
         poll_interval: float,
         stop_event: threading.Event,
         name: str = "tailer",
@@ -445,7 +448,7 @@ class Scheduler:
         # In-flight librarian futures — we wait on these at shutdown so
         # an SDK call mid-flight isn't cut off.
         self._in_flight_lock = threading.Lock()
-        self._in_flight: set = set()
+        self._in_flight: Set[Future[None]] = set()
 
         self._started = False
 
@@ -533,7 +536,7 @@ class Scheduler:
 
     # ---- event-driven entry point ----------------------------------
 
-    def on_event(self, ev) -> None:
+    def on_event(self, ev: Event) -> None:
         """Fold an Event into the buffer; arm the debounce timer when
         the event seals a turn."""
         sealed_sess = self.buffer.ingest(ev)
@@ -607,7 +610,7 @@ class Scheduler:
             self._in_flight.add(fut)
         fut.add_done_callback(self._on_librarian_done)
 
-    def _on_librarian_done(self, fut) -> None:
+    def _on_librarian_done(self, fut: "Future[None]") -> None:
         with self._in_flight_lock:
             self._in_flight.discard(fut)
 
@@ -638,17 +641,27 @@ class Scheduler:
                 session_id,
             )
             return
-        if not isinstance(packet, dict):
+        # Static type says ``EvidencePacket`` (a TypedDict), but the callable
+        # is injected at runtime and we've been bitten by stubs that return
+        # the wrong shape. ``cast(object, …)`` lets us actually run the
+        # runtime guard against a real dict; pyright would otherwise treat
+        # the isinstance check as redundant.
+        runtime_packet = cast(object, packet)
+        if not isinstance(runtime_packet, dict):
             log.warning(
                 "librarian returned non-dict %r; ignoring (session=%s)",
-                type(packet),
+                type(runtime_packet),
                 session_id,
             )
             return
         # Normalise — keep parity with v1 contract for downstream Scholar.
-        packet.setdefault("session_id", session_id)
-        packet.setdefault("proposals", packet.get("candidates", []) or [])
-        packet.setdefault("interrupts", [])
+        # ``packet`` is a TypedDict at static time but legacy librarians may
+        # have returned the wider ``candidates`` key; treat it as a plain
+        # mapping for normalisation.
+        packet_dict: Dict[str, Any] = cast("Dict[str, Any]", runtime_packet)
+        packet_dict.setdefault("session_id", session_id)
+        packet_dict.setdefault("proposals", packet_dict.get("candidates", []) or [])
+        packet_dict.setdefault("interrupts", [])
         self.stats.librarian_runs += 1
         # Enqueue for the scholar.
         try:

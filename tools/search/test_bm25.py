@@ -13,11 +13,21 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import pytest
+
+import bm25 as bm25_mod
 from bm25 import (
     BM25Index,
+    _build_snippet,
     _default_index_path,
+    _frontmatter_search_text,
+    _is_stale,
+    _load_pickled,
+    _one_line,
+    _strip_and_extract_frontmatter,
     build_index,
     load_or_build,
+    save_index,
     tokenize,
 )
 
@@ -130,6 +140,159 @@ def test_load_or_build_caches_and_rebuilds() -> None:
 
         third = load_or_build(knowledge)
         assert third.built_at > second.built_at
+
+
+# ── Edge cases ─────────────────────────────────────────────────────────────────
+
+
+def test_strip_frontmatter_handles_malformed_yaml() -> None:
+    """A frontmatter block with invalid YAML must not crash tokenization."""
+    text = "---\n: : : invalid\n---\nbody here\n"
+    body, fm = _strip_and_extract_frontmatter(text)
+    assert fm == {}
+    assert "body here" in body
+
+
+def test_strip_frontmatter_non_dict_yaml() -> None:
+    """Frontmatter that parses to a list rather than a dict -> empty dict."""
+    text = "---\n- one\n- two\n---\nbody\n"
+    _, fm = _strip_and_extract_frontmatter(text)
+    assert fm == {}
+
+
+def test_strip_frontmatter_missing_block_returns_full_text() -> None:
+    text = "no frontmatter here\n"
+    body, fm = _strip_and_extract_frontmatter(text)
+    assert body == text
+    assert fm == {}
+
+
+def test_frontmatter_search_text_handles_string_keywords() -> None:
+    """``keywords`` as a string rather than a list is still included."""
+    out = _frontmatter_search_text({"keywords": "foo bar baz"})
+    assert "foo bar baz" in out
+
+
+def test_frontmatter_search_text_handles_list_applies_when() -> None:
+    out = _frontmatter_search_text({"applies-when": ["one", "two"]})
+    assert "one" in out and "two" in out
+
+
+def test_search_empty_query_returns_empty() -> None:
+    """Query with no >=2-char tokens shouldn't return anything."""
+    index = build_index(FIXTURES)
+    assert index.search("a x") == []
+
+
+def test_search_on_empty_index_returns_empty(tmp_path: Path) -> None:
+    """An index built over an empty dir has no docs -> empty results."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    index = build_index(empty)
+    assert index.bm25 is None
+    assert index.search("anything") == []
+
+
+def test_build_index_missing_dir_raises(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        build_index(tmp_path / "nope")
+
+
+def test_build_index_skips_unreadable_files(tmp_path: Path, monkeypatch) -> None:
+    """A file that raises ``UnicodeDecodeError`` on read is silently skipped."""
+    knowledge = tmp_path / "knowledge"
+    (knowledge / "global").mkdir(parents=True)
+    good = knowledge / "global" / "good.md"
+    good.write_text("# good content\n\nactual body here\n", encoding="utf-8")
+    bad = knowledge / "global" / "bad.md"
+    bad.write_text("placeholder\n", encoding="utf-8")
+
+    real_read_text = Path.read_text
+
+    def fake_read_text(self, *a, **kw):
+        if self == bad:
+            raise UnicodeDecodeError("utf-8", b"", 0, 1, "boom")
+        return real_read_text(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", fake_read_text)
+    index = build_index(knowledge)
+    paths = {Path(rec.path).name for rec in index.docs}
+    assert "good.md" in paths
+    assert "bad.md" not in paths
+
+
+def test_load_pickled_corrupt_file_returns_none(tmp_path: Path) -> None:
+    p = tmp_path / "garbage.idx"
+    p.write_bytes(b"not a pickle stream")
+    assert _load_pickled(p) is None
+
+
+def test_load_or_build_rebuilds_when_knowledge_dir_changed(tmp_path: Path) -> None:
+    """A pickled index from a *different* knowledge dir must trigger rebuild."""
+    knowledge_a = tmp_path / "a" / "knowledge"
+    knowledge_b = tmp_path / "b" / "knowledge"
+    shutil.copytree(FIXTURES, knowledge_a)
+    shutil.copytree(FIXTURES, knowledge_b)
+    # Build against A but save the pickle into B's expected slot.
+    idx_a = build_index(knowledge_a)
+    target_b = _default_index_path(knowledge_b)
+    save_index(idx_a, target_b)
+    # Now ask for B's index: cached.knowledge_dir != knowledge_b -> rebuild.
+    rebuilt = load_or_build(knowledge_b)
+    assert rebuilt.knowledge_dir == knowledge_b.resolve()
+
+
+def test_load_or_build_force_rebuild(tmp_path: Path) -> None:
+    knowledge = tmp_path / "knowledge"
+    shutil.copytree(FIXTURES, knowledge)
+    first = load_or_build(knowledge)
+    second = load_or_build(knowledge, force_rebuild=True)
+    assert second.built_at >= first.built_at
+
+
+def test_load_or_build_saves_best_effort_on_oserror(tmp_path: Path, monkeypatch) -> None:
+    """A failure to persist the index doesn't fail the call — we return
+    the in-memory index anyway."""
+    knowledge = tmp_path / "knowledge"
+    shutil.copytree(FIXTURES, knowledge)
+
+    def fake_save(*a, **kw):
+        raise OSError("cannot write")
+
+    monkeypatch.setattr(bm25_mod, "save_index", fake_save)
+    idx = load_or_build(knowledge)
+    assert len(idx.docs) > 0
+
+
+def test_is_stale_detects_removed_file(tmp_path: Path) -> None:
+    knowledge = tmp_path / "knowledge"
+    shutil.copytree(FIXTURES, knowledge)
+    idx = build_index(knowledge)
+    # Remove a tracked file.
+    (knowledge / "global" / "concepts" / "no-mock-db.md").unlink()
+    assert _is_stale(idx, knowledge) is True
+
+
+def test_build_snippet_falls_back_to_first_body_line() -> None:
+    """No query tokens hit -> snippet is the first non-heading line."""
+    text = "---\nid: x\n---\n# Heading\n\nFirst body line here.\n"
+    out = _build_snippet(text, q_tokens=["xxnonexistentxx"])
+    assert out.startswith("First body line")
+
+
+def test_build_snippet_only_heading_returns_body_strip() -> None:
+    """No matching token and body is only a heading -> falls through to body.strip()."""
+    text = "---\nid: x\n---\n# Heading only\n"
+    out = _build_snippet(text, q_tokens=["xxnomatch"])
+    # No non-heading lines exist -> falls back to the stripped body (the heading itself).
+    assert "Heading" in out
+
+
+def test_one_line_truncates_with_ellipsis() -> None:
+    long = "word " * 50
+    out = _one_line(long, width=20)
+    assert len(out) == 20
+    assert out.endswith("…")
 
 
 if __name__ == "__main__":

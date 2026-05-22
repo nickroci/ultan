@@ -33,6 +33,7 @@ repos:
         entry: bash -c 'cd daemon && uv run --frozen pyright "${@#daemon/}"' --
         files: ^daemon/.*\.py$
         pass_filenames: true
+        stages: [pre-commit]
 
       - id: pyright-tools-search
         name: pyright (tools/search)
@@ -40,6 +41,7 @@ repos:
         entry: bash -c 'cd tools/search && uv run --frozen pyright "${@#tools/search/}"' --
         files: ^tools/search/.*\.py$
         pass_filenames: true
+        stages: [pre-commit]
 
       - id: pyright-src
         name: pyright (src)
@@ -47,6 +49,7 @@ repos:
         entry: bash -c 'cd src && uv run --frozen pyright "${@#src/}"' --
         files: ^src/.*\.py$
         pass_filenames: true
+        stages: [pre-commit]
 
       # Pytest per package — runs at pre-push, not pre-commit. Full suite,
       # only when something in that package changed since the last push.

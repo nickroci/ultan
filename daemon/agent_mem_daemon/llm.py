@@ -24,9 +24,25 @@ import asyncio
 import logging
 import os
 from pathlib import Path
-from typing import Tuple
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Coroutine, Tuple, TypeVar
+
+if TYPE_CHECKING:
+    from claude_agent_sdk.types import (
+        ClaudeAgentOptions,
+        McpServerConfig,
+        PermissionResultAllow,
+        PermissionResultDeny,
+        ToolPermissionContext,
+    )
+
+    _PathGuardCallback = Callable[
+        [str, dict[str, Any], "ToolPermissionContext"],
+        Awaitable["PermissionResultAllow | PermissionResultDeny"],
+    ]
 
 log = logging.getLogger("agent_mem_daemon.llm")
+
+_R = TypeVar("_R")
 
 
 # Models. Originally Haiku for the Librarian, but Haiku-tier was
@@ -92,11 +108,79 @@ def _find_unique_leaf(leaf: str, knowledge_root: Path) -> str | None:
     return rel.with_suffix("").as_posix()
 
 
+def _extract_write_content(
+    tool_name: str, tool_input: dict[str, Any]
+) -> tuple[str | None, str | None]:
+    """Pull the prospective on-disk content + its dict-key from a Write/Edit
+    tool input. Returns ``(content, key)`` or ``(None, None)`` if the tool
+    isn't a write or the content is missing/empty."""
+    if tool_name == "Write":
+        content = tool_input.get("content")
+        key = "content"
+    elif tool_name == "Edit":
+        content = tool_input.get("new_string")
+        key = "new_string"
+    else:
+        return None, None
+    if not isinstance(content, str) or not content.strip():
+        return None, None
+    return content, key
+
+
+def _classify_wikilinks(
+    content: str,
+    knowledge_root: Path,
+    target_file: Path,
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """Sort every wikilink in ``content`` into auto-fixable repairs vs.
+    unresolvable broken links. Returns ``(repairs, unresolvable)``."""
+    from . import markdown_utils  # noqa: PLC0415  (lazy: keeps llm.py import-light)
+
+    repairs: list[tuple[str, str]] = []
+    unresolvable: list[str] = []
+    for hit in markdown_utils.extract_wikilinks(content):
+        link = hit.target
+        if not link:
+            continue
+        if _resolve_wikilink(link, knowledge_root, target_file):
+            continue
+        leaf = link.rsplit("/", 1)[-1]
+        canonical = _find_unique_leaf(leaf, knowledge_root)
+        if canonical is None or canonical == link:
+            unresolvable.append(link)
+        else:
+            repairs.append((link, canonical))
+    return repairs, unresolvable
+
+
+def _format_deny_message(
+    target_file: Path,
+    repairs: list[tuple[str, str]],
+    unresolvable: list[str],
+) -> str:
+    repair_note = ""
+    if repairs:
+        repair_note = (
+            " (note: "
+            + ", ".join(f"[[{b}]] → [[{f}]]" for b, f in repairs)
+            + " would auto-resolve, but the unresolvable links above also "
+            "need to be corrected before the write can proceed)"
+        )
+    return (
+        f"Write to {target_file.name} rejected — these wikilinks do not "
+        f"resolve and no unique leaf-name match was found in the library: "
+        + ", ".join(f"[[{u}]]" for u in unresolvable)
+        + repair_note
+        + ". Use Glob/Grep/bm25_search to locate the intended target, "
+        "or remove the link if the entry doesn't exist yet."
+    )
+
+
 def _check_and_repair_writes(
     tool_name: str,
-    tool_input: dict,
+    tool_input: dict[str, Any],
     knowledge_root: Path,
-) -> tuple[str, dict | None, str]:
+) -> tuple[str, dict[str, Any] | None, str]:
     """Validate any wikilinks in a Write/Edit payload before it lands on
     disk. Returns a (status, payload, info) triple:
 
@@ -110,8 +194,6 @@ def _check_and_repair_writes(
 
     Skips log.md (audit-trail; quoted paths are not navigation).
     """
-    from . import markdown_utils
-
     file_path = tool_input.get("file_path")
     if not file_path:
         return "allow", tool_input, ""
@@ -119,75 +201,31 @@ def _check_and_repair_writes(
     if target_file.name == "log.md":
         return "allow", tool_input, ""
 
-    # What content is being placed on disk?
-    if tool_name == "Write":
-        content = tool_input.get("content")
-        content_key = "content"
-    elif tool_name == "Edit":
-        content = tool_input.get("new_string")
-        content_key = "new_string"
-    else:
-        return "allow", tool_input, ""
-    if not isinstance(content, str) or not content.strip():
+    content, content_key = _extract_write_content(tool_name, tool_input)
+    if content is None or content_key is None:
         return "allow", tool_input, ""
 
-    hits = markdown_utils.extract_wikilinks(content)
-    if not hits:
+    repairs, unresolvable = _classify_wikilinks(content, knowledge_root, target_file)
+    if not repairs and not unresolvable:
         return "allow", tool_input, ""
-
-    repairs: list[tuple[str, str]] = []  # (broken, fixed)
-    unresolvable: list[str] = []  # broken with no auto-fix
-
-    for hit in hits:
-        link = hit.target
-        if not link:
-            continue
-        if _resolve_wikilink(link, knowledge_root, target_file):
-            continue
-        # Broken — try leaf-name lookup for auto-repair.
-        leaf = link.rsplit("/", 1)[-1]
-        canonical = _find_unique_leaf(leaf, knowledge_root)
-        if canonical is None or canonical == link:
-            unresolvable.append(link)
-        else:
-            repairs.append((link, canonical))
 
     if unresolvable:
-        repair_note = ""
-        if repairs:
-            repair_note = (
-                " (note: "
-                + ", ".join(f"[[{b}]] → [[{f}]]" for b, f in repairs)
-                + " would auto-resolve, but the unresolvable links above also "
-                "need to be corrected before the write can proceed)"
-            )
-        msg = (
-            f"Write to {target_file.name} rejected — these wikilinks do not "
-            f"resolve and no unique leaf-name match was found in the library: "
-            + ", ".join(f"[[{u}]]" for u in unresolvable)
-            + repair_note
-            + ". Use Glob/Grep/bm25_search to locate the intended target, "
-            "or remove the link if the entry doesn't exist yet."
-        )
-        return "deny", None, msg
+        return "deny", None, _format_deny_message(target_file, repairs, unresolvable)
 
-    if repairs:
-        new_content = content
-        for broken, fixed in repairs:
-            new_content = _rewrite_link_in_text(new_content, broken, fixed)
-        new_input = dict(tool_input)
-        new_input[content_key] = new_content
-        summary = ", ".join(f"[[{b}]] → [[{f}]]" for b, f in repairs)
-        return "allow_with_repair", new_input, summary
-
-    return "allow", tool_input, ""
+    new_content = content
+    for broken, fixed in repairs:
+        new_content = _rewrite_link_in_text(new_content, broken, fixed)
+    new_input: dict[str, Any] = dict(tool_input)
+    new_input[content_key] = new_content
+    summary = ", ".join(f"[[{b}]] → [[{f}]]" for b, f in repairs)
+    return "allow_with_repair", new_input, summary
 
 
 def _rewrite_link_in_text(text: str, broken: str, fixed: str) -> str:
     """Rewrite `[[broken]]` and `[[broken|alias]]` to use ``fixed`` while
     preserving any alias. Mirrors library_tools._rewrite_wikilinks_in_text
     but for a single (broken, fixed) pair."""
-    import re as _re
+    import re as _re  # noqa: PLC0415  (local re alias avoids shadowing top-level imports)
 
     # Match `[[broken]]` or `[[broken|alias]]` or `[[broken.md]]` (with
     # alias). Escape the broken target for regex use.
@@ -196,7 +234,45 @@ def _rewrite_link_in_text(text: str, broken: str, fixed: str) -> str:
     return pattern.sub(lambda m: f"[[{fixed}{m.group(1) or ''}]]", text)
 
 
-def _make_path_guard(boundary: Path, *, allow_writes: bool, check_wikilinks: bool = False):
+def _classify_tool_call(tool_name: str, *, allow_writes: bool) -> str:
+    """Stage-1 role-level check: classify a tool call without inspecting
+    paths. Returns one of: ``"deny_role"`` (write tool in read-only role),
+    ``"allow_path_free"`` (in-process MCP that's path-safe by construction),
+    ``"deny_not_listed"`` (tool not in the allow-list at all), or
+    ``"validate_paths"`` (proceed to stage 2)."""
+    if not allow_writes and tool_name in _WRITE_TOOLS:
+        return "deny_role"
+    if tool_name in _PATH_FREE_TOOLS:
+        return "allow_path_free"
+    if tool_name not in _PATH_KEYS:
+        return "deny_not_listed"
+    return "validate_paths"
+
+
+def _first_path_violation(
+    tool_name: str,
+    tool_input: dict[str, Any],
+    root: Path,
+) -> object | None:
+    """Stage-2 path check. Returns the offending raw path value if any
+    declared path key falls outside ``root``, else ``None``."""
+    for key in _PATH_KEYS[tool_name]:
+        raw = tool_input.get(key)
+        if raw is None:
+            # Optional path key (e.g. Glob without an explicit path
+            # defaults to cwd, which we've already set inside root).
+            continue
+        if not _path_is_inside(raw, root):
+            return raw
+    return None
+
+
+def _make_path_guard(
+    boundary: Path,
+    *,
+    allow_writes: bool,
+    check_wikilinks: bool = False,
+) -> "_PathGuardCallback":
     """Return a ``can_use_tool`` callback that rejects any tool call
     referencing a path outside ``boundary``.
 
@@ -222,83 +298,53 @@ def _make_path_guard(boundary: Path, *, allow_writes: bool, check_wikilinks: boo
     """
     root = boundary.expanduser().resolve()
 
-    # tool name → list of input keys that contain a filesystem path.
-    PATH_KEYS = {
-        "Read": ["file_path"],
-        "Write": ["file_path"],
-        "Edit": ["file_path"],
-        "Glob": ["path"],
-        "Grep": ["path"],
-        "NotebookEdit": ["notebook_path"],
-    }
-
-    WRITE_TOOLS = {"Write", "Edit", "NotebookEdit"}
-
-    # In-process MCP tools that don't take filesystem paths from the
-    # model. They're safe by construction because the daemon pinned
-    # their scope when it registered the server. Allow without path
-    # validation.
-    PATH_FREE_TOOLS = {
-        "mcp__agent_mem_library__bm25_search",
-        # move_entries validates every path against the knowledge root
-        # internally (``_safe_inside``), so it's safe to allow without
-        # the guard's per-key path validation.
-        "mcp__agent_mem_library__move_entries",
-    }
-
-    async def _can_use_tool(tool_name, tool_input, context):  # noqa: ARG001
-        from claude_agent_sdk.types import (
+    async def _can_use_tool(
+        tool_name: str,
+        tool_input: dict[str, Any],
+        context: "ToolPermissionContext",  # noqa: ARG001
+    ) -> "PermissionResultAllow | PermissionResultDeny":
+        from claude_agent_sdk.types import (  # noqa: PLC0415  (lazy: SDK optional at startup)
             PermissionResultAllow,
             PermissionResultDeny,
         )
 
-        if not allow_writes and tool_name in WRITE_TOOLS:
+        # Stage 1: role-level allow-list.
+        verdict = _classify_tool_call(tool_name, allow_writes=allow_writes)
+        if verdict == "deny_role":
             return PermissionResultDeny(
                 message=f"tool {tool_name!r} is not allowed in this role",
             )
-
-        if tool_name in PATH_FREE_TOOLS:
+        if verdict == "allow_path_free":
             return PermissionResultAllow(updated_input=tool_input)
-
-        if tool_name not in PATH_KEYS:
+        if verdict == "deny_not_listed":
             # Other tools (Bash, WebFetch, etc.) — deny by default. The
             # whole point of this guard is to keep the role inside the
             # library. If a future role legitimately needs another tool,
-            # add it to PATH_KEYS (with appropriate path validation) or
+            # add it to _PATH_KEYS (with appropriate path validation) or
             # to an explicit safe-list.
             return PermissionResultDeny(
                 message=f"tool {tool_name!r} is not in the allow-list for this role",
             )
 
-        for key in PATH_KEYS[tool_name]:
-            raw = tool_input.get(key)
-            if raw is None:
-                # Optional path key (e.g. Glob without an explicit path
-                # defaults to cwd, which we've already set inside root).
-                continue
-            try:
-                resolved = Path(str(raw)).expanduser().resolve()
-                resolved.relative_to(root)
-            except (ValueError, OSError):
-                return PermissionResultDeny(
-                    message=(
-                        f"path {raw!r} is outside the knowledge dir "
-                        f"({root}); the {tool_name} call has been denied. "
-                        f"Use a path under {root} instead."
-                    ),
-                )
-
-        # Wikilink check on writes (Scholar only). Parses the proposed
-        # content, auto-repairs links whose target moved to a new unique
-        # path, and denies writes that introduce unresolvable links —
-        # closes the "Scholar references an old path post-move" gap that
-        # the post-write validator only logged about.
-        if check_wikilinks and tool_name in WRITE_TOOLS:
-            status, payload, info = _check_and_repair_writes(
-                tool_name,
-                tool_input,
-                root,
+        # Stage 2: every declared path key must resolve under ``root``.
+        bad = _first_path_violation(tool_name, tool_input, root)
+        if bad is not None:
+            return PermissionResultDeny(
+                message=(
+                    f"path {bad!r} is outside the knowledge dir "
+                    f"({root}); the {tool_name} call has been denied. "
+                    f"Use a path under {root} instead."
+                ),
             )
+
+        # Stage 3: optional wikilink validation on Scholar writes.
+        # Parses the proposed content, auto-repairs links whose target
+        # moved to a new unique path, and denies writes that introduce
+        # unresolvable links — closes the "Scholar references an old
+        # path post-move" gap that the post-write validator only logged
+        # about.
+        if check_wikilinks and tool_name in _WRITE_TOOLS:
+            status, payload, info = _check_and_repair_writes(tool_name, tool_input, root)
             if status == "deny":
                 return PermissionResultDeny(message=info)
             if status == "allow_with_repair":
@@ -315,7 +361,47 @@ def _make_path_guard(boundary: Path, *, allow_writes: bool, check_wikilinks: boo
     return _can_use_tool
 
 
-def _recursion_guard_env() -> dict:
+# ── Path-guard module-level config ───────────────────────────────────
+#
+# Lifted out of ``_make_path_guard`` so the closure is just dispatch +
+# the per-call boundary (``root``); the static config (which keys are
+# paths, which MCP tools are path-free, which tools are writes) lives
+# at module scope.
+
+
+_PATH_KEYS = {
+    "Read": ["file_path"],
+    "Write": ["file_path"],
+    "Edit": ["file_path"],
+    "Glob": ["path"],
+    "Grep": ["path"],
+    "NotebookEdit": ["notebook_path"],
+}
+
+_WRITE_TOOLS = {"Write", "Edit", "NotebookEdit"}
+
+# In-process MCP tools that don't take filesystem paths from the model.
+# They're safe by construction because the daemon pinned their scope
+# when it registered the server.
+_PATH_FREE_TOOLS = {
+    "mcp__agent_mem_library__bm25_search",
+    # move_entries validates every path against the knowledge root
+    # internally (``_safe_inside``), so it's safe to allow without the
+    # guard's per-key path validation.
+    "mcp__agent_mem_library__move_entries",
+}
+
+
+def _path_is_inside(raw: object, root: Path) -> bool:
+    """True iff ``raw`` resolves under ``root``. Tolerates non-Path inputs."""
+    try:
+        Path(str(raw)).expanduser().resolve().relative_to(root)
+    except (ValueError, OSError):
+        return False
+    return True
+
+
+def _recursion_guard_env() -> dict[str, str]:
     """Marker env vars passed into every SDK call.
 
     The hook layer is meant to check ``CLAUDE_INVOKED_BY`` and skip its
@@ -323,14 +409,14 @@ def _recursion_guard_env() -> dict:
     environment, which is what `asyncio.create_subprocess_*` does by
     default — but the SDK takes an explicit ``env=`` dict, so we pass it.
     """
-    env = dict(os.environ)
+    env: dict[str, str] = dict(os.environ)
     env["CLAUDE_INVOKED_BY"] = "agent_mem_daemon"
     return env
 
 
 async def _drain_query(
     prompt: str,
-    options,
+    options: "ClaudeAgentOptions",
 ) -> Tuple[str, float]:
     """Run one ``query(...)`` and return (full_text, cost_usd).
 
@@ -343,7 +429,7 @@ async def _drain_query(
     """
     # Lazy import so a missing SDK doesn't kill the daemon on startup —
     # only the actual Librarian/Scholar paths need it.
-    from claude_agent_sdk import (
+    from claude_agent_sdk import (  # noqa: PLC0415  (lazy: SDK optional at startup)
         AssistantMessage,
         ResultMessage,
         TextBlock,
@@ -376,11 +462,11 @@ async def _drain_query(
     return full, cost
 
 
-def _run_with_timeout(coro, timeout_s: float):
+def _run_with_timeout(coro: Coroutine[Any, Any, _R], timeout_s: float) -> _R:
     """Wrap a coroutine in ``asyncio.run`` with a timeout. Raises
     LLMTimeout on expiry."""
 
-    async def _wrapped():
+    async def _wrapped() -> _R:
         try:
             return await asyncio.wait_for(coro, timeout=timeout_s)
         except asyncio.TimeoutError as e:
@@ -416,21 +502,21 @@ def run_librarian_call(
       - Any other exception the SDK raises (caller should catch and log).
     """
     # Lazy import so daemon startup doesn't require the SDK to be present.
-    from claude_agent_sdk import ClaudeAgentOptions
+    from claude_agent_sdk import ClaudeAgentOptions  # noqa: PLC0415
 
-    from . import library_tools
+    from . import library_tools  # noqa: PLC0415
 
-    librarian_tools = ["Read", "Glob", "Grep"]
-    mcp_servers: dict = {}
+    librarian_tools: list[str] = ["Read", "Glob", "Grep"]
+    mcp_servers: dict[str, McpServerConfig] = {}
 
     if cwd is not None:
         # Register the in-process BM25 search tool so the Librarian can
         # find semantically related entries without the daemon doing a
         # regex pre-pass. Complements Glob (filename) and Grep (literal).
-        mcp_servers[library_tools._SERVER_NAME] = library_tools.make_library_mcp_server(cwd)
+        mcp_servers[library_tools.SERVER_NAME] = library_tools.make_library_mcp_server(cwd)
         librarian_tools.append(library_tools.fully_qualified_tool_name())
 
-    opts: dict = dict(
+    options = ClaudeAgentOptions(
         model=model,
         allowed_tools=librarian_tools,
         mcp_servers=mcp_servers,
@@ -445,16 +531,12 @@ def run_librarian_call(
         # Without it the SDK exposes the tools but the model's harness
         # doesn't know how to act on results.
         system_prompt={"type": "preset", "preset": "claude_code"},
+        # ``cwd`` and the path guard only apply when the caller supplied
+        # a knowledge root. Without one, we run with the daemon's cwd
+        # and skip the path guard entirely (no file tools to protect).
+        cwd=str(cwd) if cwd is not None else None,
+        can_use_tool=_make_path_guard(cwd, allow_writes=False) if cwd is not None else None,
     )
-    if cwd is not None:
-        opts["cwd"] = str(cwd)
-        # Infra-level path guard: deny any Read/Glob/Grep outside the
-        # knowledge dir. Without this, the LLM can pass absolute paths
-        # and bypass cwd. The bm25_search tool is path-safe by
-        # construction (knowledge_dir captured in closure), so it
-        # doesn't need guard coverage.
-        opts["can_use_tool"] = _make_path_guard(cwd, allow_writes=False)
-    options = ClaudeAgentOptions(**opts)
     log.debug(
         "librarian SDK call: model=%s cwd=%s prompt_chars=%d",
         model,
@@ -482,9 +564,9 @@ def run_scholar_call(
     Returns (response_text, cost_usd). Raises LLMTimeout on timeout; the
     caller logs and skips the batch.
     """
-    from claude_agent_sdk import ClaudeAgentOptions
+    from claude_agent_sdk import ClaudeAgentOptions  # noqa: PLC0415
 
-    from . import library_tools
+    from . import library_tools  # noqa: PLC0415
 
     # Scholar's cwd is the agent-mem home (so prompt-relative paths like
     # ``knowledge/index.md`` resolve correctly). The guard's boundary is
@@ -494,8 +576,8 @@ def run_scholar_call(
     # Register the in-process library MCP server so the Scholar can call
     # the atomic move_entries tool (which rewrites inbound wikilinks
     # programmatically — the LLM should NEVER move files by hand).
-    mcp_servers = {
-        library_tools._SERVER_NAME: library_tools.make_library_mcp_server(boundary),
+    mcp_servers: dict[str, McpServerConfig] = {
+        library_tools.SERVER_NAME: library_tools.make_library_mcp_server(boundary),
     }
     options = ClaudeAgentOptions(
         model=model,

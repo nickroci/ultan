@@ -24,6 +24,13 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
+from claude_agent_sdk import (  # noqa: E402
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ResultMessage,
+    TextBlock,
+    query,
+)
 from config import (  # noqa: E402
     AGENTS_FILE,
     CONCEPTS_DIR,
@@ -35,6 +42,8 @@ from config import (  # noqa: E402
     now_iso,
 )
 from utils import (  # noqa: E402
+    IngestedEntry,
+    State,
     file_hash,
     list_raw_files,
     list_wiki_articles,
@@ -44,32 +53,24 @@ from utils import (  # noqa: E402
 )
 
 
-async def compile_daily_log(log_path: Path, state: dict) -> float:
+async def compile_daily_log(log_path: Path, state: State) -> float:
     """Compile a single daily log into knowledge articles.
 
     Returns the API cost of the compilation.
     """
-    from claude_agent_sdk import (
-        AssistantMessage,
-        ClaudeAgentOptions,
-        ResultMessage,
-        TextBlock,
-        query,
-    )
-
     log_content = log_path.read_text(encoding="utf-8")
     schema = AGENTS_FILE.read_text(encoding="utf-8")
     wiki_index = read_wiki_index()
 
     # Read existing articles for context
     existing_articles_context = ""
-    existing = {}
+    existing: dict[str, str] = {}
     for article_path in list_wiki_articles():
         rel = article_path.relative_to(KNOWLEDGE_DIR)
         existing[str(rel)] = article_path.read_text(encoding="utf-8")
 
     if existing:
-        parts = []
+        parts: list[str] = []
         for rel_path, content in existing.items():
             parts.append(f"### {rel_path}\n```markdown\n{content}\n```")
         existing_articles_context = "\n\n".join(parts)
@@ -174,18 +175,74 @@ Read the daily log above and compile it into wiki articles following the schema 
 
     # Update state
     rel_path = log_path.name
-    state.setdefault("ingested", {})[rel_path] = {
-        "hash": file_hash(log_path),
-        "compiled_at": now_iso(),
-        "cost_usd": cost,
-    }
+    ingested = state.setdefault("ingested", {})
+    ingested[rel_path] = IngestedEntry(
+        hash=file_hash(log_path),
+        compiled_at=now_iso(),
+        cost_usd=cost,
+    )
     state["total_cost"] = state.get("total_cost", 0.0) + cost
     save_state(state)
 
     return cost
 
 
-def main():
+def _resolve_target(file_arg: str) -> Path:
+    """Resolve a ``--file`` argument to an absolute log path.
+
+    Tries the argument as-is, then under ``DAILY_DIR``, then under
+    ``STORE_DIR``. Exits with code 1 if none of the candidates exist.
+    """
+    target = Path(file_arg)
+    if not target.is_absolute():
+        target = DAILY_DIR / target.name
+    if not target.exists():
+        target = STORE_DIR / file_arg
+    if not target.exists():
+        print(f"Error: {file_arg} not found")
+        sys.exit(1)
+    return target
+
+
+def _select_files(args: argparse.Namespace, state: State) -> list[Path]:
+    """Decide which daily logs to compile this run.
+
+    - ``--file`` → exactly that one (resolved via :func:`_resolve_target`).
+    - ``--all`` → every log under ``DAILY_DIR``.
+    - default → only logs whose content hash has changed since the last
+      run (or never been compiled).
+    """
+    if args.file:
+        return [_resolve_target(args.file)]
+
+    all_logs = list_raw_files()
+    if args.all:
+        return all_logs
+
+    changed: list[Path] = []
+    ingested = state.get("ingested", {})
+    for log_path in all_logs:
+        prev = ingested.get(log_path.name)
+        if prev is None or prev.get("hash") != file_hash(log_path):
+            changed.append(log_path)
+    return changed
+
+
+def _run_compile_loop(to_compile: list[Path], state: State) -> None:
+    """Compile each log sequentially, printing a per-file progress line."""
+    total_cost = 0.0
+    for i, log_path in enumerate(to_compile, 1):
+        print(f"\n[{i}/{len(to_compile)}] Compiling {log_path.name}...")
+        cost = asyncio.run(compile_daily_log(log_path, state))
+        total_cost += cost
+        print("  Done.")
+
+    articles = list_wiki_articles()
+    print(f"\nCompilation complete. Total cost: ${total_cost:.2f}")
+    print(f"Knowledge base: {len(articles)} articles")
+
+
+def main() -> None:
     parser = argparse.ArgumentParser(description="Compile daily logs into knowledge articles")
     parser.add_argument("--all", action="store_true", help="Force recompile all logs")
     parser.add_argument("--file", type=str, help="Compile a specific daily log file")
@@ -194,30 +251,7 @@ def main():
 
     ensure_store_dirs()
     state = load_state()
-
-    # Determine which files to compile
-    if args.file:
-        target = Path(args.file)
-        if not target.is_absolute():
-            target = DAILY_DIR / target.name
-        if not target.exists():
-            # Try resolving relative to the store root
-            target = STORE_DIR / args.file
-        if not target.exists():
-            print(f"Error: {args.file} not found")
-            sys.exit(1)
-        to_compile = [target]
-    else:
-        all_logs = list_raw_files()
-        if args.all:
-            to_compile = all_logs
-        else:
-            to_compile = []
-            for log_path in all_logs:
-                rel = log_path.name
-                prev = state.get("ingested", {}).get(rel, {})
-                if not prev or prev.get("hash") != file_hash(log_path):
-                    to_compile.append(log_path)
+    to_compile = _select_files(args, state)
 
     if not to_compile:
         print("Nothing to compile - all daily logs are up to date.")
@@ -230,17 +264,7 @@ def main():
     if args.dry_run:
         return
 
-    # Compile each file sequentially
-    total_cost = 0.0
-    for i, log_path in enumerate(to_compile, 1):
-        print(f"\n[{i}/{len(to_compile)}] Compiling {log_path.name}...")
-        cost = asyncio.run(compile_daily_log(log_path, state))
-        total_cost += cost
-        print("  Done.")
-
-    articles = list_wiki_articles()
-    print(f"\nCompilation complete. Total cost: ${total_cost:.2f}")
-    print(f"Knowledge base: {len(articles)} articles")
+    _run_compile_loop(to_compile, state)
 
 
 if __name__ == "__main__":

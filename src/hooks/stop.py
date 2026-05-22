@@ -19,12 +19,7 @@ import os
 import re
 import sys
 from pathlib import Path
-
-# Recursion guard FIRST. Stop fires at the end of every assistant turn —
-# including SDK-spawned subagent turns from flush.py. Without this guard
-# every flush.py invocation would fire an extra Stop event.
-if os.environ.get("CLAUDE_INVOKED_BY"):
-    sys.exit(0)
+from typing import Any, cast
 
 _THIS_DIR = Path(__file__).resolve().parent
 _CODE_ROOT = _THIS_DIR.parent
@@ -34,25 +29,33 @@ if str(_SCRIPTS_DIR) not in sys.path:
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-from _events import append_event  # noqa: E402
+from _events import HookPayload, append_event  # noqa: E402
 
 
 def main() -> None:
+    # Recursion guard. Stop fires at the end of every assistant turn —
+    # including SDK-spawned subagent turns from flush.py. Without this
+    # guard every flush.py invocation would fire an extra Stop event.
+    if os.environ.get("CLAUDE_INVOKED_BY"):
+        return
+
     try:
         raw_input = sys.stdin.read()
+        parsed: Any
         try:
-            hook_input: dict = json.loads(raw_input)
+            parsed = json.loads(raw_input)
         except json.JSONDecodeError:
             fixed_input = re.sub(r'(?<!\\)\\(?!["\\])', r"\\\\", raw_input)
-            hook_input = json.loads(fixed_input)
+            parsed = json.loads(fixed_input)
     except (json.JSONDecodeError, ValueError, EOFError):
         return
 
-    if not isinstance(hook_input, dict):
+    if not isinstance(parsed, dict):
         return
+    hook_input: HookPayload = cast("HookPayload", parsed)
 
     append_event("Stop", hook_input, payload={})
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()

@@ -1,0 +1,145 @@
+"""Tests for the PreCompact hook (snapshot transcript before
+auto-compaction)."""
+
+from __future__ import annotations
+
+import importlib
+import json
+import sys
+from io import StringIO
+from pathlib import Path
+
+_THIS_DIR = Path(__file__).resolve().parent
+if str(_THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(_THIS_DIR))
+
+
+class _FakePopen:
+    """Same shim as in test_session_end — see that file for why."""
+
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.returncode = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+def _fresh(monkeypatch, home: Path):
+    monkeypatch.setenv("AGENT_MEM_HOME", str(home))
+    monkeypatch.delenv("CLAUDE_INVOKED_BY", raising=False)
+    for mod in ("config", "_events", "_flush_spawn", "pre_compact"):
+        if mod in sys.modules:
+            del sys.modules[mod]
+    pc = importlib.import_module("pre_compact")
+    import _flush_spawn
+
+    class _ShimSubprocess:
+        Popen = staticmethod(_FakePopen)
+        DEVNULL = _flush_spawn.subprocess.DEVNULL
+        CREATE_NO_WINDOW = getattr(_flush_spawn.subprocess, "CREATE_NO_WINDOW", 0)
+
+    monkeypatch.setattr(_flush_spawn, "subprocess", _ShimSubprocess)
+    return pc
+
+
+def _drive(monkeypatch, mod, payload: dict) -> None:
+    monkeypatch.setattr(sys, "stdin", StringIO(json.dumps(payload)))
+    mod.main()
+
+
+def _write_transcript(path: Path, n: int = 6) -> None:
+    lines = [
+        json.dumps({"message": {"role": "user" if i % 2 == 0 else "assistant", "content": f"t{i}"}})
+        for i in range(n)
+    ]
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def test_pre_compact_emits_session_end_event_with_source(tmp_path: Path, monkeypatch):
+    """PreCompact reuses the SessionEnd event type but tags payload
+    source=pre-compact so the daemon can distinguish."""
+    pc = _fresh(monkeypatch, tmp_path)
+    transcript = tmp_path / "t.jsonl"
+    _write_transcript(transcript)
+    _drive(
+        monkeypatch,
+        pc,
+        {"session_id": "s1", "cwd": "/tmp", "transcript_path": str(transcript)},
+    )
+    rec = json.loads((tmp_path / "events.jsonl").read_text(encoding="utf-8").strip())
+    assert rec["type"] == "SessionEnd"
+    assert rec["payload"]["source"] == "pre-compact"
+
+
+def test_pre_compact_recursion_guard(tmp_path: Path, monkeypatch):
+    pc = _fresh(monkeypatch, tmp_path)
+    monkeypatch.setenv("CLAUDE_INVOKED_BY", "x")
+    _drive(monkeypatch, pc, {"session_id": "s1"})
+    assert not (tmp_path / "events.jsonl").exists()
+
+
+def test_pre_compact_skips_below_min_turns(tmp_path: Path, monkeypatch):
+    """PreCompact min-turns threshold is 5 — a short transcript writes
+    NO snapshot (but still emits the event)."""
+    pc = _fresh(monkeypatch, tmp_path)
+    transcript = tmp_path / "t.jsonl"
+    _write_transcript(transcript, n=2)
+    _drive(
+        monkeypatch,
+        pc,
+        {"session_id": "s1", "cwd": "/tmp", "transcript_path": str(transcript)},
+    )
+    # Event fires; no snapshot.
+    assert (tmp_path / "events.jsonl").exists()
+    state_files = list((tmp_path / "state").glob("flush-context-*.md"))
+    assert state_files == []
+
+
+def test_pre_compact_writes_snapshot_above_min_turns(tmp_path: Path, monkeypatch):
+    pc = _fresh(monkeypatch, tmp_path)
+    transcript = tmp_path / "t.jsonl"
+    _write_transcript(transcript, n=10)
+    _drive(
+        monkeypatch,
+        pc,
+        {"session_id": "s1", "cwd": "/tmp", "transcript_path": str(transcript)},
+    )
+    state_files = list((tmp_path / "state").glob("flush-context-*.md"))
+    assert len(state_files) == 1
+
+
+def test_pre_compact_handles_malformed_stdin(tmp_path: Path, monkeypatch):
+    pc = _fresh(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "stdin", StringIO("xxx"))
+    pc.main()
+
+
+def test_pre_compact_handles_windows_backslash(tmp_path: Path, monkeypatch):
+    pc = _fresh(monkeypatch, tmp_path)
+    raw = '{"session_id": "s1", "cwd": "C:\\Users\\x"}'
+    monkeypatch.setattr(sys, "stdin", StringIO(raw))
+    pc.main()
+    assert (tmp_path / "events.jsonl").exists()
+
+
+def test_pre_compact_handles_non_dict_stdin(tmp_path: Path, monkeypatch):
+    pc = _fresh(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "stdin", StringIO("42"))
+    pc.main()
+    assert not (tmp_path / "events.jsonl").exists()
+
+
+def test_pre_compact_subprocess_end_to_end(isolated_home: Path, hook_runner, tmp_path):
+    transcript = tmp_path / "t.jsonl"
+    _write_transcript(transcript, n=10)
+    res = hook_runner(
+        "pre-compact.py",
+        {"session_id": "s1", "cwd": "/tmp", "transcript_path": str(transcript)},
+        env={"AGENT_MEM_HOME": str(isolated_home)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert (isolated_home / "events.jsonl").exists()

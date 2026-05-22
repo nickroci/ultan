@@ -47,7 +47,13 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, cast
+
+import yaml
+from bm25 import load_or_build as bm25_load_or_build
+from embeddings import load_or_build as embeddings_load_or_build
+
+from .paths import home as _agent_mem_home
 
 log = logging.getLogger("agent_mem_daemon.priming")
 
@@ -74,21 +80,21 @@ def _parse_frontmatter(text: str) -> Dict[str, Any]:
     Permissive: a malformed entry just yields ``{}`` rather than killing
     the priming refresh.
     """
-    import yaml
-
     m = _FRONTMATTER_RE.match(text)
     if not m:
         return {}
     try:
-        fm = yaml.safe_load(m.group(1)) or {}
+        fm: object = yaml.safe_load(m.group(1)) or {}
         if isinstance(fm, dict):
-            return fm
+            # yaml.safe_load yields a dict[Any, Any]; the rest of this module
+            # treats keys as strings, so coerce them on the way out.
+            return {str(k): v for k, v in cast("dict[object, Any]", fm).items()}
     except yaml.YAMLError:
         pass
     return {}
 
 
-def _first_line(value: Any) -> str:
+def _first_line(value: object) -> str:
     """First non-empty line of a frontmatter value, normalised.
 
     ``applies-when`` is typically a block scalar with multiple lines; we
@@ -98,7 +104,8 @@ def _first_line(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, list):
-        for item in value:
+        items = cast("list[object]", value)
+        for item in items:
             s = str(item).strip()
             if s:
                 return _shorten(s)
@@ -183,10 +190,14 @@ def extract_buffer_text(packets: Iterable[Mapping[str, Any]]) -> str:
     for packet in packets or []:
         if not isinstance(packet, dict):
             continue
-        for prop in packet.get("proposals") or []:
-            parts.extend(_collect_strings(prop))
-        for itr in packet.get("interrupts") or []:
-            parts.extend(_collect_strings(itr))
+        proposals: object = packet.get("proposals") or []
+        if isinstance(proposals, list):
+            for prop in cast("list[object]", proposals):
+                parts.extend(_collect_strings(prop))
+        interrupts: object = packet.get("interrupts") or []
+        if isinstance(interrupts, list):
+            for itr in cast("list[object]", interrupts):
+                parts.extend(_collect_strings(itr))
     # Strip empties and dedupe to keep the BM25 query reasonable.
     seen: set[str] = set()
     out: List[str] = []
@@ -199,7 +210,7 @@ def extract_buffer_text(packets: Iterable[Mapping[str, Any]]) -> str:
     return "\n".join(out)
 
 
-def _collect_strings(obj: Any) -> List[str]:
+def _collect_strings(obj: object) -> List[str]:
     """Recursively pull every string value out of a nested dict/list.
 
     Skips keys that are pure structural ids (no semantic content) so we
@@ -218,12 +229,14 @@ def _collect_strings(obj: Any) -> List[str]:
     }
     out: List[str] = []
     if isinstance(obj, dict):
-        for k, v in obj.items():
+        items = cast("dict[object, object]", obj)
+        for k, v in items.items():
             if k in skip_keys:
                 continue
             out.extend(_collect_strings(v))
     elif isinstance(obj, list):
-        for item in obj:
+        list_items = cast("list[object]", obj)
+        for item in list_items:
             out.extend(_collect_strings(item))
     elif isinstance(obj, str):
         s = obj.strip()
@@ -250,17 +263,12 @@ def _bm25_search(
     """
     if not query:
         return []
-    try:
-        from bm25 import load_or_build  # provided by agent-mem-search
-    except ImportError as e:
-        log.warning("priming: bm25 backend not importable (%s); skipping", e)
-        return []
 
     if not knowledge_dir.exists():
         return []
 
     try:
-        index = load_or_build(knowledge_dir)
+        index = bm25_load_or_build(knowledge_dir)
     except FileNotFoundError:
         return []
     except Exception:
@@ -291,19 +299,12 @@ def _embedding_search(
     """
     if not query:
         return []
-    try:
-        from embeddings import load_or_build  # provided by agent-mem-search
-    except ImportError:
-        # No noisy warning — embeddings are an optional retrieval lane.
-        # BM25 still runs. Log once at DEBUG so the operator can spot it.
-        log.debug("priming: embeddings backend not importable; bm25-only mode")
-        return []
 
     if not knowledge_dir.exists():
         return []
 
     try:
-        index = load_or_build(knowledge_dir)
+        index = embeddings_load_or_build(knowledge_dir)
     except FileNotFoundError:
         return []
     except Exception:
@@ -466,8 +467,6 @@ def _boost_with_reinforcement(
     # zero-cost.
     aliases: Mapping[str, str] = {}
     if knowledge_dir is not None:
-        from .paths import home as _agent_mem_home
-
         aliases = load_aliases(_agent_mem_home())
 
     enriched: List[Tuple[Path, float, int, float]] = []
@@ -612,9 +611,6 @@ def refresh_hot_context(
     function returns; the daemon must not crash because BM25 hiccupped.
     """
     try:
-        if not isinstance(rolling_buffer_text, str):
-            rolling_buffer_text = str(rolling_buffer_text or "")
-
         # Empty buffer: clear the file if it exists so we don't leave
         # stale priming around. Returning silently is fine if it never
         # existed in the first place.

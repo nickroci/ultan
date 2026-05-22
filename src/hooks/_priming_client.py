@@ -39,7 +39,38 @@ import socket
 import struct
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, TypedDict, Union, cast
+
+# Frontmatter values can be scalar (str), list[str], or absent.
+FrontmatterValue = Union[str, List[str]]
+Frontmatter = dict[str, FrontmatterValue]
+ScoredEntry = Tuple[Path, float, int, Frontmatter]
+
+
+class PrimingRequest(TypedDict):
+    """Payload sent over the Unix socket to the daemon's priming RPC."""
+
+    op: str
+    prompt: str
+    project_slug: Optional[str]
+    k: int
+    char_budget: int
+
+
+class PrimingResponse(TypedDict, total=False):
+    """Daemon RPC reply shape.
+
+    Mirrors the on-the-wire contract documented in
+    ``daemon/agent_mem_daemon/priming_rpc.py``: success carries
+    ``priming_md`` + ``took_ms`` + ``lane``; failure carries ``error``.
+    """
+
+    ok: bool
+    priming_md: str
+    took_ms: int
+    lane: str
+    error: str
+
 
 # ── Tunables ─────────────────────────────────────────────────────────
 
@@ -75,7 +106,25 @@ def _knowledge_dir() -> Path:
 # ── Wire helpers ─────────────────────────────────────────────────────
 
 
-def _send_request(socket_path: Path, request: dict, *, total_budget_ms: int) -> Optional[dict]:
+def _parse_response(buf: bytes) -> Optional[PrimingResponse]:
+    """Decode the response body. Returns ``None`` on any decode error
+    or if the payload isn't a JSON object.
+    """
+    try:
+        parsed: Any = json.loads(buf.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return cast("PrimingResponse", parsed)
+
+
+def _send_request(
+    socket_path: Path,
+    request: PrimingRequest,
+    *,
+    total_budget_ms: int,
+) -> Optional[PrimingResponse]:
     """One-shot length-prefixed JSON exchange. Returns parsed response
     or ``None`` on any failure (timeout, refused, closed, bad JSON).
 
@@ -118,10 +167,7 @@ def _send_request(socket_path: Path, request: dict, *, total_budget_ms: int) -> 
             if not chunk:
                 return None
             buf += chunk
-        try:
-            return json.loads(buf.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return None
+        return _parse_response(buf)
     except (
         FileNotFoundError,
         ConnectionRefusedError,
@@ -158,7 +204,7 @@ def _tokenize(text: str) -> List[str]:
     return [t for t in _TOKEN_SPLIT_RE.split(text.lower()) if len(t) >= 2]
 
 
-def _parse_yaml_lite(fm_block: str) -> dict:
+def _parse_yaml_lite(fm_block: str) -> Frontmatter:
     """Just enough YAML to pull ``reinforced``, ``title``, ``applies-when``,
     ``keywords``. Pure stdlib — no PyYAML dep.
 
@@ -167,7 +213,7 @@ def _parse_yaml_lite(fm_block: str) -> dict:
       - Inline arrays: ``keywords: [a, b, c]``
       - Block-scalar ``applies-when: |`` followed by indented lines
     """
-    out: dict = {}
+    out: Frontmatter = {}
     lines = fm_block.splitlines()
     i = 0
     while i < len(lines):
@@ -213,7 +259,7 @@ def _iter_markdown(knowledge_dir: Path) -> List[Path]:
     return files
 
 
-def _score_doc(doc_tokens: set, query_tokens: List[str]) -> float:
+def _score_doc(doc_tokens: set[str], query_tokens: List[str]) -> float:
     """Tiny lexical score: count of query-token hits, weighted by token
     rarity in the query (de-duplicate first). No IDF — the corpus is
     small and IDF would require a corpus scan we can't afford."""
@@ -245,11 +291,11 @@ def _shorten(text: str, max_chars: int = 80) -> str:
     return text[: max_chars - 1].rstrip() + "…"
 
 
-def _summary(fm: dict, path: Path) -> str:
-    aw = fm.get("applies-when") or fm.get("applies_when")
+def _summary(fm: Frontmatter, path: Path) -> str:
+    aw: Optional[FrontmatterValue] = fm.get("applies-when") or fm.get("applies_when")
     if isinstance(aw, list):
         for item in aw:
-            s = str(item).strip()
+            s = item.strip()
             if s:
                 return _shorten(s)
     elif isinstance(aw, str):
@@ -257,10 +303,114 @@ def _summary(fm: dict, path: Path) -> str:
             s = line.strip()
             if s:
                 return _shorten(s)
-    title = fm.get("title")
+    title: Optional[FrontmatterValue] = fm.get("title")
     if isinstance(title, str) and title.strip():
         return _shorten(title.strip())
     return path.stem.replace("-", " ")
+
+
+def _split_frontmatter_body(text: str) -> tuple[Frontmatter, str]:
+    """Return ``(frontmatter_dict, body_text)``; empty fm if none present."""
+    m = _FRONTMATTER_RE.match(text)
+    if not m:
+        return {}, text
+    return _parse_yaml_lite(m.group(1)), text[m.end() :]
+
+
+def _doc_token_bag(body: str, fm: Frontmatter) -> set[str]:
+    """Tokenize body + search-relevant frontmatter fields into one bag.
+
+    Mirrors bm25's frontmatter extraction so the lexical fallback ranks
+    entries the same way the daemon would.
+    """
+    tokens: set[str] = set(_tokenize(body))
+    kw: Optional[FrontmatterValue] = fm.get("keywords")
+    if isinstance(kw, list):
+        for w in kw:
+            tokens.update(_tokenize(w))
+    aw: Optional[FrontmatterValue] = fm.get("applies-when") or fm.get("applies_when")
+    if isinstance(aw, str):
+        tokens.update(_tokenize(aw))
+    elif isinstance(aw, list):
+        for w in aw:
+            tokens.update(_tokenize(w))
+    return tokens
+
+
+def _reinforced_count(fm: Frontmatter) -> int:
+    """Read the ``reinforced`` frontmatter int; clamp at 0 on bad input."""
+    raw: Optional[FrontmatterValue] = fm.get("reinforced")
+    if not isinstance(raw, str):
+        return 0
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, n)
+
+
+def _rank_entries(
+    files: List[Path],
+    q_tokens: List[str],
+) -> List[ScoredEntry]:
+    """Score and sort the knowledge files against the query tokens.
+
+    Returns ``(path, boosted_score, reinforced, frontmatter)`` tuples
+    sorted by score desc, ties broken by path for stability.
+    """
+    scored: List[ScoredEntry] = []
+    for p in files:
+        try:
+            text = p.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        fm, body = _split_frontmatter_body(text)
+        score = _score_doc(_doc_token_bag(body, fm), q_tokens)
+        if score <= 0:
+            continue
+        reinforced = _reinforced_count(fm)
+        # Boost matches the daemon's _boost_with_reinforcement (×0.5).
+        scored.append((p, score + reinforced * 0.5, reinforced, fm))
+
+    scored.sort(key=lambda t: (-t[1], str(t[0])))
+    return scored
+
+
+def _render_bullets(
+    top: List[ScoredEntry],
+    kdir: Path,
+) -> List[str]:
+    """Format the top-ranked entries as markdown bullets."""
+    bullets: List[str] = []
+    for path, _score, reinforced, fm in top:
+        link = _wikilink(path, kdir)
+        cnt = f" (×{reinforced})" if reinforced > 0 else ""
+        summary = _summary(fm, path)
+        if summary:
+            bullets.append(f"- [[{link}]]{cnt} — {summary}")
+        else:
+            bullets.append(f"- [[{link}]]{cnt}")
+    return bullets
+
+
+def _assemble(bullets: List[str]) -> str:
+    """Wrap bullets in the standard header / footer block."""
+    return f"{_HEADER}\n\n" + "\n".join(bullets) + f"\n\n{_FOOTER}\n"
+
+
+def _fit_to_budget(bullets: List[str], char_budget: int) -> str:
+    """Assemble; drop trailing bullets until the rendered string fits."""
+    full = _assemble(bullets)
+    if len(full) <= char_budget:
+        return full
+    # Drop trailing bullets until we fit. Same strategy as the daemon's
+    # ``priming._assemble_output`` — keep the framing, trim content.
+    while len(bullets) > 1:
+        bullets.pop()
+        candidate = _assemble(bullets)
+        if len(candidate) <= char_budget:
+            return candidate
+    return _assemble(bullets)
 
 
 def _local_priming(
@@ -283,78 +433,12 @@ def _local_priming(
     if not files:
         return ""
 
-    scored: List[Tuple[Path, float, int, dict]] = []
-    for p in files:
-        try:
-            text = p.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        m = _FRONTMATTER_RE.match(text)
-        fm: dict = {}
-        body = text
-        if m:
-            fm = _parse_yaml_lite(m.group(1))
-            body = text[m.end() :]
-        doc_tokens = set(_tokenize(body))
-        # Add keywords + applies-when to the token bag (mirrors bm25's
-        # search-relevant frontmatter extraction).
-        kw = fm.get("keywords")
-        if isinstance(kw, list):
-            for w in kw:
-                doc_tokens.update(_tokenize(str(w)))
-        aw = fm.get("applies-when") or fm.get("applies_when")
-        if isinstance(aw, str):
-            doc_tokens.update(_tokenize(aw))
-        elif isinstance(aw, list):
-            for w in aw:
-                doc_tokens.update(_tokenize(str(w)))
-
-        score = _score_doc(doc_tokens, q_tokens)
-        if score <= 0:
-            continue
-        try:
-            reinforced = int(fm.get("reinforced") or 0)
-            if reinforced < 0:
-                reinforced = 0
-        except (TypeError, ValueError):
-            reinforced = 0
-        # Boost matches the daemon's _boost_with_reinforcement (×0.5).
-        boosted = score + reinforced * 0.5
-        scored.append((p, boosted, reinforced, fm))
-
+    scored = _rank_entries(files, q_tokens)
     if not scored:
         return ""
-    scored.sort(key=lambda t: (-t[1], str(t[0])))
-    top = scored[:k]
 
-    overhead = len(_HEADER) + 2 + 2 + len(_FOOTER)
-    body_budget = max(0, char_budget - overhead)  # noqa: F841 - kept for clarity
-
-    bullets: List[str] = []
-    for path, _score, reinforced, fm in top:
-        link = _wikilink(path, kdir)
-        cnt = f" (×{reinforced})" if reinforced > 0 else ""
-        summary = _summary(fm, path)
-        if summary:
-            bullets.append(f"- [[{link}]]{cnt} — {summary}")
-        else:
-            bullets.append(f"- [[{link}]]{cnt}")
-
-    def _assemble(bs: List[str]) -> str:
-        return f"{_HEADER}\n\n" + "\n".join(bs) + f"\n\n{_FOOTER}\n"
-
-    full = _assemble(bullets)
-    if len(full) <= char_budget:
-        return full
-
-    # Drop trailing bullets until we fit. Same strategy as the daemon's
-    # ``priming._assemble_output`` — keep the framing, trim content.
-    while len(bullets) > 1:
-        bullets.pop()
-        candidate = _assemble(bullets)
-        if len(candidate) <= char_budget:
-            return candidate
-    return _assemble(bullets)
+    bullets = _render_bullets(scored[:k], kdir)
+    return _fit_to_budget(bullets, char_budget)
 
 
 # ── Public API ───────────────────────────────────────────────────────
@@ -383,12 +467,16 @@ def get_priming(
     return in well under 50 ms so it doesn't push the hook past its
     overall budget.
     """
-    if not isinstance(prompt, str) or not prompt.strip():
+    # Defensive: even though the signature pins ``str``, callers in the
+    # wild (and our own tests via ``# type: ignore``) can pass ``None``
+    # or numbers. Coerce to "" rather than crash the hook.
+    runtime_prompt: Any = prompt
+    if not isinstance(runtime_prompt, str) or not runtime_prompt.strip():
         return ""
 
     socket_path = _priming_socket_path()
     if socket_path.exists():
-        request = {
+        request: PrimingRequest = {
             "op": "priming",
             "prompt": prompt,
             "project_slug": project_slug,
@@ -396,8 +484,10 @@ def get_priming(
             "char_budget": char_budget,
         }
         resp = _send_request(socket_path, request, total_budget_ms=total_budget_ms)
-        if resp is not None and resp.get("ok") and isinstance(resp.get("priming_md"), str):
-            return resp["priming_md"]
+        if resp is not None and resp.get("ok"):
+            priming_md = resp.get("priming_md")
+            if isinstance(priming_md, str):
+                return priming_md
         # Daemon answered but with ok=false, OR transport failed. Fall through
         # to the local path so the agent gets something rather than nothing.
 

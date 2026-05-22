@@ -25,7 +25,7 @@ Discipline:
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Dict, List, Literal, Mapping, Optional, Union, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing_extensions import Annotated
@@ -309,7 +309,7 @@ class LibrarianInterrupt(BaseModel):
         description="The exact applies-when phrase that matched the buffer.",
     )
     evidence: List[EvidenceItem] = Field(
-        default_factory=list,
+        default_factory=list[EvidenceItem],
         description=(
             "List of EvidenceItem dicts (NOT strings). Each item is "
             "{turn_id, role, quote}. Emit at least one verbatim turn quote."
@@ -326,7 +326,7 @@ class LibrarianInterrupt(BaseModel):
 
     @field_validator("evidence", mode="before")
     @classmethod
-    def _coerce_evidence(cls, v):
+    def _coerce_evidence(cls, v: object) -> object:
         """Tolerate LLM-shape drift on evidence.
 
         The schema asks for ``list[EvidenceItem]`` (dicts), but Sonnet /
@@ -343,11 +343,12 @@ class LibrarianInterrupt(BaseModel):
             return []
         if isinstance(v, str):
             return [{"quote": v}]
-        if isinstance(v, dict):
-            return [v]
+        if isinstance(v, Mapping):
+            return [cast(Mapping[object, object], v)]
         if isinstance(v, list):
-            out = []
-            for item in v:
+            raw = cast(list[object], v)
+            out: list[object] = []
+            for item in raw:
                 if isinstance(item, str):
                     out.append({"quote": item})
                 else:
@@ -367,7 +368,7 @@ class LibrarianProposal(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     proposals: List[ProposedAction] = Field(
-        default_factory=list,
+        default_factory=list[ProposedAction],
         description=(
             "Ordered list of curator actions the Librarian wants the "
             "Scholar to execute. Each item is a typed action object "
@@ -377,7 +378,7 @@ class LibrarianProposal(BaseModel):
         ),
     )
     interrupts: List[LibrarianInterrupt] = Field(
-        default_factory=list,
+        default_factory=list[LibrarianInterrupt],
         description=(
             "Optional list of interrupt-nudge candidates: turns in the "
             "buffer that match an existing entry's applies-when phrases. "
@@ -479,7 +480,7 @@ class ScholarReview(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     decisions: List[ScholarDecision] = Field(
-        default_factory=list,
+        default_factory=list[ScholarDecision],
         description=(
             "One ScholarDecision per Librarian proposal, matched by "
             "`action_index`. Order need not mirror the proposals — the "
@@ -488,7 +489,7 @@ class ScholarReview(BaseModel):
         ),
     )
     interrupts_processed: List[ScholarInterruptDecision] = Field(
-        default_factory=list,
+        default_factory=list[ScholarInterruptDecision],
         description=(
             "One ScholarInterruptDecision per LibrarianInterrupt the "
             "Scholar reviewed. Approved decisions are written to "
@@ -513,10 +514,10 @@ class LibrarianResponse(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    candidates: List[Dict[str, Any]] = Field(default_factory=list)
-    interrupt_candidates: List[Dict[str, Any]] = Field(default_factory=list)
-    proposals: List[Dict[str, Any]] = Field(default_factory=list)
-    interrupts: List[Dict[str, Any]] = Field(default_factory=list)
+    candidates: List[Dict[str, object]] = Field(default_factory=list[Dict[str, object]])
+    interrupt_candidates: List[Dict[str, object]] = Field(default_factory=list[Dict[str, object]])
+    proposals: List[Dict[str, object]] = Field(default_factory=list[Dict[str, object]])
+    interrupts: List[Dict[str, object]] = Field(default_factory=list[Dict[str, object]])
 
 
 class ScholarResponse(BaseModel):
@@ -527,8 +528,8 @@ class ScholarResponse(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    candidates_processed: List[Dict[str, Any]] = Field(default_factory=list)
-    interrupts_processed: List[Dict[str, Any]] = Field(default_factory=list)
+    candidates_processed: List[Dict[str, object]] = Field(default_factory=list[Dict[str, object]])
+    interrupts_processed: List[Dict[str, object]] = Field(default_factory=list[Dict[str, object]])
 
 
 # ── Prompt-shape generators ──────────────────────────────────────────

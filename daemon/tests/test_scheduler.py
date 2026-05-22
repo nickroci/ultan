@@ -686,3 +686,337 @@ def test_tick_is_noop_for_backcompat(quick_config):
     )
     sched.tick()  # must not raise
     sched.tick(now=1234.0)
+
+
+# ── DebounceScheduler additional coverage ─────────────────────────────
+
+
+def test_debounce_cancel_removes_pending_timer():
+    db = DebounceScheduler(on_fire=lambda sid: None)
+    db.start()
+    try:
+        db.arm("s1", delay_secs=5.0)
+        assert db.pending() == 1
+        db.cancel("s1")
+        assert db.pending() == 0
+        # cancelling something not present is a no-op (no exception).
+        db.cancel("never-armed")
+    finally:
+        db.stop()
+
+
+def test_debounce_on_fire_exception_is_logged_and_loop_continues(caplog):
+    """A callback that raises must not crash the debounce thread —
+    subsequent arms should still fire."""
+    fires: List[str] = []
+    n = [0]
+
+    def _flaky(sid):
+        n[0] += 1
+        if sid == "boom":
+            raise RuntimeError("simulated on_fire failure")
+        fires.append(sid)
+
+    db = DebounceScheduler(on_fire=_flaky)
+    db.start()
+    caplog.set_level(logging.WARNING)
+    try:
+        db.arm("boom", delay_secs=0.02)
+        _wait_for(lambda: n[0] >= 1, timeout=1.0)
+        # The thread is still alive — a second arm fires.
+        db.arm("ok", delay_secs=0.02)
+        _wait_for(lambda: "ok" in fires, timeout=1.0)
+        assert any("on_fire raised" in r.message for r in caplog.records)
+    finally:
+        db.stop()
+
+
+# ── Librarian-worker non-dict return ──────────────────────────────────
+
+
+def test_librarian_non_dict_return_is_dropped(quick_config, caplog):
+    """When the librarian callable returns something that isn't a dict,
+    the worker logs a WARN and drops the pass — no packet enqueued."""
+    buf = RollingBuffer()
+    scholar_calls: List[int] = []
+
+    def _bad_lib(snap):
+        return "not a dict"  # type: ignore[return-value]
+
+    def _sch(batch):
+        scholar_calls.append(len(batch))
+
+    sched = Scheduler(
+        buffer=buf,
+        config=quick_config,
+        librarian=_bad_lib,  # type: ignore[arg-type] — intentionally violates the contract under test
+        scholar=_sch,
+    )
+    sched.start()
+    caplog.set_level(logging.WARNING)
+    try:
+        sched.on_event(_ev(1.0, "s1", "Stop"))
+        # Give the librarian pool time to process.
+        time.sleep(0.30)
+        # No packets should have been enqueued.
+        assert scholar_calls == []
+        assert any("librarian returned non-dict" in r.message for r in caplog.records)
+    finally:
+        sched.stop()
+
+
+# ── Backpressure on librarian queue ──────────────────────────────────
+
+
+def test_librarian_queue_backpressure_drops_session(caplog):
+    """When the librarian queue (not scholar) is at its ceiling, the
+    debounce-fire path drops the session with the same WARN family.
+
+    To force this we set queue_ceiling=1 and have a slow librarian that
+    holds the worker, so concurrent debounce fires can't all enqueue."""
+    cfg = SchedulerConfig(
+        librarian_concurrency=1,
+        librarian_debounce_secs=0.02,
+        session_end_debounce_secs=0.02,
+        scholar_every_k=999,
+        scholar_every_m_secs=999.0,
+        scholar_max_batch=10,
+        queue_ceiling=1,
+        sweep_interval_secs=999.0,
+    )
+    buf = RollingBuffer()
+
+    # The librarian callable sleeps so the queue blocks up.
+    def _slow(snap):
+        time.sleep(0.30)
+        return _empty_packet(snap)
+
+    sched = Scheduler(buffer=buf, config=cfg, librarian=_slow, scholar=lambda b: None)
+    sched.start()
+    caplog.set_level(logging.WARNING)
+    try:
+        # Fire many sessions concurrently.
+        for i in range(10):
+            sched.on_event(_ev(float(i), f"s{i}", "Stop"))
+        _wait_for(
+            lambda: sched.stats.librarian_skipped_backpressure >= 1,
+            timeout=3.0,
+        )
+        assert sched.stats.librarian_skipped_backpressure >= 1
+        assert any("BACKPRESSURE" in r.message for r in caplog.records)
+    finally:
+        sched.stop()
+
+
+# ── Sweep loop ────────────────────────────────────────────────────────
+
+
+def test_sweep_loop_calls_buffer_sweep():
+    """The sweep loop runs ``buffer.sweep`` on its cadence; verify
+    ``last_sweep_ts`` advances."""
+    cfg = SchedulerConfig(
+        librarian_concurrency=1,
+        librarian_debounce_secs=0.02,
+        session_end_debounce_secs=0.02,
+        scholar_every_k=999,
+        scholar_every_m_secs=999.0,
+        scholar_max_batch=10,
+        queue_ceiling=100,
+        sweep_interval_secs=0.05,  # very short for the test
+    )
+    buf = RollingBuffer()
+    sched = Scheduler(
+        buffer=buf,
+        config=cfg,
+        librarian=_empty_packet,
+        scholar=lambda b: None,
+    )
+    sched.start()
+    try:
+        _wait_for(lambda: sched.stats.last_sweep_ts > 0, timeout=2.0)
+    finally:
+        sched.stop()
+
+
+def test_sweep_loop_swallows_buffer_exception(caplog):
+    """If buffer.sweep raises, the loop logs and continues."""
+
+    class _ExplodingBuffer(RollingBuffer):
+        n = 0
+
+        def sweep(self):
+            self.n += 1
+            raise RuntimeError("simulated sweep failure")
+
+    buf = _ExplodingBuffer()
+    cfg = SchedulerConfig(
+        librarian_concurrency=1,
+        librarian_debounce_secs=0.02,
+        session_end_debounce_secs=0.02,
+        scholar_every_k=999,
+        scholar_every_m_secs=999.0,
+        scholar_max_batch=10,
+        queue_ceiling=100,
+        sweep_interval_secs=0.05,
+    )
+    sched = Scheduler(
+        buffer=buf,
+        config=cfg,
+        librarian=_empty_packet,
+        scholar=lambda b: None,
+    )
+    sched.start()
+    caplog.set_level(logging.WARNING)
+    try:
+        _wait_for(lambda: buf.n >= 1, timeout=2.0)
+        # Sweep raised but the thread is alive — another iteration should
+        # happen.
+        _wait_for(lambda: buf.n >= 2, timeout=2.0)
+        assert any("buffer sweep raised" in r.message for r in caplog.records)
+    finally:
+        sched.stop()
+
+
+def test_force_scholar_handles_scholar_exception(caplog):
+    """If the scholar callable raises during a forced drain, the
+    exception is logged and the operator gets a partial-drain log."""
+    cfg = SchedulerConfig(
+        librarian_concurrency=2,
+        librarian_debounce_secs=0.02,
+        session_end_debounce_secs=0.02,
+        scholar_every_k=999,
+        scholar_every_m_secs=999.0,
+        scholar_max_batch=10,
+        queue_ceiling=100,
+        sweep_interval_secs=999.0,
+    )
+    buf = RollingBuffer()
+
+    def _boom(batch):
+        raise RuntimeError("simulated scholar failure")
+
+    sched = Scheduler(buffer=buf, config=cfg, librarian=_proposal_packet, scholar=_boom)
+    sched.start()
+    caplog.set_level(logging.WARNING)
+    try:
+        for sid in ("s1", "s2"):
+            sched.on_event(_ev(1.0, sid, "Stop"))
+        _wait_for(lambda: sched.queue_size() == 2, timeout=2.0)
+        # force_scholar should not propagate.
+        sched.force_scholar()
+        # The exception was logged.
+        assert any("scholar callable raised in force_scholar" in r.message for r in caplog.records)
+    finally:
+        sched.stop()
+
+
+def test_force_scholar_processes_in_batches_capped_by_max_batch():
+    """``force_scholar`` should slice the drain into batches of
+    ``scholar_max_batch`` and call the scholar callable once per batch."""
+    cfg = SchedulerConfig(
+        librarian_concurrency=4,
+        librarian_debounce_secs=0.02,
+        session_end_debounce_secs=0.02,
+        scholar_every_k=999,
+        scholar_every_m_secs=999.0,
+        scholar_max_batch=3,
+        queue_ceiling=100,
+        sweep_interval_secs=999.0,
+    )
+    buf = RollingBuffer()
+    batches: List[int] = []
+    lock = threading.Lock()
+
+    def _sch(batch):
+        with lock:
+            batches.append(len(batch))
+
+    sched = Scheduler(buffer=buf, config=cfg, librarian=_proposal_packet, scholar=_sch)
+    sched.start()
+    try:
+        for i in range(8):
+            sched.on_event(_ev(float(i), f"s{i}", "Stop"))
+        _wait_for(lambda: sched.queue_size() == 8, timeout=3.0)
+        sched.force_scholar()
+        with lock:
+            assert sum(batches) == 8
+            assert all(b <= 3 for b in batches)
+            # 8 packets at max 3 per batch -> 3 batches (3+3+2).
+            assert len(batches) == 3
+    finally:
+        sched.stop()
+
+
+def test_scheduler_double_start_is_idempotent(quick_config):
+    """Calling start() twice should not spin up duplicate threads."""
+    buf = RollingBuffer()
+    sched = Scheduler(
+        buffer=buf, config=quick_config, librarian=_empty_packet, scholar=lambda b: None
+    )
+    sched.start()
+    sched.start()  # must not raise
+    try:
+        # Single sweep thread alive.
+        assert sched._sweep_thread is not None
+    finally:
+        sched.stop()
+
+
+def test_scheduler_stop_without_start_is_noop():
+    """Calling stop() on a never-started scheduler is a clean no-op."""
+    buf = RollingBuffer()
+    sched = Scheduler(buffer=buf, librarian=_empty_packet, scholar=lambda b: None)
+    sched.stop()  # must not raise
+
+
+def test_debounce_fire_session_vanished(quick_config):
+    """If the buffer drops the session between debounce-fire and worker
+    pickup, the worker logs and skips — the test just confirms no crash."""
+    buf = RollingBuffer()
+
+    def _lib(snap):
+        return _empty_packet(snap)
+
+    sched = Scheduler(
+        buffer=buf,
+        config=quick_config,
+        librarian=_lib,
+        scholar=lambda b: None,
+    )
+    sched.start()
+    try:
+        sched.on_event(_ev(1.0, "s1", "Stop"))
+        # Drop the session before the debounce fires.
+        buf._sessions.pop("s1", None)  # type: ignore[attr-defined]
+        time.sleep(0.20)
+        # No crash — scheduler still running.
+    finally:
+        sched.stop()
+
+
+# ── TailerThread (small) ─────────────────────────────────────────────
+
+
+def test_tailer_thread_swallows_exception_and_continues():
+    """The TailerThread wraps poll_once in try/except so a bad iteration
+    doesn't kill the thread."""
+    from agent_mem_daemon.scheduler import TailerThread
+
+    class _ExplodingTailer:
+        def __init__(self):
+            self.calls = 0
+
+        def poll_once(self):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("simulated tail failure")
+
+    tailer = _ExplodingTailer()
+    stop_event = threading.Event()
+    thread = TailerThread(tailer=tailer, poll_interval=0.02, stop_event=stop_event)
+    thread.start()
+    try:
+        _wait_for(lambda: tailer.calls >= 2, timeout=2.0)
+    finally:
+        stop_event.set()
+        thread.join(timeout=2.0)

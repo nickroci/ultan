@@ -111,7 +111,13 @@ class _FakeRpcServer(threading.Thread):
     """Minimal length-prefixed-JSON server used to mock the daemon.
 
     The handler is a callable ``(request_dict) -> response_dict`` so
-    individual tests can canned-respond, raise, or sleep."""
+    individual tests can canned-respond, raise, or sleep.
+
+    NOTE: never name an instance attribute ``_stop`` on a Thread
+    subclass — ``threading.Thread._stop`` is an internal method that
+    ``Thread.join()`` calls during cleanup. Shadowing it with an Event
+    makes join() raise ``TypeError: 'Event' object is not callable``.
+    """
 
     def __init__(self, socket_path: Path, handler):
         super().__init__(daemon=True, name="fake-priming-rpc")

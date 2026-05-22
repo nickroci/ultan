@@ -2,6 +2,7 @@
 name = "agent-mem"
 version = "0.1.0"
 description = "Local, user-global memory store for coding agents — Phase 0 skeleton forked from claude-memory-compiler."
+authors = [{ name = "Nicholas Holden", email = "nicholas.holden@banqora.com" }]
 requires-python = ">=3.12"
 dependencies = [
     "claude-agent-sdk>=0.1.29",
@@ -22,18 +23,31 @@ target-version = "py312"
 extend-exclude = [".venv", "build", "dist", "_dot_claude_disabled"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "W"]
+select = ["E", "F", "I", "W", "C901", "PLR0912", "PLR0915", "PLC0415"]
 
 [tool.ruff.lint.per-file-ignores]
-"**/test_*.py" = ["E501"]
+"**/test_*.py" = ["E501", "C901", "PLR0912", "PLR0915", "PLC0415"]
+"**/conftest.py" = ["E501", "C901", "PLR0912", "PLR0915", "PLC0415"]
 
 [tool.pyright]
 include = ["hooks", "scripts"]
-exclude = [".venv", "**/__pycache__", "build", "dist", "_dot_claude_disabled"]
+exclude = [
+    ".venv",
+    "**/__pycache__",
+    "build",
+    "dist",
+    "_dot_claude_disabled",
+    "**/test_*.py",
+    "**/conftest.py",
+]
+venvPath = "."
+venv = ".venv"
 pythonVersion = "3.12"
-typeCheckingMode = "basic"
+typeCheckingMode = "strict"
 reportMissingTypeStubs = false
 reportMissingImports = "warning"
+reportUnusedImport = "error"
+reportPrivateUsage = "warning"
 # Hook and script files use sys.path manipulation at runtime to import sibling
 # modules from src/scripts/ (e.g. `import config`, `import scope`). Adding the
 # directories to extraPaths lets pyright resolve those imports without ignores.
@@ -41,11 +55,45 @@ extraPaths = ["hooks", "scripts"]
 
 [tool.pytest.ini_options]
 testpaths = ["hooks"]
-addopts = "-ra"
+addopts = "-ra --cov --cov-report=term-missing"
+
+[tool.coverage.run]
+source = ["hooks"]
+branch = true
+# Hyphenated filenames (pre-tool-use.py etc) are the entrypoints Claude
+# Code's settings.json invokes; they can't be Python-imported (hyphens
+# aren't legal in module names) so we can't exercise them in-process.
+# Each one is reduced to a trivial ``from foo_bar import main; main()``
+# shim and the substantive logic lives in the underscore module next to
+# it (pre_tool_use.py etc), which IS imported by the integration tests.
+# Counting the shims against the bar would force test-only contortions
+# without raising the quality of the tested code.
+omit = [
+  "hooks/test_*.py",
+  "hooks/conftest.py",
+  "hooks/pre-tool-use.py",
+  "hooks/post-tool-use.py",
+  "hooks/pre-compact.py",
+  "hooks/session-end.py",
+  "hooks/session-start.py",
+  "hooks/user-prompt-submit.py",
+]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = false
+exclude_lines = [
+  "pragma: no cover",
+  "raise NotImplementedError",
+  "if __name__ == .__main__.:",
+  "if TYPE_CHECKING:",
+]
 
 [dependency-groups]
 dev = [
     "pytest>=8.0",
     "pyright>=1.1.409",
     "ruff>=0.15.14",
+    "pytest-cov>=7.1.0",
 ]
