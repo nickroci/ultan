@@ -43,12 +43,13 @@ from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
 from pathlib import Path
-from typing import Callable, Iterable, TextIO
+from typing import Callable, Iterable, Mapping, TextIO, cast
 
 from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
 
 from bm25 import load_or_build
 from frontmatter import (
+    Frontmatter,
     FrontmatterError,
     set_status,
 )
@@ -330,7 +331,7 @@ def _iter_entries(knowledge_dir: Path) -> Iterable[Path]:
         yield p
 
 
-def _safe_read_frontmatter(path: Path) -> dict | None:
+def _safe_read_frontmatter(path: Path) -> Frontmatter | None:
     """Return frontmatter dict or None on error. For tolerant scans."""
     try:
         fm, _ = fm_read(path)
@@ -498,7 +499,7 @@ def _entry_preview(path: Path, body_lines: int = 30) -> str:
             if line:
                 head.append(f"applies-when: {line}")
     elif isinstance(aw, list):
-        for item in aw:
+        for item in cast(list[object], aw):
             head.append(f"applies-when: {item}")
     head.append("")
     snippet_lines = [ln for ln in body.splitlines()][:body_lines]
@@ -632,14 +633,30 @@ def _read_pid_file(pid_path: Path) -> int | None:
         return None
 
 
-def _load_cost_state(cost_path: Path) -> dict | None:
+def _as_float(value: object) -> float:
+    """Coerce a JSON-typed value (object) to float; missing/non-numeric -> 0.0."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def _load_cost_state(cost_path: Path) -> dict[str, object] | None:
     try:
-        return json.loads(cost_path.read_text(encoding="utf-8"))
+        loaded: object = json.loads(cost_path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
+    if not isinstance(loaded, dict):
+        return None
+    # json.loads narrows to dict[Unknown, Unknown]; cast for downstream lookups.
+    return {str(k): v for k, v in cast(dict[object, object], loaded).items()}
 
 
-def _scope_label(fm: dict) -> str:
+def _scope_label(fm: Mapping[str, object]) -> str:
     scope = str(fm.get("scope") or "(unset)")
     if scope.startswith("project:"):
         return scope
@@ -739,9 +756,9 @@ def run_doctor(knowledge_dir: Path) -> DoctorReport:
 
     # Cost.
     cost_path = home / "cost.json"
-    cost_state = _load_cost_state(cost_path) or {}
-    cost_today = float(cost_state.get("today_usd") or 0.0)
-    cost_lifetime = float(cost_state.get("lifetime_usd") or 0.0)
+    cost_state: dict[str, object] = _load_cost_state(cost_path) or {}
+    cost_today = _as_float(cost_state.get("today_usd"))
+    cost_lifetime = _as_float(cost_state.get("lifetime_usd"))
     # If "today" rolled over the daemon would reset; doctor doesn't write.
     today = date.today().isoformat()
     if str(cost_state.get("today")) != today:

@@ -37,16 +37,21 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 from sentence_transformers import SentenceTransformer
 
-# Reuse BM25's file-selection + frontmatter discipline. They're underscore-prefixed
-# but this is a single internal package; pragmatic over copy-paste.
-from bm25 import (
-    _build_snippet,
-    _frontmatter_search_text,
-    _iter_markdown,
-    _strip_and_extract_frontmatter,
-)
+# Reuse BM25's file-selection + frontmatter discipline. ``bm25.py`` re-exports
+# these helpers under non-underscore names specifically so we can import them
+# here without triggering pyright's reportPrivateUsage check.
+from bm25 import build_snippet as _build_snippet
+from bm25 import frontmatter_search_text as _frontmatter_search_text
+from bm25 import iter_markdown as _iter_markdown
+from bm25 import strip_and_extract_frontmatter as _strip_and_extract_frontmatter
+
+# A 2-D float32 array — the embedding matrix shape we store on disk. Numpy
+# only began shipping precise generic annotations recently; npt.NDArray gives
+# us "array of float32" without committing to dim-typing.
+_FloatArray = npt.NDArray[np.float32]
 
 DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"  # 80MB, fast on CPU
 
@@ -122,8 +127,8 @@ class EmbeddingIndex:
 
     knowledge_dir: Path
     model_name: str = DEFAULT_MODEL
-    docs: list[_DocRecord] = field(default_factory=list)
-    embeddings: np.ndarray = field(default_factory=lambda: np.zeros((0, 0), dtype=np.float32))
+    docs: list[_DocRecord] = field(default_factory=list[_DocRecord])
+    embeddings: _FloatArray = field(default_factory=lambda: np.zeros((0, 0), dtype=np.float32))
     built_at: float = 0.0
 
     # ── search ────────────────────────────────────────────────────────────────

@@ -20,7 +20,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Dict, Mapping, Optional, Tuple
+from typing import Dict, Mapping, Optional, Tuple, cast
 
 ALIASES_FILENAME = "project-aliases.json"
 
@@ -43,12 +43,20 @@ def load_aliases(home: Path) -> Dict[str, str]:
     except (FileNotFoundError, OSError):
         return {}
     try:
-        data = json.loads(text)
+        data: object = json.loads(text)
     except (json.JSONDecodeError, ValueError):
         return {}
     if not isinstance(data, dict):
         return {}
-    return {str(k): str(v) for k, v in data.items() if isinstance(v, (str, int))}
+    # ``json.loads`` types ``data`` as ``Any``; once narrowed via isinstance
+    # to ``dict`` pyright drops to ``dict[Unknown, Unknown]``. Cast to a
+    # concrete object-valued mapping so the comprehension below stays typed.
+    items = cast(dict[object, object], data)
+    out: Dict[str, str] = {}
+    for k, v in items.items():
+        if isinstance(v, (str, int)):
+            out[str(k)] = str(v)
+    return out
 
 
 def bucket_canonical_slug(
