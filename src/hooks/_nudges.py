@@ -57,6 +57,38 @@ def pending_nudges_path() -> Path:
     return _agent_mem_home() / "pending-nudges.md"
 
 
+def project_aliases_path() -> Path:
+    """Optional ``{slug: bucket}`` config — mirrors daemon-side path
+    (``daemon.paths.project_aliases_path``). Single source of truth on
+    disk; the daemon and hook duplicate the load logic because they
+    can't share code by design."""
+    return _agent_mem_home() / "project-aliases.json"
+
+
+def _load_project_aliases() -> Dict[str, str]:
+    """Read the alias map. Returns ``{}`` if missing/unreadable —
+    alias resolution must never crash the hook path."""
+    try:
+        text = project_aliases_path().read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return {}
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): str(v) for k, v in data.items() if isinstance(v, (str, int))}
+
+
+def _resolve_slug_to_bucket(slug: Optional[str], aliases: Dict[str, str]) -> Optional[str]:
+    """Translate a session slug to the on-disk bucket name. Returns the
+    alias target if present, else the slug unchanged."""
+    if not slug:
+        return None
+    return aliases.get(slug, slug)
+
+
 def state_dir() -> Path:
     return _agent_mem_home() / "state"
 
@@ -234,19 +266,32 @@ def _lesson_project_bucket(lesson_path: str) -> Optional[str]:
     return None
 
 
-def _nudge_matches_project(nudge: Nudge, current_project_slug: Optional[str]) -> bool:
+def _nudge_matches_project(
+    nudge: Nudge,
+    current_project_slug: Optional[str],
+    aliases: Optional[Dict[str, str]] = None,
+) -> bool:
     """True if a nudge should be delivered to a session in the given
     project. Global and unrecognised-bucket nudges deliver to anyone;
     project-scoped nudges only deliver to the matching project. When
     the session has no project context, we deliver everything (better
     to over-deliver than to silently lose a nudge that no future
-    session can claim either)."""
+    session can claim either).
+
+    The slug is translated through the alias map before comparison so
+    a git-URL slug can match a human-friendly bucket name. ``aliases``
+    is accepted as a kwarg so callers can load once and pass in (the
+    primary call site, ``take_nudges``, does this so the JSON read
+    happens once per turn, not once per queued nudge)."""
     bucket = _lesson_project_bucket(nudge.lesson)
     if bucket is None or bucket == "__global__":
         return True
     if not current_project_slug:
         return True
-    return bucket == current_project_slug
+    if aliases is None:
+        aliases = _load_project_aliases()
+    resolved = _resolve_slug_to_bucket(current_project_slug, aliases)
+    return bucket == resolved
 
 
 def _read_and_clear_nudges_file(path: Path) -> str:
@@ -337,10 +382,13 @@ def take_nudges(
 
     # Cross-project filter: nudges scoped to another project are put
     # back on disk for the next session in that project to consume.
+    # Load the alias map once per call so we don't re-read the file
+    # for every queued nudge.
+    aliases = _load_project_aliases()
     queued: List[Nudge] = []
     requeue: List[Nudge] = []
     for n in all_queued:
-        if _nudge_matches_project(n, current_project_slug):
+        if _nudge_matches_project(n, current_project_slug, aliases):
             queued.append(n)
         else:
             requeue.append(n)

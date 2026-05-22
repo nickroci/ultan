@@ -378,6 +378,37 @@ def test_take_nudges_filters_cross_project_and_requeues(tmp_path: Path):
     assert "a3" not in requeued_body
 
 
+def test_take_nudges_uses_alias_map_to_match_slug_to_bucket(tmp_path: Path, monkeypatch):
+    """Slug 'github.com-nickroci-ultan' should match bucket
+    'agent-mem' when the alias file maps them."""
+    monkeypatch.setenv("AGENT_MEM_HOME", str(tmp_path))
+    aliases = tmp_path / "project-aliases.json"
+    aliases.write_text('{"github.com-nickroci-ultan": "agent-mem"}', encoding="utf-8")
+
+    nudges_path = tmp_path / "pending-nudges.md"
+    state_path = tmp_path / "state" / "nudge-budget-s1.json"
+    blocks = [
+        # agent-mem entry — should pass once the alias is honoured
+        "---\nid: a1\ncreated: 2026-05-21T00:00:00+00:00\n"
+        "lesson: projects/agent-mem/baz.md\n---\nAGENTMEM text\n",
+        # vol-predictor entry — should still be filtered out
+        "---\nid: a2\ncreated: 2026-05-21T00:00:00+00:00\n"
+        "lesson: projects/vol-predictor/foo.md\n---\nVOL text\n",
+    ]
+    nudges_path.write_text("\n".join(blocks), encoding="utf-8")
+
+    selected, _ = _nudges.take_nudges(
+        "s1",
+        per_turn_budget=5,
+        current_project_slug="github.com-nickroci-ultan",
+        _nudges_path=nudges_path,
+        _budget_state_path=state_path,
+    )
+    assert [n.id for n in selected] == ["a1"], "alias should let slug match bucket"
+    requeued = nudges_path.read_text(encoding="utf-8")
+    assert "a2" in requeued and "a1" not in requeued
+
+
 def test_take_nudges_no_slug_is_permissive(tmp_path: Path):
     """When the session has no project context (no slug derivable from
     cwd) we deliver every queued nudge — better than letting it sit

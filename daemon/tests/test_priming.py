@@ -538,6 +538,40 @@ def test_scope_bonus_prefers_current_project_then_global(tmp_path):
     ]
 
 
+def test_scope_bonus_uses_alias_map_for_slug_to_bucket(tmp_path):
+    """When the session slug doesn't match a bucket directly, look it
+    up in ~/.agent-mem/project-aliases.json. The autouse fixture
+    points AGENT_MEM_HOME at tmp_path, so the alias file lives at
+    tmp_path/project-aliases.json for the duration of the test."""
+    k = tmp_path / "knowledge"
+    cur_path = k / "projects" / "agent-mem" / "entry.md"
+    other_path = k / "projects" / "vol-predictor" / "entry.md"
+    _write(cur_path, _entry(id_="cur", title="Cur", applies_when="x", keywords=["x"]))
+    _write(other_path, _entry(id_="oth", title="Oth", applies_when="x", keywords=["x"]))
+
+    aliases_file = tmp_path / "project-aliases.json"
+    aliases_file.write_text('{"github.com-nickroci-ultan": "agent-mem"}', encoding="utf-8")
+
+    hits = [(other_path, 0.05), (cur_path, 0.05)]
+    ranked = priming._boost_with_reinforcement(
+        hits, knowledge_dir=k, current_project_slug="github.com-nickroci-ultan"
+    )
+    paths = [str(p.relative_to(k)) for p, _, _ in ranked]
+    assert paths == ["projects/agent-mem/entry.md", "projects/vol-predictor/entry.md"]
+
+
+def test_alias_file_missing_falls_back_to_identity():
+    """No alias file -> slug compared to bucket as-is. Slug 'agent-mem'
+    matches bucket 'agent-mem' directly; slug
+    'github.com-nickroci-ultan' would not match anything without the
+    file, so the current-project boost is silently off. (The autouse
+    fixture points AGENT_MEM_HOME at tmp_path, so no real ~/.agent-mem
+    file is read.)"""
+    assert priming._load_project_aliases() == {}
+    assert priming._resolve_slug_to_bucket("agent-mem", {}) == "agent-mem"
+    assert priming._resolve_slug_to_bucket(None, {}) is None
+
+
 def test_scope_bonus_off_when_slug_missing(tmp_path):
     """Without a current_project_slug, only the global bonus applies —
     current-project and other-project entries get nothing, so the global
