@@ -34,6 +34,7 @@ if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
 from _events import append_event  # noqa: E402
+from aliases import ensure_alias_for_cwd  # noqa: E402
 from config import (  # noqa: E402
     DAILY_DIR,
     INDEX_FILE,
@@ -129,6 +130,20 @@ def main():
         hook_cwd = os.getcwd()
 
     project_slug = current_project_slug(hook_cwd)
+
+    # Best-effort: auto-add a project-aliases.json entry if this repo's
+    # git slug doesn't yet map to its on-disk bucket. Pure no-op when
+    # nothing matches or the file already covers this slug. Wrapped in
+    # try/except because session-start MUST never fail the host.
+    try:
+        _agent_mem_home_path = (
+            Path(os.environ["AGENT_MEM_HOME"]).expanduser()
+            if os.environ.get("AGENT_MEM_HOME")
+            else Path.home() / ".agent-mem"
+        )
+        ensure_alias_for_cwd(_agent_mem_home_path, Path(hook_cwd), project_slug)
+    except Exception:
+        pass
 
     context = build_context(project_slug)
 
