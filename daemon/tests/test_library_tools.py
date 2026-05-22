@@ -438,16 +438,11 @@ def test_bm25_tool_via_mcp_server_handles_load_failure(tmp_path: Path, monkeypat
     k = tmp_path / "knowledge"
     k.mkdir()
     (k / "x.md").write_text("# x")
-    import sys
-    import types
-
-    fake = types.ModuleType("bm25")
 
     def _boom(*args, **kwargs):
         raise RuntimeError("simulated index failure")
 
-    fake.load_or_build = _boom  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "bm25", fake)
+    monkeypatch.setattr(library_tools, "load_or_build", _boom)
     server = library_tools.make_library_mcp_server(k)
     text = _call_mcp_tool(server, "bm25_search", {"query": "python", "k": 3})
     assert "bm25 backend error" in text
@@ -456,33 +451,14 @@ def test_bm25_tool_via_mcp_server_handles_load_failure(tmp_path: Path, monkeypat
 def test_bm25_tool_via_mcp_server_handles_filenotfound(tmp_path: Path, monkeypatch) -> None:
     k = tmp_path / "knowledge"
     k.mkdir()
-    import sys
-    import types
-
-    fake = types.ModuleType("bm25")
 
     def _missing(*args, **kwargs):
         raise FileNotFoundError("no index")
 
-    fake.load_or_build = _missing  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "bm25", fake)
+    monkeypatch.setattr(library_tools, "load_or_build", _missing)
     server = library_tools.make_library_mcp_server(k)
     text = _call_mcp_tool(server, "bm25_search", {"query": "python", "k": 3})
     assert "no entries yet" in text
-
-
-def test_bm25_tool_via_mcp_server_import_error(tmp_path: Path, monkeypatch) -> None:
-    """If bm25 can't be imported (uninstalled), the closure tells the
-    model the backend is unavailable."""
-    k = tmp_path / "knowledge"
-    k.mkdir()
-    import sys
-
-    # Setting sys.modules["bm25"] = None forces ImportError on re-import.
-    monkeypatch.setitem(sys.modules, "bm25", None)
-    server = library_tools.make_library_mcp_server(k)
-    text = _call_mcp_tool(server, "bm25_search", {"query": "python", "k": 3})
-    assert "bm25 backend unavailable" in text
 
 
 def test_move_entries_tool_via_mcp_server(tmp_path: Path) -> None:

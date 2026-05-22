@@ -49,6 +49,12 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
+import yaml
+from bm25 import load_or_build as bm25_load_or_build
+from embeddings import load_or_build as embeddings_load_or_build
+
+from .paths import home as _agent_mem_home
+
 log = logging.getLogger("agent_mem_daemon.priming")
 
 
@@ -74,8 +80,6 @@ def _parse_frontmatter(text: str) -> Dict[str, Any]:
     Permissive: a malformed entry just yields ``{}`` rather than killing
     the priming refresh.
     """
-    import yaml
-
     m = _FRONTMATTER_RE.match(text)
     if not m:
         return {}
@@ -250,17 +254,12 @@ def _bm25_search(
     """
     if not query:
         return []
-    try:
-        from bm25 import load_or_build  # provided by agent-mem-search
-    except ImportError as e:
-        log.warning("priming: bm25 backend not importable (%s); skipping", e)
-        return []
 
     if not knowledge_dir.exists():
         return []
 
     try:
-        index = load_or_build(knowledge_dir)
+        index = bm25_load_or_build(knowledge_dir)
     except FileNotFoundError:
         return []
     except Exception:
@@ -291,19 +290,12 @@ def _embedding_search(
     """
     if not query:
         return []
-    try:
-        from embeddings import load_or_build  # provided by agent-mem-search
-    except ImportError:
-        # No noisy warning — embeddings are an optional retrieval lane.
-        # BM25 still runs. Log once at DEBUG so the operator can spot it.
-        log.debug("priming: embeddings backend not importable; bm25-only mode")
-        return []
 
     if not knowledge_dir.exists():
         return []
 
     try:
-        index = load_or_build(knowledge_dir)
+        index = embeddings_load_or_build(knowledge_dir)
     except FileNotFoundError:
         return []
     except Exception:
@@ -466,8 +458,6 @@ def _boost_with_reinforcement(
     # zero-cost.
     aliases: Mapping[str, str] = {}
     if knowledge_dir is not None:
-        from .paths import home as _agent_mem_home
-
         aliases = load_aliases(_agent_mem_home())
 
     enriched: List[Tuple[Path, float, int, float]] = []

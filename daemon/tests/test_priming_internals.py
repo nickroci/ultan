@@ -145,16 +145,11 @@ def test_bm25_search_swallows_load_failure(tmp_path: Path, monkeypatch, caplog) 
     k = tmp_path / "knowledge"
     k.mkdir()
     (k / "x.md").write_text("# x")
-    import sys
-    import types
-
-    fake = types.ModuleType("bm25")
 
     def _boom(*args, **kwargs):
         raise RuntimeError("simulated index build failure")
 
-    fake.load_or_build = _boom  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "bm25", fake)
+    monkeypatch.setattr(priming, "bm25_load_or_build", _boom)
     assert priming._bm25_search(k, "python", k=5) == []
 
 
@@ -162,10 +157,6 @@ def test_bm25_search_swallows_search_failure(tmp_path: Path, monkeypatch) -> Non
     k = tmp_path / "knowledge"
     k.mkdir()
     (k / "x.md").write_text("# x")
-    import sys
-    import types
-
-    fake = types.ModuleType("bm25")
 
     class _Index:
         def search(self, q, k):
@@ -174,24 +165,18 @@ def test_bm25_search_swallows_search_failure(tmp_path: Path, monkeypatch) -> Non
     def _load(*args, **kwargs):
         return _Index()
 
-    fake.load_or_build = _load  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "bm25", fake)
+    monkeypatch.setattr(priming, "bm25_load_or_build", _load)
     assert priming._bm25_search(k, "python", k=5) == []
 
 
 def test_bm25_search_filenotfound_during_load(tmp_path: Path, monkeypatch) -> None:
     k = tmp_path / "knowledge"
     k.mkdir()
-    import sys
-    import types
-
-    fake = types.ModuleType("bm25")
 
     def _missing(*args, **kwargs):
         raise FileNotFoundError("no index")
 
-    fake.load_or_build = _missing  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "bm25", fake)
+    monkeypatch.setattr(priming, "bm25_load_or_build", _missing)
     assert priming._bm25_search(k, "python", k=5) == []
 
 
@@ -203,53 +188,31 @@ def test_embedding_search_missing_dir_returns_empty(tmp_path: Path) -> None:
     assert priming._embedding_search(tmp_path / "missing", "x", k=5) == []
 
 
-def test_embedding_search_missing_package_returns_empty(tmp_path: Path, monkeypatch) -> None:
-    """When 'embeddings' isn't importable, the function returns []."""
-    import sys
-
-    monkeypatch.setitem(sys.modules, "embeddings", None)  # forces ImportError
-    assert priming._embedding_search(tmp_path, "x", k=5) == []
-
-
 def test_embedding_search_handles_load_failure(tmp_path: Path, monkeypatch) -> None:
     k = tmp_path / "knowledge"
     k.mkdir()
-    import sys
-    import types
-
-    fake = types.ModuleType("embeddings")
 
     def _boom(*args, **kwargs):
         raise RuntimeError("simulated emb load failure")
 
-    fake.load_or_build = _boom  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "embeddings", fake)
+    monkeypatch.setattr(priming, "embeddings_load_or_build", _boom)
     assert priming._embedding_search(k, "x", k=5) == []
 
 
 def test_embedding_search_handles_filenotfound(tmp_path: Path, monkeypatch) -> None:
     k = tmp_path / "knowledge"
     k.mkdir()
-    import sys
-    import types
-
-    fake = types.ModuleType("embeddings")
 
     def _missing(*args, **kwargs):
         raise FileNotFoundError("no index")
 
-    fake.load_or_build = _missing  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "embeddings", fake)
+    monkeypatch.setattr(priming, "embeddings_load_or_build", _missing)
     assert priming._embedding_search(k, "x", k=5) == []
 
 
 def test_embedding_search_handles_search_failure(tmp_path: Path, monkeypatch) -> None:
     k = tmp_path / "knowledge"
     k.mkdir()
-    import sys
-    import types
-
-    fake = types.ModuleType("embeddings")
 
     class _Idx:
         def search(self, q, k):
@@ -258,8 +221,7 @@ def test_embedding_search_handles_search_failure(tmp_path: Path, monkeypatch) ->
     def _load(*args, **kwargs):
         return _Idx()
 
-    fake.load_or_build = _load  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "embeddings", fake)
+    monkeypatch.setattr(priming, "embeddings_load_or_build", _load)
     assert priming._embedding_search(k, "x", k=5) == []
 
 
@@ -267,8 +229,6 @@ def test_embedding_search_filters_noise_floor(tmp_path: Path, monkeypatch) -> No
     """Hits with score < 0.25 are dropped (model noise floor)."""
     kdir = tmp_path / "knowledge"
     kdir.mkdir()
-    import sys
-    import types
 
     class _Hit:
         def __init__(self, p, s):
@@ -282,9 +242,7 @@ def test_embedding_search_filters_noise_floor(tmp_path: Path, monkeypatch) -> No
         def search(self, q, k):
             return [_Hit(good, 0.5), _Hit(noise, 0.05)]
 
-    fake = types.ModuleType("embeddings")
-    fake.load_or_build = lambda *a, **kw: _Idx()  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "embeddings", fake)
+    monkeypatch.setattr(priming, "embeddings_load_or_build", lambda *a, **kw: _Idx())
     out = priming._embedding_search(kdir, "x", k=5)
     # Only the 0.5-score hit survives.
     assert len(out) == 1

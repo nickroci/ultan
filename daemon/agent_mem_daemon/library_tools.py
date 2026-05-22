@@ -23,6 +23,9 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List
 
+from bm25 import load_or_build
+from claude_agent_sdk import create_sdk_mcp_server, tool
+
 if TYPE_CHECKING:
     from claude_agent_sdk.types import McpServerConfig
 
@@ -57,8 +60,6 @@ def make_library_mcp_server(knowledge_dir: Path) -> McpServerConfig:
     knowledge_dir is captured at construction time so the tool always
     searches the same store — no path injection possible from the model.
     """
-    from claude_agent_sdk import create_sdk_mcp_server, tool
-
     root = knowledge_dir.expanduser().resolve()
 
     @tool(
@@ -82,12 +83,6 @@ def make_library_mcp_server(knowledge_dir: Path) -> McpServerConfig:
             k = 5
         if not query:
             return {"content": [{"type": "text", "text": "(bm25_search: empty query)"}]}
-
-        try:
-            from bm25 import load_or_build  # provided by agent-mem-search
-        except ImportError as e:
-            log.warning("bm25 package not importable: %s", e)
-            return {"content": [{"type": "text", "text": "(bm25 backend unavailable)"}]}
 
         if not root.exists():
             return {

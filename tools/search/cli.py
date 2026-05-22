@@ -45,6 +45,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Callable, Iterable, TextIO
 
+from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
+
 from bm25 import load_or_build
 from frontmatter import (
     FrontmatterError,
@@ -177,34 +179,14 @@ Question:
 """
 
 
-def _load_sdk() -> tuple[object, object, object, object] | str:
-    """Import the Claude Agent SDK; on failure return a friendly error string.
-
-    Returns (AssistantMessage, ClaudeAgentOptions, TextBlock, query) on success.
-    """
-    try:
-        from claude_agent_sdk import (  # type: ignore[import-not-found]
-            AssistantMessage,
-            ClaudeAgentOptions,
-            TextBlock,
-            query,
-        )
-    except ImportError as e:
-        return f"[index mode unavailable: claude-agent-sdk not installed: {e}]"
-    return AssistantMessage, ClaudeAgentOptions, TextBlock, query
-
-
 async def _drain_sdk_response(
-    query_fn,
-    options_factory: Callable[[], object],
+    options_factory: Callable[[], ClaudeAgentOptions],
     prompt: str,
-    AssistantMessage,
-    TextBlock,
 ) -> tuple[str, str | None]:
     """Stream assistant text from the SDK; return (joined_text, error_or_None)."""
     chunks: list[str] = []
     try:
-        async for message in query_fn(prompt=prompt, options=options_factory()):
+        async for message in query(prompt=prompt, options=options_factory()):
             if isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock):
@@ -240,11 +222,6 @@ async def _run_index_query(knowledge_dir: Path, question: str) -> tuple[str, lis
 
     Returns (answer_text, list_of_cited_paths).
     """
-    sdk = _load_sdk()
-    if isinstance(sdk, str):
-        return sdk, []
-    AssistantMessage, ClaudeAgentOptions, TextBlock, query = sdk
-
     index_file = knowledge_dir / "index.md"
     if not index_file.exists():
         return (
@@ -259,7 +236,7 @@ async def _run_index_query(knowledge_dir: Path, question: str) -> tuple[str, lis
     )
 
     def _make_options():
-        return ClaudeAgentOptions(  # type: ignore[operator]
+        return ClaudeAgentOptions(
             cwd=str(knowledge_dir),
             system_prompt={"type": "preset", "preset": "claude_code"},
             allowed_tools=["Read"],
@@ -267,9 +244,7 @@ async def _run_index_query(knowledge_dir: Path, question: str) -> tuple[str, lis
             max_turns=15,
         )
 
-    answer, err = await _drain_sdk_response(
-        query, _make_options, prompt, AssistantMessage, TextBlock
-    )
+    answer, err = await _drain_sdk_response(_make_options, prompt)
     if err is not None:
         return err, []
 

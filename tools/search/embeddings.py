@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from sentence_transformers import SentenceTransformer
 
 # Reuse BM25's file-selection + frontmatter discipline. They're underscore-prefixed
 # but this is a single internal package; pragmatic over copy-paste.
@@ -68,27 +69,19 @@ def _load_model(model_name: str) -> Any:
     Falls back to online (downloads) only when the model isn't cached
     locally yet. First-ever load needs network; everything after is
     offline.
-
-    Raises ``ImportError`` with a clear message if ``sentence_transformers``
-    isn't installed in the current env.
     """
     cached = _MODEL_CACHE.get(model_name)
     if cached is not None:
         return cached
-    try:
-        from sentence_transformers import SentenceTransformer
-    except ImportError as e:  # pragma: no cover - exercised only when dep missing
-        raise ImportError(
-            "sentence-transformers is not installed in this environment. "
-            "From tools/search/: `uv sync` to pick it up."
-        ) from e
 
     # Try offline first. `local_files_only=True` tells HuggingFace
     # transformers to refuse network and load from disk cache only.
     # If the model isn't cached, this raises — we catch and retry online.
     try:
         model = SentenceTransformer(
-            model_name, device="cpu", local_files_only=True,
+            model_name,
+            device="cpu",
+            local_files_only=True,
         )
     except Exception:
         # Not cached yet — fall back to download. Subsequent loads in
@@ -130,9 +123,7 @@ class EmbeddingIndex:
     knowledge_dir: Path
     model_name: str = DEFAULT_MODEL
     docs: list[_DocRecord] = field(default_factory=list)
-    embeddings: np.ndarray = field(
-        default_factory=lambda: np.zeros((0, 0), dtype=np.float32)
-    )
+    embeddings: np.ndarray = field(default_factory=lambda: np.zeros((0, 0), dtype=np.float32))
     built_at: float = 0.0
 
     # ── search ────────────────────────────────────────────────────────────────

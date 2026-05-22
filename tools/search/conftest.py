@@ -4,7 +4,8 @@ Centralises the patterns the individual test files used to copy-paste:
   - a fresh ``tmp_path / knowledge`` copy of the fixture corpus,
   - a paired ``home`` + ``knowledge`` layout (with ``AGENT_MEM_HOME`` env
     pointed at it) for doctor / lifecycle scenarios,
-  - small helpers for materialising provisional entries inline.
+  - small helpers for materialising provisional entries inline,
+  - the ``fake_sdk`` patcher for ``cli``'s claude-agent-sdk bindings.
 """
 
 from __future__ import annotations
@@ -12,11 +13,56 @@ from __future__ import annotations
 import shutil
 import textwrap
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import pytest
 
 FIXTURES = Path(__file__).parent / "fixtures" / "knowledge"
+
+
+class FakeTextBlock:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+class FakeAssistantMessage:
+    def __init__(self, content: list[FakeTextBlock]) -> None:
+        self.content = content
+
+
+class FakeClaudeAgentOptions:
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+
+
+@pytest.fixture
+def fake_sdk(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Patch the cli module's SDK bindings with configurable fakes.
+
+    cli.py imports AssistantMessage / ClaudeAgentOptions / TextBlock / query
+    at module top, so sys.modules patches no longer reach the bound names.
+    This fixture uses ``monkeypatch.setattr`` on the cli module directly.
+
+    Mutate the returned dict before driving the code under test:
+
+        fake_sdk["chunks"] = ["text the fake assistant emits"]
+        fake_sdk["raise_exc"] = RuntimeError("boom")
+    """
+    import cli
+
+    config: dict[str, Any] = {"chunks": [], "raise_exc": None}
+
+    async def _query(**_kw: Any) -> Any:
+        if config["raise_exc"] is not None:
+            raise config["raise_exc"]
+        for c in config["chunks"]:
+            yield FakeAssistantMessage([FakeTextBlock(c)])
+
+    monkeypatch.setattr(cli, "query", _query)
+    monkeypatch.setattr(cli, "AssistantMessage", FakeAssistantMessage)
+    monkeypatch.setattr(cli, "TextBlock", FakeTextBlock)
+    monkeypatch.setattr(cli, "ClaudeAgentOptions", FakeClaudeAgentOptions)
+    return config
 
 
 @pytest.fixture

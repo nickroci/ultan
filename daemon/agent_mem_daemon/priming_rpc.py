@@ -63,6 +63,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Callable, Optional
 
+from bm25 import load_or_build as bm25_load_or_build
+
 from . import priming
 from .paths import knowledge_dir, priming_socket_path
 
@@ -227,12 +229,7 @@ def _handle_bm25_search(req: dict) -> dict:
         return {"ok": True, "hits": []}
 
     try:
-        from bm25 import load_or_build
-    except ImportError:
-        return {"ok": False, "error": "bm25 backend unavailable"}
-
-    try:
-        index = load_or_build(kdir)
+        index = bm25_load_or_build(kdir)
     except FileNotFoundError:
         return {"ok": True, "hits": []}
     except Exception as e:

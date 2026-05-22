@@ -13,11 +13,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import sys
-from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
-from unittest import mock
 
 import pytest
 
@@ -145,82 +142,22 @@ def test_bm25_mode_returns_hits(knowledge_dir: Path) -> None:
     assert all(h.sources == ["bm25"] for h in hits)
 
 
-# ── Index mode: monkeypatch the SDK so we don't hit the network ────────────────
+# ── Index mode: patched via the fake_sdk fixture (see conftest.py) ─────────────
 
 
-class _FakeTextBlock:
-    def __init__(self, text: str) -> None:
-        self.text = text
-
-
-class _FakeAssistantMessage:
-    def __init__(self, content: list[_FakeTextBlock]) -> None:
-        self.content = content
-
-
-class _FakeClaudeAgentOptions:
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
-
-
-@contextmanager
-def _install_fake_sdk(
-    *,
-    chunks: list[str] | None = None,
-    raise_exc: Exception | None = None,
-):
-    """Patch ``sys.modules['claude_agent_sdk']`` with a fake for the duration
-    of the block.
-
-    ``chunks`` controls what text blocks the fake assistant emits.
-    ``raise_exc`` makes the query() async generator raise after yielding nothing.
-    """
-
-    async def _query(**_kw):  # noqa: D401 — async generator; accepts the SDK's prompt=/options= kwargs
-        if raise_exc is not None:
-            raise raise_exc
-        for c in chunks or []:
-            yield _FakeAssistantMessage([_FakeTextBlock(c)])
-
-    fake = mock.MagicMock()
-    fake.AssistantMessage = _FakeAssistantMessage
-    fake.ClaudeAgentOptions = _FakeClaudeAgentOptions
-    fake.TextBlock = _FakeTextBlock
-    fake.query = _query
-    with mock.patch.dict(sys.modules, {"claude_agent_sdk": fake}):
-        yield fake
-
-
-def test_run_index_query_handles_missing_sdk(knowledge_dir: Path, monkeypatch) -> None:
-    """When the SDK is not importable, ``_run_index_query`` must return a
-    friendly message rather than crashing."""
-
-    # Force ImportError by inserting a sentinel that fails on import access.
-    real_import = __import__
-
-    def fake_import(name, *args, **kwargs):
-        if name == "claude_agent_sdk":
-            raise ImportError("simulated missing dep")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr("builtins.__import__", fake_import)
-    answer, cited = asyncio.run(cli._run_index_query(knowledge_dir, "factory"))
-    assert "index mode unavailable" in answer
-    assert cited == []
-
-
-def test_run_index_query_missing_index_file(tmp_path: Path) -> None:
+def test_run_index_query_missing_index_file(tmp_path: Path, fake_sdk) -> None:
     """No ``index.md`` -> friendly message, empty citations."""
-    with _install_fake_sdk(chunks=["unused"]):
-        empty = tmp_path / "knowledge"
-        empty.mkdir()
-        answer, cited = asyncio.run(cli._run_index_query(empty, "anything"))
+    fake_sdk["chunks"] = ["unused"]
+    empty = tmp_path / "knowledge"
+    empty.mkdir()
+    answer, cited = asyncio.run(cli._run_index_query(empty, "anything"))
     assert "does not exist" in answer
     assert cited == []
 
 
 def test_run_index_query_collects_sources(
     knowledge_dir: Path,
+    fake_sdk,
 ) -> None:
     factory = knowledge_dir / "global" / "concepts" / "factory-pattern-for-apis.md"
     nomock = knowledge_dir / "global" / "concepts" / "no-mock-db.md"
@@ -232,8 +169,8 @@ def test_run_index_query_collects_sources(
         "SOURCE: \n"  # empty — should skip
         "SOURCE: /tmp/does/not/exist/anywhere.md\n"  # non-existent — skip
     )
-    with _install_fake_sdk(chunks=[answer_text]):
-        answer, cited = asyncio.run(cli._run_index_query(knowledge_dir, "factory"))
+    fake_sdk["chunks"] = [answer_text]
+    answer, cited = asyncio.run(cli._run_index_query(knowledge_dir, "factory"))
     assert "Here is an answer." in answer
     # Dedupe + skip empty/non-existent.
     assert cited == [factory.resolve(), nomock.resolve()]
@@ -241,19 +178,20 @@ def test_run_index_query_collects_sources(
 
 def test_run_index_query_handles_sdk_exception(
     knowledge_dir: Path,
+    fake_sdk,
 ) -> None:
-    with _install_fake_sdk(raise_exc=RuntimeError("boom")):
-        answer, cited = asyncio.run(cli._run_index_query(knowledge_dir, "x"))
+    fake_sdk["raise_exc"] = RuntimeError("boom")
+    answer, cited = asyncio.run(cli._run_index_query(knowledge_dir, "x"))
     assert "[index mode error:" in answer
     assert "boom" in answer
     assert cited == []
 
 
-def test_index_mode_sync_wrapper(knowledge_dir: Path) -> None:
+def test_index_mode_sync_wrapper(knowledge_dir: Path, fake_sdk) -> None:
     """``index_mode`` is the sync wrapper used by the CLI."""
     factory = knowledge_dir / "global" / "concepts" / "factory-pattern-for-apis.md"
-    with _install_fake_sdk(chunks=[f"answer here\nSOURCE: {factory}\n"]):
-        answer, hits = cli.index_mode(knowledge_dir, "factory")
+    fake_sdk["chunks"] = [f"answer here\nSOURCE: {factory}\n"]
+    answer, hits = cli.index_mode(knowledge_dir, "factory")
     assert "answer here" in answer
     assert len(hits) == 1
     assert hits[0].sources == ["index"]
@@ -265,12 +203,13 @@ def test_index_mode_sync_wrapper(knowledge_dir: Path) -> None:
 
 def test_merged_mode_dedupes_overlapping_sources(
     knowledge_dir: Path,
+    fake_sdk,
 ) -> None:
     """Both BM25 and index-led can surface the same file. The merge keeps
     one record with both sources tagged."""
     factory = knowledge_dir / "global" / "concepts" / "factory-pattern-for-apis.md"
-    with _install_fake_sdk(chunks=[f"x\nSOURCE: {factory}\n"]):
-        hits, answer = cli.merged_mode(knowledge_dir, "factory pattern for APIs", k=5)
+    fake_sdk["chunks"] = [f"x\nSOURCE: {factory}\n"]
+    hits, answer = cli.merged_mode(knowledge_dir, "factory pattern for APIs", k=5)
     assert hits
     # factory must appear and carry both sources.
     factory_hit = next(h for h in hits if h.path.resolve() == factory.resolve())
@@ -282,12 +221,13 @@ def test_merged_mode_dedupes_overlapping_sources(
 
 def test_merged_mode_index_only_hits_preserved(
     knowledge_dir: Path,
+    fake_sdk,
 ) -> None:
     """A path returned only by the index-led engine still gets a hit row."""
     # Use a query no BM25 token matches in the corpus.
     factory = knowledge_dir / "global" / "concepts" / "factory-pattern-for-apis.md"
-    with _install_fake_sdk(chunks=[f"only-index\nSOURCE: {factory}\n"]):
-        hits, _ = cli.merged_mode(knowledge_dir, "zzzzzzz qqqqqqq", k=5)
+    fake_sdk["chunks"] = [f"only-index\nSOURCE: {factory}\n"]
+    hits, _ = cli.merged_mode(knowledge_dir, "zzzzzzz qqqqqqq", k=5)
     factory_hit = next(h for h in hits if h.path.resolve() == factory.resolve())
     assert factory_hit.sources == ["index"]
 
@@ -850,18 +790,18 @@ def test_main_search_bm25_no_hits_prints_hint(knowledge_dir: Path, capsys) -> No
     assert "try --index" in capsys.readouterr().out
 
 
-def test_main_search_index_mode(knowledge_dir: Path, capsys) -> None:
+def test_main_search_index_mode(knowledge_dir: Path, capsys, fake_sdk) -> None:
     factory = knowledge_dir / "global" / "concepts" / "factory-pattern-for-apis.md"
-    with _install_fake_sdk(chunks=[f"my answer\nSOURCE: {factory}\n"]):
-        rc = cli.main(
-            [
-                "--knowledge-dir",
-                str(knowledge_dir),
-                "search",
-                "--index",
-                "factory",
-            ]
-        )
+    fake_sdk["chunks"] = [f"my answer\nSOURCE: {factory}\n"]
+    rc = cli.main(
+        [
+            "--knowledge-dir",
+            str(knowledge_dir),
+            "search",
+            "--index",
+            "factory",
+        ]
+    )
     out = capsys.readouterr().out
     assert rc == 0
     assert "Index-led answer" in out
@@ -869,18 +809,18 @@ def test_main_search_index_mode(knowledge_dir: Path, capsys) -> None:
     assert "Entries cited" in out
 
 
-def test_main_search_merged_default(knowledge_dir: Path, capsys) -> None:
+def test_main_search_merged_default(knowledge_dir: Path, capsys, fake_sdk) -> None:
     factory = knowledge_dir / "global" / "concepts" / "factory-pattern-for-apis.md"
-    with _install_fake_sdk(chunks=[f"synth answer\nSOURCE: {factory}\n"]):
-        rc = cli.main(
-            [
-                "--knowledge-dir",
-                str(knowledge_dir),
-                "search",
-                "factory",
-                "pattern",
-            ]
-        )
+    fake_sdk["chunks"] = [f"synth answer\nSOURCE: {factory}\n"]
+    rc = cli.main(
+        [
+            "--knowledge-dir",
+            str(knowledge_dir),
+            "search",
+            "factory",
+            "pattern",
+        ]
+    )
     out = capsys.readouterr().out
     assert rc == 0
     assert "Merged search" in out
