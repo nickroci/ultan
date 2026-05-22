@@ -339,10 +339,15 @@ def test_take_nudges_clears_file_even_when_over_budget(tmp_path: Path):
     assert not nudges_path.exists()  # cleared
 
 
-def test_take_nudges_filters_cross_project_and_requeues(tmp_path: Path):
+def test_take_nudges_filters_cross_project_and_requeues(tmp_path: Path, monkeypatch):
     """A vol-predictor nudge surfaced in an agent-mem session must be
     skipped AND re-queued for a future session in the matching project.
-    Global and current-project nudges are delivered normally."""
+    Global and current-project nudges are delivered normally.
+
+    Pin AGENT_MEM_HOME so the real ``~/.agent-mem/project-aliases.json``
+    can't bleed into the assertions (the auto-bootstrap may have
+    populated it between turns)."""
+    monkeypatch.setenv("AGENT_MEM_HOME", str(tmp_path))
     nudges_path = tmp_path / "pending-nudges.md"
     state_path = tmp_path / "state" / "nudge-budget-s1.json"
     blocks = [
