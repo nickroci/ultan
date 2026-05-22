@@ -379,11 +379,13 @@ def test_take_nudges_filters_cross_project_and_requeues(tmp_path: Path):
 
 
 def test_take_nudges_uses_alias_map_to_match_slug_to_bucket(tmp_path: Path, monkeypatch):
-    """Slug 'github.com-nickroci-ultan' should match bucket
-    'agent-mem' when the alias file maps them."""
+    """Bucket ``agent-mem`` declares its canonical slug as
+    ``github.com-nickroci-ultan``; a session with that slug should
+    then deliver the agent-mem nudge. File shape is
+    ``{<bucket>: <canonical-slug>}``."""
     monkeypatch.setenv("AGENT_MEM_HOME", str(tmp_path))
     aliases = tmp_path / "project-aliases.json"
-    aliases.write_text('{"github.com-nickroci-ultan": "agent-mem"}', encoding="utf-8")
+    aliases.write_text('{"agent-mem": "github.com-nickroci-ultan"}', encoding="utf-8")
 
     nudges_path = tmp_path / "pending-nudges.md"
     state_path = tmp_path / "state" / "nudge-budget-s1.json"

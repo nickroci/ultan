@@ -42,7 +42,6 @@ Design notes:
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -389,40 +388,10 @@ _SCOPE_BONUS_CURRENT = 0.020
 _SCOPE_BONUS_GLOBAL = 0.005
 
 
-def _load_project_aliases() -> Dict[str, str]:
-    """Read ``~/.agent-mem/project-aliases.json`` (slug -> bucket map).
-
-    Returns ``{}`` if the file is missing, unreadable, or doesn't decode
-    as a JSON object with string values — alias resolution must NEVER
-    crash the priming path. Loaded fresh on each priming request so the
-    user can edit the file without restarting the daemon.
-    """
-    # Local import: keeps the module's import graph small and avoids a
-    # cycle if paths.py grows to import priming for any reason.
-    from .paths import project_aliases_path
-
-    try:
-        text = project_aliases_path().read_text(encoding="utf-8")
-    except (FileNotFoundError, OSError):
-        return {}
-    try:
-        data = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    return {str(k): str(v) for k, v in data.items() if isinstance(v, (str, int))}
-
-
-def _resolve_slug_to_bucket(slug: Optional[str], aliases: Mapping[str, str]) -> Optional[str]:
-    """Translate a session's project slug to the on-disk bucket name.
-
-    Returns the alias target if present, else the slug unchanged (so a
-    slug that already matches a bucket name works without any alias).
-    """
-    if not slug:
-        return None
-    return aliases.get(slug, slug)
+# Project-scope alias resolution lives in ``tools/search/aliases.py``
+# (shared with the hook side) — see that module's docstring for shape
+# and contract.
+from aliases import bucket_canonical_slug, load_aliases  # noqa: E402
 
 
 def _path_project_bucket(path: Path, knowledge_dir: Path) -> Optional[str]:
@@ -442,18 +411,27 @@ def _path_project_bucket(path: Path, knowledge_dir: Path) -> Optional[str]:
     return None
 
 
-def _scope_bonus(bucket: Optional[str], current_project_slug: Optional[str]) -> float:
+def _scope_bonus(
+    bucket: Optional[str],
+    current_project_slug: Optional[str],
+    aliases: Mapping[str, str],
+) -> float:
     """Score adjustment for project-scope preference.
 
     - Entries under the user's current project: ``+_SCOPE_BONUS_CURRENT``
     - Global entries: ``+_SCOPE_BONUS_GLOBAL``
     - Other-project entries (and root entries with no bucket): ``0.0``
+
+    Matching is done by translating the bucket name to its canonical
+    slug (via ``_bucket_canonical_slug``) and comparing against the
+    session's slug — buckets not listed in the alias map default to
+    slug == bucket name.
     """
     if bucket is None:
         return 0.0
     if bucket == "__global__":
         return _SCOPE_BONUS_GLOBAL
-    if current_project_slug and bucket == current_project_slug:
+    if current_project_slug and bucket_canonical_slug(bucket, aliases) == current_project_slug:
         return _SCOPE_BONUS_CURRENT
     return 0.0
 
@@ -475,20 +453,22 @@ def _boost_with_reinforcement(
     When ``knowledge_dir`` is supplied, also applies the scope bonus
     (see ``_scope_bonus``). ``current_project_slug`` may be ``None``;
     in that case only the global bonus fires (no current-project boost).
-    The slug is translated via ``~/.agent-mem/project-aliases.json``
-    before comparison, so a slug like ``github.com-nickroci-ultan`` can
-    match a bucket named ``agent-mem``.
+    Each bucket's canonical slug is read from
+    ``~/.agent-mem/project-aliases.json`` (see ``aliases.load_aliases``);
+    buckets absent from that file default to ``slug == bucket name``.
 
     Returns ``(path, ranked_score, reinforced_count)`` sorted desc by
     the BOOSTED score. Stable on tie via path string so output is
     deterministic across runs.
     """
-    # Resolve the slug through the alias map once per call — the file
-    # read is cheap (one-off, small JSON) and skipping when no scope
-    # work is needed keeps the no-scope path zero-cost.
-    resolved_slug: Optional[str] = None
-    if knowledge_dir is not None and current_project_slug:
-        resolved_slug = _resolve_slug_to_bucket(current_project_slug, _load_project_aliases())
+    # Load the alias map once per call. The lookup is cheap (one small
+    # JSON read) and skipping it on the no-scope path keeps that path
+    # zero-cost.
+    aliases: Mapping[str, str] = {}
+    if knowledge_dir is not None:
+        from .paths import home as _agent_mem_home
+
+        aliases = load_aliases(_agent_mem_home())
 
     enriched: List[Tuple[Path, float, int, float]] = []
     for path, score in hits:
@@ -501,7 +481,11 @@ def _boost_with_reinforcement(
         reinforced = _reinforced_count(fm)
         scope = 0.0
         if knowledge_dir is not None:
-            scope = _scope_bonus(_path_project_bucket(path, knowledge_dir), resolved_slug)
+            scope = _scope_bonus(
+                _path_project_bucket(path, knowledge_dir),
+                current_project_slug,
+                aliases,
+            )
         boosted = score + reinforced * 0.5 + scope
         enriched.append((path, boosted, reinforced, score))
     enriched.sort(key=lambda t: (-t[1], str(t[0])))

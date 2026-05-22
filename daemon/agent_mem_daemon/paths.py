@@ -100,24 +100,6 @@ def hot_context_path() -> Path:
     return home() / "hot-context.md"
 
 
-def project_aliases_path() -> Path:
-    """Optional config mapping git-derived project slugs to the on-disk
-    bucket names under ``knowledge/projects/``.
-
-    The slug from ``current_project_slug`` is the git-URL flattened form
-    (e.g. ``github.com-nickroci-ultan``), but bucket directories can be
-    named anything (e.g. ``agent-mem``). Without an alias, the
-    current-project scope bonus and the cross-project nudge filter
-    would never match on repos where the two differ. The alias file
-    bridges that:
-
-        {"github.com-nickroci-ultan": "agent-mem"}
-
-    File is optional — when missing or malformed it's treated as ``{}``.
-    """
-    return home() / "project-aliases.json"
-
-
 def ensure_home() -> Path:
     """Create the home dir if missing; return it."""
     h = home()
