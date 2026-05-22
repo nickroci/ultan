@@ -146,6 +146,57 @@ def _parse_simple_scalars(fm: str) -> dict[str, str]:
     return out
 
 
+def _is_block_triggers_header(stripped: str, indent: int) -> bool:
+    """Return True if this line is the top-level ``block_triggers:`` key."""
+    stripped_r = stripped.rstrip()
+    return indent == 0 and stripped_r.rstrip(":") == "block_triggers" and stripped_r.endswith(":")
+
+
+def _kv_from_line(stripped: str) -> Optional[tuple[str, str]]:
+    """Parse ``key: value`` out of a line; return None if malformed."""
+    if ":" not in stripped:
+        return None
+    key, _, value = stripped.partition(":")
+    key = key.strip()
+    value = _strip_quotes(value.strip())
+    if not key or not value:
+        return None
+    return key, value
+
+
+def _start_list_item(stripped: str) -> dict[str, str]:
+    """Build the dict for a fresh ``- key: value`` list-item line."""
+    current: dict[str, str] = {}
+    rest = stripped[2:].strip()
+    kv = _kv_from_line(rest)
+    if kv is not None:
+        current[kv[0]] = kv[1]
+    return current
+
+
+def _block_triggers_lines(fm: str) -> list[str]:
+    """Return the raw lines that sit inside the ``block_triggers:`` list.
+
+    Stops at the first column-0 (non-empty) line after the header — that
+    de-indent ends the YAML block per the AGENTS.md schema.
+    """
+    out: list[str] = []
+    in_block = False
+    for raw in fm.splitlines():
+        stripped = raw.lstrip()
+        indent = len(raw) - len(stripped)
+        if not in_block:
+            if _is_block_triggers_header(stripped, indent):
+                in_block = True
+            continue
+        if not stripped:
+            continue
+        if indent == 0:
+            break
+        out.append(raw)
+    return out
+
+
 def _parse_block_triggers(fm: str) -> list[dict[str, str]]:
     """Pull out the ``block_triggers:`` list from frontmatter.
 
@@ -169,65 +220,27 @@ def _parse_block_triggers(fm: str) -> list[dict[str, str]]:
     skipped rather than raised — see module docstring on graceful
     degradation.
     """
-    lines = fm.splitlines()
     triggers: list[dict[str, str]] = []
-    in_block = False
     current: Optional[dict[str, str]] = None
     item_indent: Optional[int] = None  # column index of the `-` marker
 
-    for raw in lines:
+    for raw in _block_triggers_lines(fm):
         stripped = raw.lstrip()
         indent = len(raw) - len(stripped)
 
-        if not in_block:
-            # Looking for the top-level key ``block_triggers:``.
-            stripped_r = stripped.rstrip()
-            if (
-                indent == 0
-                and stripped_r.rstrip(":") == "block_triggers"
-                and stripped_r.endswith(":")
-            ):
-                in_block = True
-            continue
-
-        # Inside block_triggers.
-        if not stripped:
-            # Blank line — keep scanning, allow it.
-            continue
-        if indent == 0:
-            # De-indented back to top level — block ended.
-            if current:
-                triggers.append(current)
-            return triggers
         if stripped.startswith("- "):
-            # New list item.
             if current:
                 triggers.append(current)
-            current = {}
+            current = _start_list_item(stripped)
             item_indent = indent
-            # The bit after "- " might already be a "key: value" pair.
-            rest = stripped[2:].strip()
-            if ":" in rest:
-                key, _, value = rest.partition(":")
-                key = key.strip()
-                value = _strip_quotes(value.strip())
-                if key and value:
-                    current[key] = value
             continue
         # Continuation line of the current item.
-        if current is None or item_indent is None:
+        if current is None or item_indent is None or indent <= item_indent:
             continue
-        if indent <= item_indent:
-            # Same indent as the `-` but no dash — malformed, skip.
-            continue
-        if ":" in stripped:
-            key, _, value = stripped.partition(":")
-            key = key.strip()
-            value = _strip_quotes(value.strip())
-            if key and value:
-                current[key] = value
+        kv = _kv_from_line(stripped)
+        if kv is not None:
+            current[kv[0]] = kv[1]
 
-    # End-of-frontmatter flush.
     if current:
         triggers.append(current)
     return triggers
@@ -279,6 +292,43 @@ def _cache_sentinel(knowledge_dir: Path) -> float:
         return 0.0
 
 
+def _safe_compile(pattern: Optional[str]) -> Optional[re.Pattern[str]]:
+    """Compile ``pattern`` or return None on missing/invalid regex.
+
+    Invalid regexes are silently dropped — see module docstring on
+    graceful degradation.
+    """
+    if not pattern:
+        return None
+    try:
+        return re.compile(pattern)
+    except re.error:
+        return None
+
+
+def _trigger_from_raw(raw: dict[str, str]) -> Optional[Trigger]:
+    """Turn one parsed ``block_triggers`` entry into a :class:`Trigger`.
+
+    Returns None if there's no tool name or if both regexes are empty /
+    invalid (a trigger with neither is functionally inert).
+    """
+    tool = raw.get("tool")
+    if not tool:
+        return None
+    cmd_re = _safe_compile(raw.get("pattern"))
+    file_re = _safe_compile(raw.get("file_pattern"))
+    if cmd_re is None and file_re is None:
+        return None
+    return Trigger(tool=tool, command_regex=cmd_re, file_path_regex=file_re)
+
+
+def _normalize_severity(raw: Optional[str]) -> str:
+    """Clamp the severity field to the two values the hook understands."""
+    if raw not in ("advise", "block"):
+        return "advise"
+    return raw
+
+
 def _build_blocker(path: Path) -> Optional[Blocker]:
     """Read one entry; return a Blocker if it opts in to PreToolUse checking.
 
@@ -301,50 +351,22 @@ def _build_blocker(path: Path) -> Optional[Blocker]:
     fm, body = _split_frontmatter(text)
     if not fm:
         return None
-    scalars = _parse_simple_scalars(fm)
 
-    # Opt-in is now block_triggers presence. severity controls intensity.
     raw_triggers = _parse_block_triggers(fm)
     if not raw_triggers:
         return None
 
-    severity = scalars.get("severity", "advise")
-    if severity not in ("advise", "block"):
-        severity = "advise"
-
-    title = scalars.get("title", path.stem)
-    triggers: list[Trigger] = []
-    for t in raw_triggers:
-        tool = t.get("tool")
-        if not tool:
-            continue
-        cmd_pat = t.get("pattern")
-        file_pat = t.get("file_pattern")
-        cmd_re: Optional[re.Pattern[str]] = None
-        file_re: Optional[re.Pattern[str]] = None
-        if cmd_pat:
-            try:
-                cmd_re = re.compile(cmd_pat)
-            except re.error:
-                cmd_re = None
-        if file_pat:
-            try:
-                file_re = re.compile(file_pat)
-            except re.error:
-                file_re = None
-        if cmd_re is None and file_re is None:
-            continue
-        triggers.append(Trigger(tool=tool, command_regex=cmd_re, file_path_regex=file_re))
-
+    triggers = tuple(t for t in (_trigger_from_raw(r) for r in raw_triggers) if t is not None)
     if not triggers:
         return None
 
+    scalars = _parse_simple_scalars(fm)
     return Blocker(
         entry_path=path.resolve(),
-        title=title,
+        title=scalars.get("title", path.stem),
         one_line_rule=_extract_one_line_rule(body),
-        severity=severity,
-        triggers=tuple(triggers),
+        severity=_normalize_severity(scalars.get("severity")),
+        triggers=triggers,
     )
 
 
@@ -411,6 +433,21 @@ def clear_cache() -> None:
         _CACHE.clear()
 
 
+def _trigger_fires(trigger: Trigger, tool_name: str, command: str, file_path: str) -> bool:
+    """Return True if this single trigger matches the incoming tool call."""
+    if trigger.tool != tool_name:
+        return False
+    if trigger.command_regex is not None and command and trigger.command_regex.search(command):
+        return True
+    if (
+        trigger.file_path_regex is not None
+        and file_path
+        and trigger.file_path_regex.search(file_path)
+    ):
+        return True
+    return False
+
+
 def find_match(
     blockers: list[Blocker],
     tool_name: str,
@@ -432,9 +469,7 @@ def find_match(
     Returns the first match in iteration order so the rule author can
     rely on stable behaviour when two blockers might both fire.
     """
-    if not blockers:
-        return None
-    if not isinstance(tool_input, dict):
+    if not blockers or not isinstance(tool_input, dict):
         return None
 
     command = tool_input.get("command")
@@ -445,15 +480,8 @@ def find_match(
         file_path = ""
 
     for blocker in blockers:
-        for trigger in blocker.triggers:
-            if trigger.tool != tool_name:
-                continue
-            if trigger.command_regex is not None and command:
-                if trigger.command_regex.search(command):
-                    return blocker
-            if trigger.file_path_regex is not None and file_path:
-                if trigger.file_path_regex.search(file_path):
-                    return blocker
+        if any(_trigger_fires(t, tool_name, command, file_path) for t in blocker.triggers):
+            return blocker
     return None
 
 

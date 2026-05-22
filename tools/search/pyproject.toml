@@ -2,7 +2,8 @@
 name = "agent-mem-search"
 version = "0.1.0"
 description = "Three-mode search (hierarchy / index-led LLM / BM25) over the agent-mem knowledge store."
-requires-python = ">=3.10"
+authors = [{ name = "Nicholas Holden", email = "nicholas.holden@banqora.com" }]
+requires-python = ">=3.12"
 dependencies = [
     "rank-bm25>=0.2.2",
     "claude-agent-sdk>=0.1.29",
@@ -25,7 +26,7 @@ sources = ["."]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py312"
 extend-exclude = [".venv", "build", "dist", "fixtures"]
 
 [tool.ruff.lint]
@@ -60,7 +61,7 @@ exclude_lines = [
 [tool.pyright]
 include = ["bm25.py", "cli.py", "embeddings.py", "frontmatter.py", "aliases.py", "test_*.py"]
 exclude = [".venv", "**/__pycache__", "build", "dist", "fixtures"]
-pythonVersion = "3.10"
+pythonVersion = "3.12"
 typeCheckingMode = "basic"
 reportMissingTypeStubs = false
 reportMissingImports = "warning"

@@ -59,8 +59,9 @@ import struct
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from enum import StrEnum
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from . import priming
 from .paths import knowledge_dir, priming_socket_path
@@ -305,15 +306,66 @@ def _handle_fetch_entry(req: dict) -> dict:
     }
 
 
+class RpcOp(StrEnum):
+    """Wire ``op`` values the daemon RPC accepts. Adding a method = add
+    an entry here and a corresponding handler to ``_HANDLERS``."""
+
+    PRIMING = "priming"
+    BM25_SEARCH = "bm25_search"
+    FETCH_ENTRY = "fetch_entry"
+
+
+_HANDLERS: dict[RpcOp, Callable[[dict], dict]] = {
+    RpcOp.PRIMING: _handle_priming,
+    RpcOp.BM25_SEARCH: _handle_bm25_search,
+    RpcOp.FETCH_ENTRY: _handle_fetch_entry,
+}
+
+
 def _dispatch(req: dict) -> dict:
-    op = req.get("op")
-    if op == "priming":
-        return _handle_priming(req)
-    if op == "bm25_search":
-        return _handle_bm25_search(req)
-    if op == "fetch_entry":
-        return _handle_fetch_entry(req)
-    return {"ok": False, "error": f"unknown op: {op!r}"}
+    op_raw = req.get("op")
+    try:
+        op = RpcOp(op_raw)
+    except ValueError:
+        return {"ok": False, "error": f"unknown op: {op_raw!r}"}
+    return _HANDLERS[op](req)
+
+
+def _read_request(conn: socket.socket) -> tuple[Optional[dict], Optional[dict]]:
+    """Read one length-prefixed JSON request. Returns ``(req, err_resp)``.
+
+    Exactly one of the tuple slots is non-None:
+      - ``(req, None)`` — well-formed request dict.
+      - ``(None, err_resp)`` — wire-ready error response to send back.
+      - ``(None, None)`` — peer closed; caller should bail without reply.
+    """
+    raw = _recv_message(conn)
+    if raw is None:
+        return None, None
+    try:
+        req = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        return None, {"ok": False, "error": f"bad json: {e}"}
+    if not isinstance(req, dict):
+        return None, {"ok": False, "error": "request must be a JSON object"}
+    return req, None
+
+
+def _safe_dispatch(req: dict) -> dict:
+    """Run ``_dispatch`` and turn unexpected exceptions into a JSON error."""
+    try:
+        return _dispatch(req)
+    except Exception as e:
+        log.exception("priming_rpc: handler raised")
+        return {"ok": False, "error": f"handler error: {e.__class__.__name__}"}
+
+
+def _serialise_response(resp: dict) -> bytes:
+    """JSON-encode ``resp`` with a fallback for unserialisable payloads."""
+    try:
+        return json.dumps(resp).encode("utf-8")
+    except (TypeError, ValueError) as e:
+        return json.dumps({"ok": False, "error": f"unserializable response: {e}"}).encode("utf-8")
 
 
 def _handle_connection(conn: socket.socket, addr) -> None:
@@ -321,31 +373,18 @@ def _handle_connection(conn: socket.socket, addr) -> None:
     deadline = time.monotonic() + SERVER_REQUEST_TIMEOUT_S
     try:
         conn.settimeout(SERVER_REQUEST_TIMEOUT_S)
-        raw = _recv_message(conn)
-        if raw is None:
+        req, err_resp = _read_request(conn)
+        if req is None and err_resp is None:
             return
-        try:
-            req = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as e:
-            resp = {"ok": False, "error": f"bad json: {e}"}
+        if err_resp is not None:
+            resp = err_resp
+        elif time.monotonic() > deadline:
+            resp = {"ok": False, "error": "server-side timeout before dispatch"}
         else:
-            if not isinstance(req, dict):
-                resp = {"ok": False, "error": "request must be a JSON object"}
-            elif time.monotonic() > deadline:
-                resp = {"ok": False, "error": "server-side timeout before dispatch"}
-            else:
-                try:
-                    resp = _dispatch(req)
-                except Exception as e:
-                    log.exception("priming_rpc: handler raised")
-                    resp = {"ok": False, "error": f"handler error: {e.__class__.__name__}"}
+            assert req is not None  # narrowed by the branches above
+            resp = _safe_dispatch(req)
 
-        try:
-            body = json.dumps(resp).encode("utf-8")
-        except (TypeError, ValueError) as e:
-            body = json.dumps({"ok": False, "error": f"unserializable response: {e}"}).encode(
-                "utf-8"
-            )
+        body = _serialise_response(resp)
 
         try:
             _send_message(conn, body)

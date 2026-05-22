@@ -185,6 +185,60 @@ Read the daily log above and compile it into wiki articles following the schema 
     return cost
 
 
+def _resolve_target(file_arg: str) -> Path:
+    """Resolve a ``--file`` argument to an absolute log path.
+
+    Tries the argument as-is, then under ``DAILY_DIR``, then under
+    ``STORE_DIR``. Exits with code 1 if none of the candidates exist.
+    """
+    target = Path(file_arg)
+    if not target.is_absolute():
+        target = DAILY_DIR / target.name
+    if not target.exists():
+        target = STORE_DIR / file_arg
+    if not target.exists():
+        print(f"Error: {file_arg} not found")
+        sys.exit(1)
+    return target
+
+
+def _select_files(args: argparse.Namespace, state: dict) -> list[Path]:
+    """Decide which daily logs to compile this run.
+
+    - ``--file`` → exactly that one (resolved via :func:`_resolve_target`).
+    - ``--all`` → every log under ``DAILY_DIR``.
+    - default → only logs whose content hash has changed since the last
+      run (or never been compiled).
+    """
+    if args.file:
+        return [_resolve_target(args.file)]
+
+    all_logs = list_raw_files()
+    if args.all:
+        return all_logs
+
+    changed: list[Path] = []
+    for log_path in all_logs:
+        prev = state.get("ingested", {}).get(log_path.name, {})
+        if not prev or prev.get("hash") != file_hash(log_path):
+            changed.append(log_path)
+    return changed
+
+
+def _run_compile_loop(to_compile: list[Path], state: dict) -> None:
+    """Compile each log sequentially, printing a per-file progress line."""
+    total_cost = 0.0
+    for i, log_path in enumerate(to_compile, 1):
+        print(f"\n[{i}/{len(to_compile)}] Compiling {log_path.name}...")
+        cost = asyncio.run(compile_daily_log(log_path, state))
+        total_cost += cost
+        print("  Done.")
+
+    articles = list_wiki_articles()
+    print(f"\nCompilation complete. Total cost: ${total_cost:.2f}")
+    print(f"Knowledge base: {len(articles)} articles")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Compile daily logs into knowledge articles")
     parser.add_argument("--all", action="store_true", help="Force recompile all logs")
@@ -194,30 +248,7 @@ def main():
 
     ensure_store_dirs()
     state = load_state()
-
-    # Determine which files to compile
-    if args.file:
-        target = Path(args.file)
-        if not target.is_absolute():
-            target = DAILY_DIR / target.name
-        if not target.exists():
-            # Try resolving relative to the store root
-            target = STORE_DIR / args.file
-        if not target.exists():
-            print(f"Error: {args.file} not found")
-            sys.exit(1)
-        to_compile = [target]
-    else:
-        all_logs = list_raw_files()
-        if args.all:
-            to_compile = all_logs
-        else:
-            to_compile = []
-            for log_path in all_logs:
-                rel = log_path.name
-                prev = state.get("ingested", {}).get(rel, {})
-                if not prev or prev.get("hash") != file_hash(log_path):
-                    to_compile.append(log_path)
+    to_compile = _select_files(args, state)
 
     if not to_compile:
         print("Nothing to compile - all daily logs are up to date.")
@@ -230,17 +261,7 @@ def main():
     if args.dry_run:
         return
 
-    # Compile each file sequentially
-    total_cost = 0.0
-    for i, log_path in enumerate(to_compile, 1):
-        print(f"\n[{i}/{len(to_compile)}] Compiling {log_path.name}...")
-        cost = asyncio.run(compile_daily_log(log_path, state))
-        total_cost += cost
-        print("  Done.")
-
-    articles = list_wiki_articles()
-    print(f"\nCompilation complete. Total cost: ${total_cost:.2f}")
-    print(f"Knowledge base: {len(articles)} articles")
+    _run_compile_loop(to_compile, state)
 
 
 if __name__ == "__main__":

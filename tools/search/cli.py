@@ -41,8 +41,9 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import date
+from enum import StrEnum
 from pathlib import Path
-from typing import Iterable, TextIO
+from typing import Callable, Iterable, TextIO
 
 from bm25 import load_or_build
 from frontmatter import (
@@ -176,10 +177,10 @@ Question:
 """
 
 
-async def _run_index_query(knowledge_dir: Path, question: str) -> tuple[str, list[Path]]:
-    """Call Claude Agent SDK to answer via index-led retrieval.
+def _load_sdk() -> tuple[object, object, object, object] | str:
+    """Import the Claude Agent SDK; on failure return a friendly error string.
 
-    Returns (answer_text, list_of_cited_paths).
+    Returns (AssistantMessage, ClaudeAgentOptions, TextBlock, query) on success.
     """
     try:
         from claude_agent_sdk import (  # type: ignore[import-not-found]
@@ -189,10 +190,60 @@ async def _run_index_query(knowledge_dir: Path, question: str) -> tuple[str, lis
             query,
         )
     except ImportError as e:
-        return (
-            f"[index mode unavailable: claude-agent-sdk not installed: {e}]",
-            [],
-        )
+        return f"[index mode unavailable: claude-agent-sdk not installed: {e}]"
+    return AssistantMessage, ClaudeAgentOptions, TextBlock, query
+
+
+async def _drain_sdk_response(
+    query_fn,
+    options_factory: Callable[[], object],
+    prompt: str,
+    AssistantMessage,
+    TextBlock,
+) -> tuple[str, str | None]:
+    """Stream assistant text from the SDK; return (joined_text, error_or_None)."""
+    chunks: list[str] = []
+    try:
+        async for message in query_fn(prompt=prompt, options=options_factory()):
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock):
+                        chunks.append(block.text)
+    except Exception as e:  # noqa: BLE001 — surface SDK failure to user
+        return "", f"[index mode error: {e}]"
+    return "".join(chunks), None
+
+
+def _collect_citations(answer: str) -> list[Path]:
+    """Pull SOURCE: lines out of the assistant answer, deduped, existing-only."""
+    cited: list[Path] = []
+    seen: set[str] = set()
+    for line in answer.splitlines():
+        if not line.startswith("SOURCE:"):
+            continue
+        raw = line[len("SOURCE:") :].strip()
+        if not raw:
+            continue
+        p = Path(raw).expanduser()
+        if not p.exists():
+            continue
+        resolved = p.resolve()
+        key = str(resolved)
+        if key not in seen:
+            seen.add(key)
+            cited.append(resolved)
+    return cited
+
+
+async def _run_index_query(knowledge_dir: Path, question: str) -> tuple[str, list[Path]]:
+    """Call Claude Agent SDK to answer via index-led retrieval.
+
+    Returns (answer_text, list_of_cited_paths).
+    """
+    sdk = _load_sdk()
+    if isinstance(sdk, str):
+        return sdk, []
+    AssistantMessage, ClaudeAgentOptions, TextBlock, query = sdk
 
     index_file = knowledge_dir / "index.md"
     if not index_file.exists():
@@ -207,43 +258,22 @@ async def _run_index_query(knowledge_dir: Path, question: str) -> tuple[str, lis
         question=question,
     )
 
-    answer_chunks: list[str] = []
-    try:
-        async for message in query(
-            prompt=prompt,
-            options=ClaudeAgentOptions(
-                cwd=str(knowledge_dir),
-                system_prompt={"type": "preset", "preset": "claude_code"},
-                allowed_tools=["Read"],
-                permission_mode="acceptEdits",
-                max_turns=15,
-            ),
-        ):
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        answer_chunks.append(block.text)
-    except Exception as e:  # noqa: BLE001 — surface SDK failure to user
-        return (f"[index mode error: {e}]", [])
+    def _make_options():
+        return ClaudeAgentOptions(  # type: ignore[operator]
+            cwd=str(knowledge_dir),
+            system_prompt={"type": "preset", "preset": "claude_code"},
+            allowed_tools=["Read"],
+            permission_mode="acceptEdits",
+            max_turns=15,
+        )
 
-    answer = "".join(answer_chunks)
-    cited: list[Path] = []
-    for line in answer.splitlines():
-        if line.startswith("SOURCE:"):
-            raw = line[len("SOURCE:") :].strip()
-            if raw:
-                p = Path(raw).expanduser()
-                if p.exists():
-                    cited.append(p.resolve())
-    # Dedupe preserving order.
-    seen: set[str] = set()
-    cited_unique: list[Path] = []
-    for p in cited:
-        key = str(p)
-        if key not in seen:
-            seen.add(key)
-            cited_unique.append(p)
-    return answer, cited_unique
+    answer, err = await _drain_sdk_response(
+        query, _make_options, prompt, AssistantMessage, TextBlock
+    )
+    if err is not None:
+        return err, []
+
+    return answer, _collect_citations(answer)
 
 
 def index_mode(knowledge_dir: Path, question: str) -> tuple[str, list[Hit]]:
@@ -506,6 +536,53 @@ def _edit_in_editor(path: Path) -> None:
     subprocess.call([editor, str(path)])
 
 
+def _print_noninteractive_review(knowledge_dir: Path, entries: list[Path]) -> None:
+    total = len(entries)
+    print(f"{total} provisional entr{'y' if total == 1 else 'ies'} would be reviewed:")
+    for i, p in enumerate(entries, start=1):
+        short = _short_id(knowledge_dir, p)
+        print(f"  [{i}/{total}] {short}  ({p})")
+
+
+class _ReviewSignal(StrEnum):
+    NEXT = "next"  # done with this entry, move on
+    QUIT = "quit"  # exit cmd_review immediately
+    UNKNOWN = "unknown"  # re-prompt for action
+
+
+def _apply_review_action(action: str, path: Path, knowledge_dir: Path) -> _ReviewSignal:
+    """Apply a single review action to ``path``. Returns whether to move on, quit, or re-prompt."""
+    if action in {"p", "promote"}:
+        try:
+            set_status(path, "confirmed")
+            print("  -> promoted to confirmed")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ! failed to promote: {e}", file=sys.stderr)
+        return _ReviewSignal.NEXT
+    if action in {"r", "reject"}:
+        rc = cmd_forget(knowledge_dir, str(path))
+        if rc != 0:
+            print("  ! archive failed (see above)", file=sys.stderr)
+        return _ReviewSignal.NEXT
+    if action in {"e", "edit"}:
+        _edit_in_editor(path)
+        # Re-read to surface user changes before moving on.
+        try:
+            fm_after, _ = fm_read(path)
+            print(f"  -> edited (status now: {fm_after.get('status', '?')})")
+        except FrontmatterError as e:
+            print(f"  ! file no longer parses: {e}", file=sys.stderr)
+        return _ReviewSignal.NEXT
+    if action in {"s", "skip", ""}:
+        print("  -> skipped")
+        return _ReviewSignal.NEXT
+    if action in {"q", "quit"}:
+        print("Quitting; remaining entries untouched.")
+        return _ReviewSignal.QUIT
+    print(f"  (unknown action: {action!r})")
+    return _ReviewSignal.UNKNOWN
+
+
 def cmd_review(
     knowledge_dir: Path,
     *,
@@ -524,10 +601,7 @@ def cmd_review(
         return 0
 
     if noninteractive:
-        print(f"{total} provisional entr{'y' if total == 1 else 'ies'} would be reviewed:")
-        for i, p in enumerate(entries, start=1):
-            short = _short_id(knowledge_dir, p)
-            print(f"  [{i}/{total}] {short}  ({p})")
+        _print_noninteractive_review(knowledge_dir, entries)
         return 0
 
     in_stream = stdin if stdin is not None else sys.stdin
@@ -547,35 +621,12 @@ def cmd_review(
             if not raw:
                 print("\n(no more input — quitting)")
                 return 0
-            action = raw.strip().lower()
-            if action in {"p", "promote"}:
-                try:
-                    set_status(p, "confirmed")
-                    print("  -> promoted to confirmed")
-                except Exception as e:  # noqa: BLE001
-                    print(f"  ! failed to promote: {e}", file=sys.stderr)
-                break
-            if action in {"r", "reject"}:
-                rc = cmd_forget(knowledge_dir, str(p))
-                if rc != 0:
-                    print("  ! archive failed (see above)", file=sys.stderr)
-                break
-            if action in {"e", "edit"}:
-                _edit_in_editor(p)
-                # Re-read to surface user changes before moving on.
-                try:
-                    fm_after, _ = fm_read(p)
-                    print(f"  -> edited (status now: {fm_after.get('status', '?')})")
-                except FrontmatterError as e:
-                    print(f"  ! file no longer parses: {e}", file=sys.stderr)
-                break
-            if action in {"s", "skip", ""}:
-                print("  -> skipped")
-                break
-            if action in {"q", "quit"}:
-                print("Quitting; remaining entries untouched.")
+            signal = _apply_review_action(raw.strip().lower(), p, knowledge_dir)
+            if signal is _ReviewSignal.QUIT:
                 return 0
-            print(f"  (unknown action: {action!r})")
+            if signal is _ReviewSignal.NEXT:
+                break
+            # UNKNOWN — loop and re-prompt
     return 0
 
 
@@ -774,17 +825,15 @@ def run_doctor(knowledge_dir: Path) -> DoctorReport:
     )
 
 
-def cmd_doctor(knowledge_dir: Path) -> int:
-    report = run_doctor(knowledge_dir)
-    home = _resolve_agent_mem_home(knowledge_dir)
-
+def _print_doctor_header(home: Path, knowledge_dir: Path) -> None:
     print("agent-mem doctor")
     print("=" * 60)
     print(f"home          : {home}")
     print(f"knowledge dir : {knowledge_dir}")
     print()
 
-    # Corpus stats.
+
+def _print_doctor_corpus(report: DoctorReport) -> None:
     print(f"Corpus: {report.total_entries} entr{'y' if report.total_entries == 1 else 'ies'}")
     if report.counts_by_status:
         print("  by status:")
@@ -796,13 +845,12 @@ def cmd_doctor(knowledge_dir: Path) -> int:
             print(f"    {scope:>25}  {count}")
     print()
 
-    # Daemon.
-    if report.daemon_status == "running":
-        marker = "[OK]"
-    elif report.daemon_status == "stale":
-        marker = "[!!]"
-    else:
-        marker = "[--]"
+
+_DAEMON_MARKERS = {"running": "[OK]", "stale": "[!!]"}
+
+
+def _print_doctor_daemon(report: DoctorReport) -> None:
+    marker = _DAEMON_MARKERS.get(report.daemon_status, "[--]")
     print(f"Daemon: {marker} {report.daemon_status}", end="")
     if report.daemon_pid is not None:
         print(f"  (pid {report.daemon_pid})")
@@ -810,21 +858,24 @@ def cmd_doctor(knowledge_dir: Path) -> int:
         print()
     print()
 
-    # Cost (tracking only; enforcement cap was removed).
+
+def _print_doctor_cost(report: DoctorReport) -> None:
     print(
         f"Cost: today ${report.cost_today:.4f}; lifetime ${report.cost_lifetime:.4f}  "
         f"(cost cap: disabled)"
     )
     print()
 
-    # Pending nudges.
+
+def _print_doctor_nudges(report: DoctorReport) -> None:
     if report.pending_nudges < 0:
         print("Pending nudges: (no pending-nudges.md)")
     else:
         print(f"Pending nudges: {report.pending_nudges}")
     print()
 
-    # Lint output.
+
+def _print_doctor_lint(report: DoctorReport) -> None:
     print("Lint (structural-only):")
     print("-" * 60)
     if report.lint_rc < 0:
@@ -833,6 +884,18 @@ def cmd_doctor(knowledge_dir: Path) -> int:
         print(report.lint_output.strip() or "(no output)")
         print(f"(exit {report.lint_rc})")
     print("-" * 60)
+
+
+def cmd_doctor(knowledge_dir: Path) -> int:
+    report = run_doctor(knowledge_dir)
+    home = _resolve_agent_mem_home(knowledge_dir)
+
+    _print_doctor_header(home, knowledge_dir)
+    _print_doctor_corpus(report)
+    _print_doctor_daemon(report)
+    _print_doctor_cost(report)
+    _print_doctor_nudges(report)
+    _print_doctor_lint(report)
 
     if report.issues:
         print()
@@ -947,58 +1010,40 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = _build_parser()
-    args = parser.parse_args(argv)
-    knowledge_dir = _resolve_knowledge_dir(args.knowledge_dir)
+class Subcommand(StrEnum):
+    """Subcommand names — must match the strings registered in ``_build_parser``."""
 
-    if args.command == "review":
-        return cmd_review(knowledge_dir, noninteractive=args.noninteractive)
-    if args.command == "promote":
-        return cmd_promote(knowledge_dir, args.identifier)
-    if args.command == "demote":
-        return cmd_demote(knowledge_dir, args.identifier)
-    if args.command == "forget":
-        return cmd_forget(knowledge_dir, args.identifier)
-    if args.command == "doctor":
-        return cmd_doctor(knowledge_dir)
+    SEARCH = "search"
+    REVIEW = "review"
+    PROMOTE = "promote"
+    DEMOTE = "demote"
+    FORGET = "forget"
+    DOCTOR = "doctor"
 
-    if args.command != "search":
-        parser.error(f"unknown command: {args.command}")
-        return 2  # unreachable, satisfies type checker
 
-    query_text = " ".join(args.query).strip()
+def _run_search_bm25(knowledge_dir: Path, query_text: str, args: argparse.Namespace) -> int:
+    hits = bm25_mode(knowledge_dir, query_text, k=args.k, force_rebuild=args.rebuild)
+    _print_hits(hits, header=f"BM25 results for: {query_text!r}")
+    if not hits:
+        print("\n(no BM25 hits — try --index for paraphrase-tolerant retrieval)")
+    return 0
 
-    # Hierarchy mode — no query needed.
-    if args.hierarchy is not None:
-        subpath = args.hierarchy or None
-        return hierarchy_mode(knowledge_dir, subpath)
 
-    if not query_text:
-        parser.error("query is required unless --hierarchy is used")
-        return 2
+def _run_search_index(knowledge_dir: Path, query_text: str) -> int:
+    answer, hits = index_mode(knowledge_dir, query_text)
+    print(f"Index-led answer for: {query_text!r}")
+    print("-" * 60)
+    print(answer.strip() or "(no answer)")
+    print("-" * 60)
+    _print_hits(hits, header="Entries cited:")
+    return 0
 
-    if args.bm25:
-        hits = bm25_mode(knowledge_dir, query_text, k=args.k, force_rebuild=args.rebuild)
-        _print_hits(hits, header=f"BM25 results for: {query_text!r}")
-        if not hits:
-            print("\n(no BM25 hits — try --index for paraphrase-tolerant retrieval)")
-        return 0
 
-    if args.index:
-        answer, hits = index_mode(knowledge_dir, query_text)
-        print(f"Index-led answer for: {query_text!r}")
-        print("-" * 60)
-        print(answer.strip() or "(no answer)")
-        print("-" * 60)
-        _print_hits(hits, header="Entries cited:")
-        return 0
-
-    # Merged default.
+def _run_search_merged(knowledge_dir: Path, query_text: str, k: int) -> int:
     print(f"Merged search for: {query_text!r}")
     print("Running BM25 + index-led retrieval, deduplicating by file path…")
     print()
-    hits, llm_answer = merged_mode(knowledge_dir, query_text, k=args.k)
+    hits, llm_answer = merged_mode(knowledge_dir, query_text, k=k)
     _print_hits(hits, header="Entries:")
 
     print()
@@ -1014,6 +1059,52 @@ def main(argv: list[str] | None = None) -> int:
             "doesn't intersect any stored entries."
         )
     return 0
+
+
+def _dispatch_search(
+    knowledge_dir: Path, args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> int:
+    # Hierarchy mode — no query needed.
+    if args.hierarchy is not None:
+        subpath = args.hierarchy or None
+        return hierarchy_mode(knowledge_dir, subpath)
+
+    query_text = " ".join(args.query).strip()
+    if not query_text:
+        parser.error("query is required unless --hierarchy is used")
+        return 2  # unreachable; parser.error raises SystemExit
+
+    if args.bm25:
+        return _run_search_bm25(knowledge_dir, query_text, args)
+    if args.index:
+        return _run_search_index(knowledge_dir, query_text)
+    return _run_search_merged(knowledge_dir, query_text, args.k)
+
+
+# Dispatch table: each handler takes (knowledge_dir, args, parser) and returns an exit code.
+# Centralising this means `main` is just "parse args, route to handler".
+_HANDLERS: dict[Subcommand, Callable[[Path, argparse.Namespace, argparse.ArgumentParser], int]] = {
+    Subcommand.SEARCH: _dispatch_search,
+    Subcommand.REVIEW: lambda kd, args, _p: cmd_review(kd, noninteractive=args.noninteractive),
+    Subcommand.PROMOTE: lambda kd, args, _p: cmd_promote(kd, args.identifier),
+    Subcommand.DEMOTE: lambda kd, args, _p: cmd_demote(kd, args.identifier),
+    Subcommand.FORGET: lambda kd, args, _p: cmd_forget(kd, args.identifier),
+    Subcommand.DOCTOR: lambda kd, _args, _p: cmd_doctor(kd),
+}
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    knowledge_dir = _resolve_knowledge_dir(args.knowledge_dir)
+
+    try:
+        sub = Subcommand(args.command)
+    except ValueError:
+        parser.error(f"unknown command: {args.command}")
+        return 2  # unreachable; parser.error raises SystemExit
+
+    return _HANDLERS[sub](knowledge_dir, args, parser)
 
 
 if __name__ == "__main__":

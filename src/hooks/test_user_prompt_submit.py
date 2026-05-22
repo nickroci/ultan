@@ -111,14 +111,20 @@ class _FakeRpcServer(threading.Thread):
     """Minimal length-prefixed-JSON server used to mock the daemon.
 
     The handler is a callable ``(request_dict) -> response_dict`` so
-    individual tests can canned-respond, raise, or sleep."""
+    individual tests can canned-respond, raise, or sleep.
+
+    NOTE: never name an instance attribute ``_stop`` on a Thread
+    subclass — ``threading.Thread._stop`` is an internal method that
+    ``Thread.join()`` calls during cleanup. Shadowing it with an Event
+    makes join() raise ``TypeError: 'Event' object is not callable``.
+    """
 
     def __init__(self, socket_path: Path, handler):
         super().__init__(daemon=True, name="fake-priming-rpc")
         self._socket_path = socket_path
         self._handler = handler
         self._server: socket.socket | None = None
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         self._ready = threading.Event()
 
     def start_and_wait(self, timeout: float = 2.0) -> None:
@@ -141,7 +147,7 @@ class _FakeRpcServer(threading.Thread):
         self._server = self._bind()
         self._ready.set()
         try:
-            while not self._stop.is_set():
+            while not self._stop_event.is_set():
                 try:
                     conn, _ = self._server.accept()
                 except socket.timeout:
@@ -197,7 +203,7 @@ class _FakeRpcServer(threading.Thread):
                 pass
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
         if self._server:
             try:
                 self._server.close()
@@ -339,10 +345,14 @@ def test_take_nudges_clears_file_even_when_over_budget(tmp_path: Path):
     assert not nudges_path.exists()  # cleared
 
 
-def test_take_nudges_filters_cross_project_and_requeues(tmp_path: Path):
+def test_take_nudges_filters_cross_project_and_requeues(tmp_path: Path, monkeypatch):
     """A vol-predictor nudge surfaced in an agent-mem session must be
     skipped AND re-queued for a future session in the matching project.
     Global and current-project nudges are delivered normally."""
+    # Pin AGENT_MEM_HOME to a fresh tmp dir so the user's real
+    # ~/.agent-mem/project-aliases.json (which translates agent-mem to a
+    # different canonical slug) can't bleed into the test.
+    monkeypatch.setenv("AGENT_MEM_HOME", str(tmp_path))
     nudges_path = tmp_path / "pending-nudges.md"
     state_path = tmp_path / "state" / "nudge-budget-s1.json"
     blocks = [

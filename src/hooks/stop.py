@@ -20,12 +20,6 @@ import re
 import sys
 from pathlib import Path
 
-# Recursion guard FIRST. Stop fires at the end of every assistant turn —
-# including SDK-spawned subagent turns from flush.py. Without this guard
-# every flush.py invocation would fire an extra Stop event.
-if os.environ.get("CLAUDE_INVOKED_BY"):
-    sys.exit(0)
-
 _THIS_DIR = Path(__file__).resolve().parent
 _CODE_ROOT = _THIS_DIR.parent
 _SCRIPTS_DIR = _CODE_ROOT / "scripts"
@@ -38,6 +32,12 @@ from _events import append_event  # noqa: E402
 
 
 def main() -> None:
+    # Recursion guard. Stop fires at the end of every assistant turn —
+    # including SDK-spawned subagent turns from flush.py. Without this
+    # guard every flush.py invocation would fire an extra Stop event.
+    if os.environ.get("CLAUDE_INVOKED_BY"):
+        return
+
     try:
         raw_input = sys.stdin.read()
         try:
@@ -54,5 +54,5 @@ def main() -> None:
     append_event("Stop", hook_input, payload={})
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()

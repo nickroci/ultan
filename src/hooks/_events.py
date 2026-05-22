@@ -85,6 +85,84 @@ def _truncate_payload(payload: Mapping[str, Any], budget: int) -> dict:
     return out
 
 
+def _dumps(event: dict) -> Optional[bytes]:
+    """Compact-ASCII JSON encode; return None on serialisation error."""
+    try:
+        return json.dumps(event, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    except (TypeError, ValueError):
+        return None
+
+
+def _encode_within_budget(event: dict) -> Optional[bytes]:
+    """Serialise ``event`` to a JSON line that fits in ``MAX_LINE_BYTES``.
+
+    Cascade:
+      1. Try as-is.
+      2. If the payload was un-serialisable, drop it and retry.
+      3. If the line is over budget, shrink string values in the payload.
+      4. If still over budget, drop the payload entirely.
+
+    Returns the encoded bytes (without trailing newline) or None if every
+    attempt failed.
+    """
+    line = _dumps(event)
+    if line is None:
+        # Un-serialisable payload. Drop and retry — the daemon can still
+        # use the event as a turn marker without payload data.
+        event["payload"] = {}
+        line = _dumps(event)
+        if line is None:
+            return None
+
+    if len(line) + 1 <= MAX_LINE_BYTES:
+        return line
+
+    # Over budget. Shrink string values first.
+    if event["payload"]:
+        event["payload"] = _truncate_payload(event["payload"], budget=2000)
+        line = _dumps(event)
+        if line is None:
+            return None
+
+    if len(line) + 1 <= MAX_LINE_BYTES:
+        return line
+
+    # Still over. Drop the payload entirely.
+    event["payload"] = {}
+    line = _dumps(event)
+    if line is None or len(line) + 1 > MAX_LINE_BYTES:
+        return None
+    return line
+
+
+def _write_line(line_bytes: bytes) -> None:
+    """Append ``line_bytes + '\\n'`` to the events file. Silently swallows IO."""
+    try:
+        path = _events_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except (OSError, ImportError):
+        return
+
+    # O_APPEND for atomicity. We open low-level, write, close — no
+    # buffering layer to flush. ``os.O_APPEND`` plus a single write()
+    # under PIPE_BUF is atomic across concurrent writers on Linux+macOS
+    # for regular files; see open(2) and write(2).
+    try:
+        fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    except OSError:
+        return
+
+    try:
+        os.write(fd, line_bytes + b"\n")
+    except OSError:
+        pass
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 def append_event(
     event_type: str,
     hook_input: Mapping[str, Any],
@@ -136,69 +214,7 @@ def append_event(
         "payload": dict(payload) if payload else {},
     }
 
-    # Serialise. ``separators`` keeps the line compact; ``ensure_ascii``
-    # avoids surprising the daemon's parser with non-ASCII (it handles
-    # it fine, but compact ASCII is one fewer thing to worry about over
-    # the wire).
-    try:
-        line = json.dumps(event, separators=(",", ":"), ensure_ascii=False)
-    except (TypeError, ValueError):
-        # Payload contained something un-serialisable. Drop the payload,
-        # keep the event — the daemon can still use it as a turn marker.
-        event["payload"] = {}
-        try:
-            line = json.dumps(event, separators=(",", ":"), ensure_ascii=False)
-        except (TypeError, ValueError):
-            return
-
-    line_bytes = line.encode("utf-8")
-    if len(line_bytes) + 1 > MAX_LINE_BYTES:
-        # Over budget. Try to shrink the payload first.
-        if event["payload"]:
-            shrunk = _truncate_payload(event["payload"], budget=2000)
-            event["payload"] = shrunk
-            try:
-                line = json.dumps(event, separators=(",", ":"), ensure_ascii=False)
-                line_bytes = line.encode("utf-8")
-            except (TypeError, ValueError):
-                return
-        # Still too big? Drop the payload entirely.
-        if len(line_bytes) + 1 > MAX_LINE_BYTES:
-            event["payload"] = {}
-            try:
-                line = json.dumps(event, separators=(",", ":"), ensure_ascii=False)
-                line_bytes = line.encode("utf-8")
-            except (TypeError, ValueError):
-                return
-
-    # Resolve path + ensure parent dir exists. The parent-dir create is
-    # idempotent and cheap (<1 ms) but only happens once per process
-    # because the OS caches the inode.
-    try:
-        path = _events_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-    except (OSError, ImportError):
+    line_bytes = _encode_within_budget(event)
+    if line_bytes is None:
         return
-
-    # O_APPEND for atomicity. We open low-level, write, close — no
-    # buffering layer to flush. ``os.O_APPEND`` plus a single write()
-    # under PIPE_BUF is atomic across concurrent writers on Linux+macOS
-    # for regular files; see open(2) and write(2).
-    try:
-        fd = os.open(
-            str(path),
-            os.O_WRONLY | os.O_APPEND | os.O_CREAT,
-            0o644,
-        )
-    except OSError:
-        return
-
-    try:
-        os.write(fd, line_bytes + b"\n")
-    except OSError:
-        pass
-    finally:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+    _write_line(line_bytes)

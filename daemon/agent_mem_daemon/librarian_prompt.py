@@ -416,34 +416,49 @@ def _split_applies_when(raw: Any) -> List[str]:
     return []
 
 
+_APPLIES_WHEN_SKIP_TOP = {"index.md", "log.md", "README.md"}
+
+
+def _is_listable_entry(md: Path, knowledge_dir: Path) -> bool:
+    """True iff ``md`` is a candidate entry file for the applies-when table."""
+    if "_archive" in md.parts:
+        return False
+    if md.name == "README.md":
+        return False
+    if md.parent == knowledge_dir and md.name in _APPLIES_WHEN_SKIP_TOP:
+        return False
+    return True
+
+
+def _applies_when_rows_for(md: Path) -> List[str]:
+    """Return the ``<id> | <scope> | <phrase>`` rows for one entry. Empty
+    list if the file is unreadable, has no frontmatter, isn't confirmed,
+    or has no applies-when phrases."""
+    try:
+        text = md.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return []
+    fm = _parse_frontmatter(text)
+    if not fm:
+        return []
+    if str(fm.get("status") or "").lower() != "confirmed":
+        return []
+    lesson_id = str(fm.get("id") or md.stem)
+    scope = str(fm.get("scope") or "global")
+    phrases = _split_applies_when(fm.get("applies-when") or fm.get("applies_when"))
+    return [f"{lesson_id} | {scope} | {phrase}" for phrase in phrases]
+
+
 def build_applies_when_table(knowledge_dir: Path) -> str:
     """Walk every CONFIRMED entry and emit one line per applies-when
     phrase: ``<lesson_id> | <scope> | <applies-when phrase>``."""
-    rows: List[str] = []
     if not knowledge_dir.exists():
         return "(empty — no confirmed entries)"
-    skip_top = {"index.md", "log.md", "README.md"}
+    rows: List[str] = []
     for md in sorted(knowledge_dir.rglob("*.md")):
-        if "_archive" in md.parts:
+        if not _is_listable_entry(md, knowledge_dir):
             continue
-        if md.name == "README.md":
-            continue
-        if md.parent == knowledge_dir and md.name in skip_top:
-            continue
-        try:
-            text = md.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        fm = _parse_frontmatter(text)
-        if not fm:
-            continue
-        status = str(fm.get("status") or "").lower()
-        if status != "confirmed":
-            continue
-        lesson_id = str(fm.get("id") or md.stem)
-        scope = str(fm.get("scope") or "global")
-        for phrase in _split_applies_when(fm.get("applies-when") or fm.get("applies_when")):
-            rows.append(f"{lesson_id} | {scope} | {phrase}")
+        rows.extend(_applies_when_rows_for(md))
     if not rows:
         return "(empty — no confirmed entries)"
     return "\n".join(rows)

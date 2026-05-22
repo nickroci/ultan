@@ -207,67 +207,82 @@ def _rewrite_wikilinks_in_text(text: str, mapping: Dict[str, str]) -> tuple[str,
     return _WIKILINK_RE.sub(repl, text), count
 
 
-def _move_entries_impl(root: Path, args: Dict[str, Any]) -> Dict[str, Any]:
-    """Pure-Python implementation of move_entries — see tool docstring.
+def _move_err(msg: str) -> Dict[str, Any]:
+    """Wire-shaped error response for move_entries."""
+    return {"content": [{"type": "text", "text": f"(move_entries error) {msg}"}]}
 
-    Validates inputs, performs the moves, rewrites inbound wikilinks
-    everywhere in the library, and returns a textual summary the LLM
-    can read.
-    """
 
-    def err(msg: str) -> Dict[str, Any]:
-        return {"content": [{"type": "text", "text": f"(move_entries error) {msg}"}]}
-
-    raw_to = str(args.get("to_folder") or "").strip()
-    raw_files = args.get("files")
-    raw_readme = args.get("readme")
-    # The SDK passes typed-list args through as Python lists already.
-    if not raw_to:
-        return err("missing required arg 'to_folder'")
-    if not isinstance(raw_files, list) or not raw_files:
-        return err("'files' must be a non-empty list of .md paths")
-
-    # Resolve destination folder. Reject path-escape and non-relative paths.
+def _resolve_destination(root: Path, raw_to: str) -> tuple[Path | None, Dict[str, Any] | None]:
+    """Resolve and validate the destination folder. Returns
+    ``(to_folder, None)`` on success or ``(None, err_response)``."""
     to_folder = (root / raw_to).resolve()
     if not _safe_inside(root, to_folder):
-        return err(f"to_folder {raw_to!r} resolves outside the knowledge root")
+        return None, _move_err(f"to_folder {raw_to!r} resolves outside the knowledge root")
+    return to_folder, None
 
-    # Resolve each source path, build (old_link → new_link) mapping.
+
+def _plan_moves(
+    root: Path,
+    to_folder: Path,
+    raw_files: list,
+) -> tuple[list[tuple[Path, Path]] | None, Dict[str, str], Dict[str, Any] | None]:
+    """Validate each source path and build the (src, dst) plan + the
+    wikilink-rewrite mapping. Returns ``(moves, link_mapping, None)`` on
+    success or ``(None, {}, err_response)`` on the first validation
+    failure."""
     moves: List[tuple[Path, Path]] = []
     link_mapping: Dict[str, str] = {}
     for raw in raw_files:
         if not isinstance(raw, str) or not raw.strip():
-            return err(f"each entry in 'files' must be a non-empty string; got {raw!r}")
+            return (
+                None,
+                {},
+                _move_err(f"each entry in 'files' must be a non-empty string; got {raw!r}"),
+            )
         src = (root / raw).resolve()
         if not _safe_inside(root, src):
-            return err(f"source {raw!r} resolves outside the knowledge root")
+            return None, {}, _move_err(f"source {raw!r} resolves outside the knowledge root")
         if not src.exists():
-            return err(f"source {raw!r} does not exist")
+            return None, {}, _move_err(f"source {raw!r} does not exist")
         if not src.is_file():
-            return err(f"source {raw!r} is not a regular file")
+            return None, {}, _move_err(f"source {raw!r} is not a regular file")
         if src.suffix != ".md":
-            return err(f"source {raw!r} is not a .md file")
+            return None, {}, _move_err(f"source {raw!r} is not a .md file")
         dst = (to_folder / src.name).resolve()
         if dst.exists() and dst != src:
-            return err(f"destination {dst.relative_to(root)} already exists; refusing to overwrite")
+            return (
+                None,
+                {},
+                _move_err(
+                    f"destination {dst.relative_to(root)} already exists; refusing to overwrite"
+                ),
+            )
         moves.append((src, dst))
         link_mapping[_path_to_wikilink(src, root)] = _path_to_wikilink(dst, root)
+    return moves, link_mapping, None
 
-    # Create destination folder.
-    to_folder.mkdir(parents=True, exist_ok=True)
 
-    # Optional README.
-    readme_action = "skipped"
-    if isinstance(raw_readme, str) and raw_readme.strip():
-        readme_path = to_folder / "README.md"
-        if readme_path.exists():
-            readme_action = f"left existing {readme_path.relative_to(root)} untouched"
-        else:
-            readme_path.write_text(raw_readme, encoding="utf-8")
-            readme_action = f"wrote {readme_path.relative_to(root)} ({len(raw_readme)} chars)"
+def _maybe_write_readme(to_folder: Path, root: Path, raw_readme: Any) -> str:
+    """Optionally write ``to_folder/README.md``. Returns a human-readable
+    summary of what happened (``"skipped"``, ``"left existing ..."``, or
+    ``"wrote ..."``)."""
+    if not isinstance(raw_readme, str) or not raw_readme.strip():
+        return "skipped"
+    readme_path = to_folder / "README.md"
+    if readme_path.exists():
+        return f"left existing {readme_path.relative_to(root)} untouched"
+    readme_path.write_text(raw_readme, encoding="utf-8")
+    return f"wrote {readme_path.relative_to(root)} ({len(raw_readme)} chars)"
 
-    # Perform moves (read-write-unlink so a partial failure is detectable;
-    # shutil.move would work too but this gives us encoding control).
+
+def _perform_moves(
+    moves: list[tuple[Path, Path]],
+    root: Path,
+) -> tuple[list[str] | None, Dict[str, Any] | None]:
+    """Execute the planned moves on disk. Returns ``(moved_paths, None)``
+    on success or ``(None, err_response)`` on a partial-failure I/O error.
+    Read-write-unlink (not shutil.move) so a partial failure is detectable
+    and encoding stays under our control."""
     moved_paths: List[str] = []
     for src, dst in moves:
         if src == dst:
@@ -276,12 +291,19 @@ def _move_entries_impl(root: Path, args: Dict[str, Any]) -> Dict[str, Any]:
         try:
             content = src.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as e:
-            return err(f"could not read {src.relative_to(root)}: {e}")
+            return None, _move_err(f"could not read {src.relative_to(root)}: {e}")
         dst.write_text(content, encoding="utf-8")
         src.unlink()
         moved_paths.append(f"{src.relative_to(root)} → {dst.relative_to(root)}")
+    return moved_paths, None
 
-    # Rewrite inbound wikilinks across the whole library.
+
+def _rewrite_inbound_wikilinks(
+    root: Path,
+    link_mapping: Dict[str, str],
+) -> tuple[int, list[str]]:
+    """Rewrite every inbound wikilink in the library to its new target.
+    Returns ``(total_rewrites, per_file_summary)``."""
     rewrite_summary: List[str] = []
     total_rewrites = 0
     for md in sorted(root.rglob("*.md")):
@@ -294,8 +316,17 @@ def _move_entries_impl(root: Path, args: Dict[str, Any]) -> Dict[str, Any]:
             md.write_text(new_text, encoding="utf-8")
             rewrite_summary.append(f"{md.relative_to(root)}: {n} link(s) rewritten")
             total_rewrites += n
+    return total_rewrites, rewrite_summary
 
-    # Build the summary the LLM sees.
+
+def _build_move_summary(
+    to_folder: Path,
+    root: Path,
+    readme_action: str,
+    moved_paths: list[str],
+    total_rewrites: int,
+    rewrite_summary: list[str],
+) -> Dict[str, Any]:
     lines = ["move_entries: ok"]
     lines.append(f"  destination: {to_folder.relative_to(root)}/")
     lines.append(f"  readme: {readme_action}")
@@ -309,3 +340,44 @@ def _move_entries_impl(root: Path, args: Dict[str, Any]) -> Dict[str, Any]:
     for r in rewrite_summary:
         lines.append(f"    - {r}")
     return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+
+
+def _move_entries_impl(root: Path, args: Dict[str, Any]) -> Dict[str, Any]:
+    """Pure-Python implementation of move_entries — see tool docstring.
+
+    Validates inputs, performs the moves, rewrites inbound wikilinks
+    everywhere in the library, and returns a textual summary the LLM
+    can read.
+    """
+    raw_to = str(args.get("to_folder") or "").strip()
+    raw_files = args.get("files")
+    raw_readme = args.get("readme")
+    # The SDK passes typed-list args through as Python lists already.
+    if not raw_to:
+        return _move_err("missing required arg 'to_folder'")
+    if not isinstance(raw_files, list) or not raw_files:
+        return _move_err("'files' must be a non-empty list of .md paths")
+
+    to_folder, err = _resolve_destination(root, raw_to)
+    if err is not None:
+        return err
+    assert to_folder is not None  # narrowed
+
+    moves, link_mapping, err = _plan_moves(root, to_folder, raw_files)
+    if err is not None:
+        return err
+    assert moves is not None  # narrowed
+
+    to_folder.mkdir(parents=True, exist_ok=True)
+    readme_action = _maybe_write_readme(to_folder, root, raw_readme)
+
+    moved_paths, err = _perform_moves(moves, root)
+    if err is not None:
+        return err
+    assert moved_paths is not None  # narrowed
+
+    total_rewrites, rewrite_summary = _rewrite_inbound_wikilinks(root, link_mapping)
+
+    return _build_move_summary(
+        to_folder, root, readme_action, moved_paths, total_rewrites, rewrite_summary
+    )

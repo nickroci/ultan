@@ -207,6 +207,101 @@ def test_session_bucket_returns_none_when_slug_empty(tmp_path: Path):
     assert aliases.session_bucket(home, tmp_path, "") is None
 
 
+# ── Lower-level edge cases ──────────────────────────────────────────────
+
+
+def test_find_repo_root_returns_none_at_filesystem_root():
+    """Walking up from ``/`` exits the loop without finding ``.git``."""
+    assert aliases._find_repo_root(Path("/")) is None
+
+
+def test_find_repo_root_handles_resolve_oserror(monkeypatch, tmp_path: Path):
+    """If ``.resolve()`` raises an OSError, the function returns None."""
+
+    def fake_resolve(self):
+        raise OSError("simulated")
+
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
+    assert aliases._find_repo_root(tmp_path) is None
+
+
+def test_session_bucket_handles_resolve_exception_on_candidate(
+    monkeypatch,
+    tmp_path: Path,
+):
+    """If ``candidate_path.resolve()`` raises, fall back to ``candidate_path.name``."""
+    home = tmp_path / "agent-mem-home"
+    home.mkdir()
+    repo = tmp_path / "my-project"
+    repo.mkdir()
+
+    real_resolve = Path.resolve
+
+    def fake_resolve(self):
+        # Only blow up on the candidate path's resolve so _find_repo_root path
+        # used by the outer logic still works.
+        if self == repo:
+            raise OSError("simulated")
+        return real_resolve(self)
+
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
+    # No .git on repo, so _find_repo_root returns None and candidate_path = cwd.
+    out = aliases.session_bucket(home, repo, "some-slug")
+    assert out == "my-project"  # fell back to .name
+
+
+def test_session_bucket_skips_non_dir_entries(tmp_path: Path):
+    """A file sitting beside bucket directories must not crash the iteration."""
+    home = tmp_path / "agent-mem-home"
+    home.mkdir()
+    projects = home / "knowledge" / "projects"
+    projects.mkdir(parents=True)
+    # Real bucket
+    (projects / "real-bucket").mkdir()
+    # Stray file — should be skipped by the ``if not bucket_dir.is_dir()`` guard.
+    (projects / "stray.txt").write_text("hi\n", encoding="utf-8")
+
+    repo = tmp_path / "real-bucket"
+    repo.mkdir()
+    out = aliases.session_bucket(home, repo, "real-bucket")
+    assert out == "real-bucket"
+
+
+def test_session_bucket_swallows_atomic_write_failure(monkeypatch, tmp_path: Path):
+    """If the alias file can't be written, session_bucket must still return
+    the candidate — auto-bootstrap is best-effort."""
+    home = tmp_path / "agent-mem-home"
+    home.mkdir()
+    _make_bucket(home, "agent-mem")
+    repo = _make_git_repo(tmp_path / "agent-mem")
+
+    def fake_write(*a, **kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(aliases, "_atomic_write_aliases", fake_write)
+    out = aliases.session_bucket(home, repo, "github.com-x-ultan")
+    assert out == "agent-mem"
+    # Nothing persisted (since write failed).
+    assert not aliases.aliases_path(home).exists()
+
+
+def test_ensure_alias_returns_none_when_slug_is_none(tmp_path: Path):
+    """``ensure_alias_for_cwd`` with ``slug=None`` -> always None."""
+    home = tmp_path / "agent-mem-home"
+    home.mkdir()
+    out = aliases.ensure_alias_for_cwd(home, tmp_path, None)
+    assert out is None
+
+
+def test_load_aliases_filters_non_string_values(tmp_path: Path):
+    """Values that aren't strings or ints are dropped silently."""
+    (tmp_path / "project-aliases.json").write_text(
+        '{"a": "x", "b": ["nested"], "c": 42}', encoding="utf-8"
+    )
+    out = aliases.load_aliases(tmp_path)
+    assert out == {"a": "x", "c": "42"}
+
+
 def test_ensure_alias_adds_when_git_arrives_later(tmp_path: Path):
     """Simulate the 'I added a git remote after the bucket existed'
     flow: first session was no-git so no alias file; then user runs

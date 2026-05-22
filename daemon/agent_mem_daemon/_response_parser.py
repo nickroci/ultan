@@ -45,6 +45,72 @@ class ParseDiagnostic:
     error: Optional[str] = field(default=None)
 
 
+def _strip_code_fence(text: str) -> str:
+    """Peel a leading markdown code fence (```json ... ```) if present."""
+    if not text.startswith("```"):
+        return text
+    lines = text.splitlines()
+    inner = lines[1:]
+    if inner and inner[-1].lstrip().startswith("```"):
+        inner = inner[:-1]
+    return "\n".join(inner).strip()
+
+
+@dataclass
+class _BraceScanner:
+    """Mutable state for the balanced-brace walk. Separating it from
+    ``_collect_balanced_blocks`` keeps the loop body straight-line."""
+
+    depth: int = 0
+    in_string: bool = False
+    escape: bool = False
+    start: int = -1
+
+
+def _advance_scanner(state: _BraceScanner, i: int, ch: str) -> Optional[Tuple[int, int]]:
+    """Feed one character into the scanner. Returns a ``(start, end)``
+    slice (inclusive end) when a top-level balanced block just closed,
+    else ``None``."""
+    if state.escape:
+        state.escape = False
+        return None
+    if state.in_string:
+        if ch == "\\":
+            state.escape = True
+        elif ch == '"':
+            state.in_string = False
+        return None
+    if ch == '"':
+        state.in_string = True
+        return None
+    if ch == "{":
+        if state.depth == 0:
+            state.start = i
+        state.depth += 1
+        return None
+    if ch == "}":
+        state.depth -= 1
+        if state.depth == 0 and state.start >= 0:
+            block = (state.start, i)
+            state.start = -1
+            return block
+    return None
+
+
+def _collect_balanced_blocks(text: str) -> list[str]:
+    """Walk ``text`` left-to-right and return every top-level balanced
+    ``{...}`` substring. String-aware so braces inside JSON strings don't
+    confuse the depth counter."""
+    blocks: list[str] = []
+    state = _BraceScanner()
+    for i, ch in enumerate(text):
+        closed = _advance_scanner(state, i, ch)
+        if closed is not None:
+            s, e = closed
+            blocks.append(text[s : e + 1])
+    return blocks
+
+
 def extract_json_blob(text: str) -> Optional[str]:
     """Find the LAST top-level balanced ``{...}`` block in ``text``.
 
@@ -66,47 +132,8 @@ def extract_json_blob(text: str) -> Optional[str]:
     if not text or not text.strip():
         return None
 
-    stripped = text.strip()
-
-    # ── Step 1: strip a markdown fence if present ────────────────────
-    if stripped.startswith("```"):
-        # Drop the opening fence line (```json or ``` or ```anything).
-        lines = stripped.splitlines()
-        inner = lines[1:]
-        # Drop trailing closing fence if present.
-        if inner and inner[-1].lstrip().startswith("```"):
-            inner = inner[:-1]
-        stripped = "\n".join(inner).strip()
-
-    # ── Step 2: collect every top-level balanced { ... } ─────────────
-    blocks: list[str] = []
-    depth = 0
-    in_string = False
-    escape = False
-    start = -1
-
-    for i, ch in enumerate(stripped):
-        if escape:
-            escape = False
-            continue
-        if in_string:
-            if ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_string = False
-            continue
-        if ch == '"':
-            in_string = True
-        elif ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0 and start >= 0:
-                blocks.append(stripped[start : i + 1])
-                start = -1
-
+    stripped = _strip_code_fence(text.strip())
+    blocks = _collect_balanced_blocks(stripped)
     if blocks:
         return blocks[-1]
 

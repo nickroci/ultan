@@ -661,45 +661,31 @@ _REQUIRED_FRONTMATTER_FIELDS = (
 MAX_FLAT_DIR_ENTRIES = 5
 
 
-def check_invariants(knowledge_dir_path: Path) -> List[str]:
-    """Walk the knowledge tree and return a list of invariant violations.
-
-    Each violation is a one-line human-readable string. Empty list means
-    everything is well-formed. The Scholar calls this after executing
-    approved actions and logs WARN on each violation; this is the safety
-    net for "the Scholar should have caught it" cases.
-
-    Checks:
-      1. Every directory has a README.md.
-      2. No directory has >MAX_FLAT_DIR_ENTRIES entry .md files.
-      3. Every wikilink resolves.
-      4. Every entry's frontmatter has the required fields.
-    """
-    out: List[str] = []
-    if not knowledge_dir_path.exists():
-        return out
-
-    all_paths: set[Path] = set()
+def _collect_md_files(knowledge_dir_path: Path) -> tuple[List[Path], List[Path]]:
+    """Walk the tree once and return ``(entry_files, all_md_files)``.
+    Entries exclude README.md / index.md / log.md; ``all_md_files``
+    includes them. Both lists exclude any path under ``_archive``."""
     entry_files: List[Path] = []
-    all_md_files: List[Path] = []  # includes READMEs, index.md, log.md
-
-    # Collect all .md files. Wikilink + body checks scan all of them;
-    # frontmatter / per-dir-count checks only apply to entries.
+    all_md_files: List[Path] = []
     for md in sorted(knowledge_dir_path.rglob("*.md")):
         if "_archive" in md.parts:
             continue
-        all_paths.add(md.resolve())
         all_md_files.append(md)
         if md.name in ("README.md", "index.md", "log.md"):
             continue
         entry_files.append(md)
+    return entry_files, all_md_files
 
-    # Check 1: every directory under knowledge_dir has a README.md.
-    # Walk all dirs that contain at least one entry .md OR a sub-README.
+
+def _check_readme_coverage(
+    entry_files: List[Path],
+    knowledge_dir_path: Path,
+) -> List[str]:
+    """Every directory that contains an entry must have a README.md."""
+    out: List[str] = []
     dirs_to_check: set[Path] = set()
     for md in entry_files:
         d = md.parent
-        # Walk up to (and including) the knowledge dir.
         while d != knowledge_dir_path.parent and d.exists():
             dirs_to_check.add(d)
             if d == knowledge_dir_path:
@@ -711,8 +697,15 @@ def check_invariants(knowledge_dir_path: Path) -> List[str]:
         if not (d / "README.md").exists():
             rel = d.relative_to(knowledge_dir_path) if d != knowledge_dir_path else Path(".")
             out.append(f"missing README.md in {rel}/")
+    return out
 
-    # Check 2: per-directory entry count.
+
+def _check_flat_dir_caps(
+    entry_files: List[Path],
+    knowledge_dir_path: Path,
+) -> List[str]:
+    """Per-directory entry count must be at or below MAX_FLAT_DIR_ENTRIES."""
+    out: List[str] = []
     by_dir: Dict[Path, List[Path]] = {}
     for md in entry_files:
         by_dir.setdefault(md.parent, []).append(md)
@@ -722,15 +715,38 @@ def check_invariants(knowledge_dir_path: Path) -> List[str]:
             out.append(
                 f"directory {rel}/ has {len(mds)} entry .md files (max is {MAX_FLAT_DIR_ENTRIES})"
             )
+    return out
 
-    # Check 3: wikilink resolution.
-    # We parse each file as markdown (via ``markdown_utils.extract_wikilinks``)
-    # so that links inside code spans / fenced code blocks / YAML
-    # frontmatter are excluded — those were the source of historic
-    # false positives (e.g. an entry literally about wikilinks writing
-    # ``\\`[[wikilinks]]\\``` as an inline-code example). Skip log.md
-    # outright: it's an audit trail that quotes vetoed paths verbatim
-    # and the markdown there has no graph meaning.
+
+def _wikilink_resolves(link: str, md: Path, knowledge_dir_path: Path) -> bool:
+    """Apply the resolution rules (root-relative + sibling fallback) to
+    one wikilink target. Returns True if it points at an existing entry."""
+    if link.startswith("_archive/") or "/_archive/" in link:
+        return True
+    if link.startswith("daily/"):
+        return True
+    if link.endswith("/"):
+        target = knowledge_dir_path / link / "README.md"
+    else:
+        target = knowledge_dir_path / (link if link.endswith(".md") else f"{link}.md")
+    if target.exists():
+        return True
+    if link.endswith("/"):
+        sibling = md.parent / link / "README.md"
+    else:
+        sibling = md.parent / (link if link.endswith(".md") else f"{link}.md")
+    return sibling.exists()
+
+
+def _check_wikilinks(
+    all_md_files: List[Path],
+    knowledge_dir_path: Path,
+) -> List[str]:
+    """Every wikilink resolves. We parse each file as markdown so that
+    links inside code spans / fenced code blocks / YAML frontmatter are
+    excluded — those were the source of historic false positives. Skip
+    log.md outright (audit trail; quoted paths are not navigation)."""
+    out: List[str] = []
     for md in all_md_files:
         if md.name == "log.md":
             continue
@@ -742,34 +758,40 @@ def check_invariants(knowledge_dir_path: Path) -> List[str]:
             link = hit.target
             if not link:
                 continue
-            # Allow archive links (per AGENTS.md §1.2 those are intentional).
-            if link.startswith("_archive/") or "/_archive/" in link:
+            if _wikilink_resolves(link, md, knowledge_dir_path):
                 continue
-            # Daily/transcript anchors are allowed (`[[daily/...]]`).
-            if link.startswith("daily/"):
-                continue
-            # Folder-shaped links like [[daemon/]] resolve to that
-            # folder's README.md.
-            if link.endswith("/"):
-                target = knowledge_dir_path / link / "README.md"
-            else:
-                target = knowledge_dir_path / (link if link.endswith(".md") else f"{link}.md")
-            # Also tolerate links that are relative to the entry's own
-            # directory rather than the knowledge root (e.g. a sibling
-            # link in a README written as [[error-handling]] when the
-            # README and the entry share a parent, or [[daemon/]] from
-            # a parent README pointing at a child folder).
-            if not target.exists():
-                if link.endswith("/"):
-                    sibling = md.parent / link / "README.md"
-                else:
-                    sibling = md.parent / (link if link.endswith(".md") else f"{link}.md")
-                if sibling.exists():
-                    continue
-                rel = md.relative_to(knowledge_dir_path)
-                out.append(f"broken wikilink in {rel}: [[{link}]]")
+            rel = md.relative_to(knowledge_dir_path)
+            out.append(f"broken wikilink in {rel}: [[{link}]]")
+    return out
 
-    # Check 4: frontmatter validation + body present + scope agreement.
+
+def _check_scope_path_agreement(rel: Path, scope: str) -> str | None:
+    """Per prompt invariant #5: ``scope: global`` must live under
+    ``global/``; ``scope: project:<slug>`` under ``projects/<slug>/``.
+    Returns the violation string or ``None`` if the file is in agreement."""
+    parts = rel.parts
+    if scope == "global":
+        if parts[0] != "global":
+            return f"scope/path mismatch in {rel}: scope=global but path is not under global/"
+        return None
+    if scope.startswith("project:"):
+        slug = scope.split(":", 1)[1].strip()
+        if parts[0] != "projects" or (len(parts) > 1 and parts[1] != slug):
+            return (
+                f"scope/path mismatch in {rel}: scope={scope!r} but "
+                f"path is not under projects/{slug}/"
+            )
+    return None
+
+
+def _check_entry_frontmatter(
+    entry_files: List[Path],
+    knowledge_dir_path: Path,
+) -> List[str]:
+    """Each entry must have a parseable frontmatter block with the
+    required fields, a non-trivial body, and a scope that matches its
+    path."""
+    out: List[str] = []
     for md in entry_files:
         try:
             text = md.read_text(encoding="utf-8")
@@ -784,27 +806,40 @@ def check_invariants(knowledge_dir_path: Path) -> List[str]:
         if missing:
             out.append(f"missing frontmatter fields in {rel}: {', '.join(missing)}")
 
-        # Body must contain something beyond the frontmatter block.
         body = _strip_frontmatter(text).strip()
         if len(body) < 20:
             out.append(f"entry body is empty or trivial in {rel}")
 
-        # Scope/path agreement (prompt invariant #5).
         scope = str(fm.get("scope", "")).strip()
-        parts = rel.parts
-        if scope == "global":
-            if parts[0] != "global":
-                out.append(
-                    f"scope/path mismatch in {rel}: scope=global but path is not under global/"
-                )
-        elif scope.startswith("project:"):
-            slug = scope.split(":", 1)[1].strip()
-            if parts[0] != "projects" or (len(parts) > 1 and parts[1] != slug):
-                out.append(
-                    f"scope/path mismatch in {rel}: scope={scope!r} but "
-                    f"path is not under projects/{slug}/"
-                )
+        scope_violation = _check_scope_path_agreement(rel, scope)
+        if scope_violation is not None:
+            out.append(scope_violation)
+    return out
 
+
+def check_invariants(knowledge_dir_path: Path) -> List[str]:
+    """Walk the knowledge tree and return a list of invariant violations.
+
+    Each violation is a one-line human-readable string. Empty list means
+    everything is well-formed. The Scholar calls this after executing
+    approved actions and logs WARN on each violation; this is the safety
+    net for "the Scholar should have caught it" cases.
+
+    Checks:
+      1. Every directory has a README.md.
+      2. No directory has >MAX_FLAT_DIR_ENTRIES entry .md files.
+      3. Every wikilink resolves.
+      4. Every entry's frontmatter has the required fields.
+    """
+    if not knowledge_dir_path.exists():
+        return []
+
+    entry_files, all_md_files = _collect_md_files(knowledge_dir_path)
+    out: List[str] = []
+    out.extend(_check_readme_coverage(entry_files, knowledge_dir_path))
+    out.extend(_check_flat_dir_caps(entry_files, knowledge_dir_path))
+    out.extend(_check_wikilinks(all_md_files, knowledge_dir_path))
+    out.extend(_check_entry_frontmatter(entry_files, knowledge_dir_path))
     return out
 
 
@@ -883,6 +918,29 @@ def _bump_reinforced_counter(
     return True
 
 
+def _resolve_reinforce_target(prop: Any, root: Path) -> Path | None:
+    """Return the absolute entry path a "reinforces" proposal targets,
+    or ``None`` if the proposal isn't well-formed / cites a path outside
+    the knowledge dir."""
+    if not isinstance(prop, dict):
+        return None
+    if prop.get("salience_signal") != "reinforces":
+        return None
+    cited = prop.get("existing_entry")
+    if not isinstance(cited, str) or not cited:
+        return None
+    candidate = (root / cited).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        log.warning(
+            "apply_reinforcement_counters: rejected path outside knowledge dir: %s",
+            cited,
+        )
+        return None
+    return candidate
+
+
 def apply_reinforcement_counters(
     packets: Sequence[Mapping[str, Any]],
     knowledge_dir_path: Path,
@@ -904,22 +962,8 @@ def apply_reinforcement_counters(
 
     for packet in packets:
         for prop in packet.get("proposals") or []:
-            if not isinstance(prop, dict):
-                continue
-            if prop.get("salience_signal") != "reinforces":
-                continue
-            cited = prop.get("existing_entry")
-            if not isinstance(cited, str) or not cited:
-                continue
-            # Resolve relative to the knowledge dir; reject path traversal.
-            candidate = (root / cited).resolve()
-            try:
-                candidate.relative_to(root)
-            except ValueError:
-                log.warning(
-                    "apply_reinforcement_counters: rejected path outside knowledge dir: %s",
-                    cited,
-                )
+            candidate = _resolve_reinforce_target(prop, root)
+            if candidate is None:
                 continue
             if candidate in bumped_paths:
                 continue  # dedupe within batch

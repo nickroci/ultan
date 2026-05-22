@@ -331,6 +331,69 @@ class JsonlTailer:
         if self._of is not None and self._offset_state_path is not None:
             _save_offset_state(self._offset_state_path, self._of)
 
+    def _detach_handle(self) -> None:
+        """Close the current handle (if any) and clear state. Called
+        when the file vanishes between polls."""
+        of = self._of
+        if of is not None:
+            try:
+                of.fh.close()
+            except OSError:
+                pass
+        self._of = None
+
+    def _react_to_rotation(self, of: _OpenFile, ident: tuple) -> Optional[_OpenFile]:
+        """Compare current stat to ``of`` and either re-open from start
+        (rotation / truncation / in-place rewrite) or return ``of``
+        unchanged. Returns ``None`` if a re-open was attempted and failed
+        — caller should give up on this poll."""
+        inode, dev, size, mtime_ns = ident
+        if inode != of.inode or dev != of.dev:
+            log.info("events file rotated (inode %s -> %s); re-opening", of.inode, inode)
+            return _reopen_from_start(of)
+        if size < of.offset or size < of.last_size:
+            # Truncation: current size is below where we last read to,
+            # OR below the size we observed on the previous poll
+            # (catches grow-then-shrink between polls).
+            log.info(
+                "events file truncated (size=%d, offset=%d, last_size=%d); re-opening",
+                size,
+                of.offset,
+                of.last_size,
+            )
+            return _reopen_from_start(of)
+        if (
+            mtime_ns != of.last_mtime_ns
+            and size == of.last_size
+            and of.last_size > 0
+            and of.offset >= size
+        ):
+            # Pathological case: file was truncated and re-written to
+            # the *same* size between two polls. Size comparison can't
+            # see it; mtime advancing while size held constant — and
+            # our read position is at or past EOF — is the giveaway.
+            # We could miss this if the rewrite happens to land in the
+            # same instant as the last mtime, but at filesystem-ns
+            # resolution that's effectively zero.
+            log.info("events file rewritten in place (mtime advanced, size unchanged); re-opening")
+            return _reopen_from_start(of)
+        return of
+
+    def _emit_lines(self, lines: list[str]) -> int:
+        """Parse + forward every complete line. Returns the emit count.
+        Callback errors are logged but don't break the tail."""
+        emitted = 0
+        for line in lines:
+            ev = parse_event_line(line)
+            if ev is None:
+                continue
+            try:
+                self.on_event(ev)
+                emitted += 1
+            except Exception:
+                log.exception("on_event callback raised")
+        return emitted
+
     def poll_once(self) -> int:
         """Drain whatever's been appended since the last poll. Returns
         the number of events emitted (useful for tests).
@@ -349,54 +412,18 @@ class JsonlTailer:
         ident = _stat_identity(of.path)
         if ident is None:
             # File vanished. Drop the handle; next poll will retry.
-            try:
-                of.fh.close()
-            except OSError:
-                pass
-            self._of = None
+            self._detach_handle()
             return 0
 
-        inode, dev, size, mtime_ns = ident
-        if inode != of.inode or dev != of.dev:
-            log.info("events file rotated (inode %s -> %s); re-opening", of.inode, inode)
-            self._of = _reopen_from_start(of)
-            if self._of is None:
-                return 0
-            of = self._of
-        elif size < of.offset or size < of.last_size:
-            # Truncation: current size is below where we last read to,
-            # OR below the size we observed on the previous poll
-            # (catches grow-then-shrink between polls).
-            log.info(
-                "events file truncated (size=%d, offset=%d, last_size=%d); re-opening",
-                size,
-                of.offset,
-                of.last_size,
-            )
-            self._of = _reopen_from_start(of)
-            if self._of is None:
-                return 0
-            of = self._of
-        elif (
-            mtime_ns != of.last_mtime_ns
-            and size == of.last_size
-            and of.last_size > 0
-            and of.offset >= size
-        ):
-            # Pathological case: file was truncated and re-written to
-            # the *same* size between two polls. Size comparison can't
-            # see it; mtime advancing while size held constant — and
-            # our read position is at or past EOF — is the giveaway.
-            # We could miss this if the rewrite happens to land in the
-            # same instant as the last mtime, but at filesystem-ns
-            # resolution that's effectively zero.
-            log.info("events file rewritten in place (mtime advanced, size unchanged); re-opening")
-            self._of = _reopen_from_start(of)
-            if self._of is None:
-                return 0
-            of = self._of
+        reopened = self._react_to_rotation(of, ident)
+        if reopened is None:
+            # We tried to re-open and failed; bail this poll.
+            self._of = None
+            return 0
+        self._of = reopened
+        of = reopened
 
-        emitted = 0
+        _inode, _dev, size, mtime_ns = ident
         try:
             chunk = of.fh.read()
         except OSError as e:
@@ -425,16 +452,7 @@ class JsonlTailer:
             lines = buf.split("\n")
             of.pending = lines.pop()  # last element is the partial
 
-        for line in lines:
-            ev = parse_event_line(line)
-            if ev is None:
-                continue
-            try:
-                self.on_event(ev)
-                emitted += 1
-            except Exception:
-                # Callback errors must not break the tail. Log + carry on.
-                log.exception("on_event callback raised")
+        emitted = self._emit_lines(lines)
         # Persist offset after each successful drain so a daemon restart
         # resumes here instead of seeking to EOF and losing events.
         self._persist()

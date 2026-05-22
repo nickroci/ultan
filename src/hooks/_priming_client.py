@@ -263,6 +263,107 @@ def _summary(fm: dict, path: Path) -> str:
     return path.stem.replace("-", " ")
 
 
+def _split_frontmatter_body(text: str) -> tuple[dict, str]:
+    """Return ``(frontmatter_dict, body_text)``; empty fm if none present."""
+    m = _FRONTMATTER_RE.match(text)
+    if not m:
+        return {}, text
+    return _parse_yaml_lite(m.group(1)), text[m.end() :]
+
+
+def _doc_token_bag(body: str, fm: dict) -> set:
+    """Tokenize body + search-relevant frontmatter fields into one bag.
+
+    Mirrors bm25's frontmatter extraction so the lexical fallback ranks
+    entries the same way the daemon would.
+    """
+    tokens = set(_tokenize(body))
+    kw = fm.get("keywords")
+    if isinstance(kw, list):
+        for w in kw:
+            tokens.update(_tokenize(str(w)))
+    aw = fm.get("applies-when") or fm.get("applies_when")
+    if isinstance(aw, str):
+        tokens.update(_tokenize(aw))
+    elif isinstance(aw, list):
+        for w in aw:
+            tokens.update(_tokenize(str(w)))
+    return tokens
+
+
+def _reinforced_count(fm: dict) -> int:
+    """Read the ``reinforced`` frontmatter int; clamp at 0 on bad input."""
+    try:
+        n = int(fm.get("reinforced") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, n)
+
+
+def _rank_entries(
+    files: List[Path],
+    q_tokens: List[str],
+) -> List[Tuple[Path, float, int, dict]]:
+    """Score and sort the knowledge files against the query tokens.
+
+    Returns ``(path, boosted_score, reinforced, frontmatter)`` tuples
+    sorted by score desc, ties broken by path for stability.
+    """
+    scored: List[Tuple[Path, float, int, dict]] = []
+    for p in files:
+        try:
+            text = p.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        fm, body = _split_frontmatter_body(text)
+        score = _score_doc(_doc_token_bag(body, fm), q_tokens)
+        if score <= 0:
+            continue
+        reinforced = _reinforced_count(fm)
+        # Boost matches the daemon's _boost_with_reinforcement (×0.5).
+        scored.append((p, score + reinforced * 0.5, reinforced, fm))
+
+    scored.sort(key=lambda t: (-t[1], str(t[0])))
+    return scored
+
+
+def _render_bullets(
+    top: List[Tuple[Path, float, int, dict]],
+    kdir: Path,
+) -> List[str]:
+    """Format the top-ranked entries as markdown bullets."""
+    bullets: List[str] = []
+    for path, _score, reinforced, fm in top:
+        link = _wikilink(path, kdir)
+        cnt = f" (×{reinforced})" if reinforced > 0 else ""
+        summary = _summary(fm, path)
+        if summary:
+            bullets.append(f"- [[{link}]]{cnt} — {summary}")
+        else:
+            bullets.append(f"- [[{link}]]{cnt}")
+    return bullets
+
+
+def _assemble(bullets: List[str]) -> str:
+    """Wrap bullets in the standard header / footer block."""
+    return f"{_HEADER}\n\n" + "\n".join(bullets) + f"\n\n{_FOOTER}\n"
+
+
+def _fit_to_budget(bullets: List[str], char_budget: int) -> str:
+    """Assemble; drop trailing bullets until the rendered string fits."""
+    full = _assemble(bullets)
+    if len(full) <= char_budget:
+        return full
+    # Drop trailing bullets until we fit. Same strategy as the daemon's
+    # ``priming._assemble_output`` — keep the framing, trim content.
+    while len(bullets) > 1:
+        bullets.pop()
+        candidate = _assemble(bullets)
+        if len(candidate) <= char_budget:
+            return candidate
+    return _assemble(bullets)
+
+
 def _local_priming(
     prompt: str,
     *,
@@ -283,78 +384,12 @@ def _local_priming(
     if not files:
         return ""
 
-    scored: List[Tuple[Path, float, int, dict]] = []
-    for p in files:
-        try:
-            text = p.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        m = _FRONTMATTER_RE.match(text)
-        fm: dict = {}
-        body = text
-        if m:
-            fm = _parse_yaml_lite(m.group(1))
-            body = text[m.end() :]
-        doc_tokens = set(_tokenize(body))
-        # Add keywords + applies-when to the token bag (mirrors bm25's
-        # search-relevant frontmatter extraction).
-        kw = fm.get("keywords")
-        if isinstance(kw, list):
-            for w in kw:
-                doc_tokens.update(_tokenize(str(w)))
-        aw = fm.get("applies-when") or fm.get("applies_when")
-        if isinstance(aw, str):
-            doc_tokens.update(_tokenize(aw))
-        elif isinstance(aw, list):
-            for w in aw:
-                doc_tokens.update(_tokenize(str(w)))
-
-        score = _score_doc(doc_tokens, q_tokens)
-        if score <= 0:
-            continue
-        try:
-            reinforced = int(fm.get("reinforced") or 0)
-            if reinforced < 0:
-                reinforced = 0
-        except (TypeError, ValueError):
-            reinforced = 0
-        # Boost matches the daemon's _boost_with_reinforcement (×0.5).
-        boosted = score + reinforced * 0.5
-        scored.append((p, boosted, reinforced, fm))
-
+    scored = _rank_entries(files, q_tokens)
     if not scored:
         return ""
-    scored.sort(key=lambda t: (-t[1], str(t[0])))
-    top = scored[:k]
 
-    overhead = len(_HEADER) + 2 + 2 + len(_FOOTER)
-    body_budget = max(0, char_budget - overhead)  # noqa: F841 - kept for clarity
-
-    bullets: List[str] = []
-    for path, _score, reinforced, fm in top:
-        link = _wikilink(path, kdir)
-        cnt = f" (×{reinforced})" if reinforced > 0 else ""
-        summary = _summary(fm, path)
-        if summary:
-            bullets.append(f"- [[{link}]]{cnt} — {summary}")
-        else:
-            bullets.append(f"- [[{link}]]{cnt}")
-
-    def _assemble(bs: List[str]) -> str:
-        return f"{_HEADER}\n\n" + "\n".join(bs) + f"\n\n{_FOOTER}\n"
-
-    full = _assemble(bullets)
-    if len(full) <= char_budget:
-        return full
-
-    # Drop trailing bullets until we fit. Same strategy as the daemon's
-    # ``priming._assemble_output`` — keep the framing, trim content.
-    while len(bullets) > 1:
-        bullets.pop()
-        candidate = _assemble(bullets)
-        if len(candidate) <= char_budget:
-            return candidate
-    return _assemble(bullets)
+    bullets = _render_bullets(scored[:k], kdir)
+    return _fit_to_budget(bullets, char_budget)
 
 
 # ── Public API ───────────────────────────────────────────────────────
