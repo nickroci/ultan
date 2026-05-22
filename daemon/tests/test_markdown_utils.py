@@ -12,6 +12,7 @@ These tests pin the new behaviour:
 - Aliases are preserved.
 - The .md suffix on a target is normalised away.
 """
+
 from __future__ import annotations
 
 from agent_mem_daemon.markdown_utils import extract_wikilinks
@@ -38,10 +39,7 @@ def test_strips_md_suffix_from_target() -> None:
 
 def test_skips_inline_code_span() -> None:
     # Backtick-wrapped wikilink is an example, not a link.
-    text = (
-        "Use `[[foo/bar]]` as the link syntax. "
-        "The real link is [[foo/bar]]."
-    )
+    text = "Use `[[foo/bar]]` as the link syntax. The real link is [[foo/bar]]."
     assert _targets(text) == ["foo/bar"]  # only the prose one
 
 
@@ -60,13 +58,7 @@ def test_skips_fenced_code_block() -> None:
 
 def test_skips_indented_code_block() -> None:
     # Markdown 4-space indented = code block.
-    text = (
-        "Prose: [[foo/bar]]\n"
-        "\n"
-        "    [[indented/code]]\n"
-        "\n"
-        "More prose: [[baz/qux]]\n"
-    )
+    text = "Prose: [[foo/bar]]\n\n    [[indented/code]]\n\nMore prose: [[baz/qux]]\n"
     assert _targets(text) == ["foo/bar", "baz/qux"]
 
 

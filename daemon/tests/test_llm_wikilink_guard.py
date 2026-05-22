@@ -9,6 +9,7 @@ The guard inspects every Write/Edit tool call and either:
 Tests target the pure helpers in llm.py so they don't need the Claude
 Agent SDK to actually run.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -52,7 +53,9 @@ def test_resolve_archive_and_daily_links_always_ok(tmp_path: Path) -> None:
 def test_resolve_folder_shaped_link(tmp_path: Path) -> None:
     root = _seed(tmp_path)
     assert _resolve_wikilink(
-        "global/user/profile/", root, root / "index.md",
+        "global/user/profile/",
+        root,
+        root / "index.md",
     )
 
 
@@ -60,7 +63,9 @@ def test_resolve_sibling_fallback(tmp_path: Path) -> None:
     root = _seed(tmp_path)
     # The README in projects/x can reference its sibling as just [[bar]].
     assert _resolve_wikilink(
-        "bar", root, root / "projects" / "x" / "README.md",
+        "bar",
+        root,
+        root / "projects" / "x" / "README.md",
     )
 
 
@@ -223,8 +228,7 @@ def test_mixed_repairable_and_unresolvable_denies_with_note(tmp_path: Path) -> N
         "Write",
         _write_input(
             root,
-            "Good but moved: [[global/user/foo]] "
-            "Bad: [[totally/missing/entry]]",
+            "Good but moved: [[global/user/foo]] Bad: [[totally/missing/entry]]",
         ),
         root,
     )

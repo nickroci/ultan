@@ -385,6 +385,7 @@ _WRITE_TOOLS = {"Write", "Edit", "NotebookEdit"}
 # when it registered the server.
 _PATH_FREE_TOOLS = {
     "mcp__agent_mem_library__bm25_search",
+    "mcp__agent_mem_library__embedding_search",
     # move_entries validates every path against the knowledge root
     # internally (``_safe_inside``), so it's safe to allow without the
     # guard's per-key path validation.
@@ -510,11 +511,15 @@ def run_librarian_call(
     mcp_servers: dict[str, McpServerConfig] = {}
 
     if cwd is not None:
-        # Register the in-process BM25 search tool so the Librarian can
-        # find semantically related entries without the daemon doing a
-        # regex pre-pass. Complements Glob (filename) and Grep (literal).
+        # Register the in-process library MCP server. Exposes:
+        #   - bm25_search       (lexical, BM25 over markdown bodies)
+        #   - embedding_search  (semantic, sentence-transformer cosine)
+        # The Librarian is expected to fan these out in parallel — see the
+        # tool descriptions in library_tools.py and the prompt guidance in
+        # librarian_prompt.py.
         mcp_servers[library_tools.SERVER_NAME] = library_tools.make_library_mcp_server(cwd)
-        librarian_tools.append(library_tools.fully_qualified_tool_name())
+        librarian_tools.append(library_tools.fully_qualified_bm25_name())
+        librarian_tools.append(library_tools.fully_qualified_embedding_name())
 
     options = ClaudeAgentOptions(
         model=model,
@@ -589,6 +594,8 @@ def run_scholar_call(
             "Edit",
             "Glob",
             "Grep",
+            library_tools.fully_qualified_bm25_name(),
+            library_tools.fully_qualified_embedding_name(),
             library_tools.fully_qualified_move_name(),
         ],
         mcp_servers=mcp_servers,

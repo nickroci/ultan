@@ -1,4 +1,5 @@
 """Buffer aggregation and eviction tests."""
+
 from __future__ import annotations
 
 from agent_mem_daemon.buffer import (

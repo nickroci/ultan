@@ -5,6 +5,7 @@ before every tool call and returns PermissionResultAllow / Deny. We test
 it directly (not via the real SDK) — the SDK contract is just the
 return shape.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -48,20 +49,28 @@ def test_guard_denies_absolute_home_path_when_boundary_is_test_dir(tmp_path: Pat
 
 def test_guard_blocks_writes_when_allow_writes_false(tmp_path: Path):
     guard = _make_path_guard(tmp_path, allow_writes=False)
-    behavior, message = _call(guard, "Write", {
-        "file_path": str(tmp_path / "x.md"),
-        "content": "hi",
-    })
+    behavior, message = _call(
+        guard,
+        "Write",
+        {
+            "file_path": str(tmp_path / "x.md"),
+            "content": "hi",
+        },
+    )
     assert behavior == "deny"
     assert "not allowed" in message
 
 
 def test_guard_allows_write_when_allow_writes_true(tmp_path: Path):
     guard = _make_path_guard(tmp_path, allow_writes=True)
-    behavior, _ = _call(guard, "Write", {
-        "file_path": str(tmp_path / "new.md"),
-        "content": "hi",
-    })
+    behavior, _ = _call(
+        guard,
+        "Write",
+        {
+            "file_path": str(tmp_path / "new.md"),
+            "content": "hi",
+        },
+    )
     assert behavior == "allow"
 
 
@@ -92,9 +101,13 @@ def test_guard_allows_glob_without_path(tmp_path: Path):
 
 def test_guard_denies_edit_outside(tmp_path: Path):
     guard = _make_path_guard(tmp_path, allow_writes=True)
-    behavior, _ = _call(guard, "Edit", {
-        "file_path": "/etc/hosts",
-        "old_string": "x",
-        "new_string": "y",
-    })
+    behavior, _ = _call(
+        guard,
+        "Edit",
+        {
+            "file_path": "/etc/hosts",
+            "old_string": "x",
+            "new_string": "y",
+        },
+    )
     assert behavior == "deny"

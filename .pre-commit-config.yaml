@@ -4,10 +4,12 @@
 # own pyproject.toml config. ruff is shared via the upstream pre-commit repo;
 # pyright and pytest run as local hooks so they pick up each package's venv.
 #
-# Pyright + ruff run on staged files only — existing baseline issues in
+# Pyright runs on staged files only — existing baseline issues in
 # untouched files don't block commits, but touching a file forces cleanup.
-# pytest runs the full package suite at pre-push (not pre-commit) so a fast
-# local edit/commit loop isn't blocked by the test suite.
+# ruff (check --fix and format) runs on the WHOLE package tree per commit
+# so pre-existing format/lint drift on unrelated files can't slip past
+# `ruff format --check .` in CI. pytest runs the full package suite at
+# pre-push so a fast local edit/commit loop isn't blocked by the suite.
 #
 # Install once per clone:  uv tool install pre-commit && pre-commit install
 #   (installs both pre-commit and pre-push git hooks, per the list below)
@@ -15,15 +17,61 @@
 default_install_hook_types: [pre-commit, pre-push]
 
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.14
-    hooks:
-      - id: ruff-check
-        args: [--fix]
-      - id: ruff-format
-
   - repo: local
     hooks:
+      # Ruff per package — runs on the whole package tree (pass_filenames:
+      # false) so untouched files with pre-existing drift get auto-fixed,
+      # not just the staged set. Matches what CI does. If the hook
+      # modifies any files, pre-commit fails the commit so the user
+      # re-stages and commits again — standard auto-fix flow.
+      - id: ruff-check-daemon
+        name: ruff check (daemon)
+        language: system
+        entry: bash -c 'cd daemon && uv run --frozen ruff check --fix'
+        files: ^daemon/.*\.py$
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: ruff-format-daemon
+        name: ruff format (daemon)
+        language: system
+        entry: bash -c 'cd daemon && uv run --frozen ruff format'
+        files: ^daemon/.*\.py$
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: ruff-check-tools-search
+        name: ruff check (tools/search)
+        language: system
+        entry: bash -c 'cd tools/search && uv run --frozen ruff check --fix'
+        files: ^tools/search/.*\.py$
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: ruff-format-tools-search
+        name: ruff format (tools/search)
+        language: system
+        entry: bash -c 'cd tools/search && uv run --frozen ruff format'
+        files: ^tools/search/.*\.py$
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: ruff-check-src
+        name: ruff check (src)
+        language: system
+        entry: bash -c 'cd src && uv run --frozen ruff check --fix'
+        files: ^src/.*\.py$
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: ruff-format-src
+        name: ruff format (src)
+        language: system
+        entry: bash -c 'cd src && uv run --frozen ruff format'
+        files: ^src/.*\.py$
+        pass_filenames: false
+        stages: [pre-commit]
+
       # Pyright per package. Pre-commit passes repo-relative paths; we strip
       # the leading "<pkg>/" so pyright (running with cwd=<pkg>) gets the
       # package-relative paths it expects.

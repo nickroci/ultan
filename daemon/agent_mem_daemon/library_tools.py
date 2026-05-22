@@ -21,10 +21,11 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Sequence, Tuple, cast
 
 from bm25 import load_or_build
 from claude_agent_sdk import create_sdk_mcp_server, tool
+from embeddings import load_or_build as embeddings_load_or_build
 
 if TYPE_CHECKING:
     from claude_agent_sdk.types import McpServerConfig
@@ -36,11 +37,16 @@ log = logging.getLogger("agent_mem_daemon.library_tools")
 # refer to them.
 SERVER_NAME = "agent_mem_library"
 _BM25_TOOL_NAME = "bm25_search"
+_EMBEDDING_TOOL_NAME = "embedding_search"
 _MOVE_TOOL_NAME = "move_entries"
 
 
 def fully_qualified_bm25_name() -> str:
     return f"mcp__{SERVER_NAME}__{_BM25_TOOL_NAME}"
+
+
+def fully_qualified_embedding_name() -> str:
+    return f"mcp__{SERVER_NAME}__{_EMBEDDING_TOOL_NAME}"
 
 
 def fully_qualified_move_name() -> str:
@@ -52,13 +58,81 @@ def fully_qualified_tool_name() -> str:
     return fully_qualified_bm25_name()
 
 
+def _text_response(text: str) -> Dict[str, Any]:
+    """Wrap a plain string in the MCP content shape both search tools use."""
+    return {"content": [{"type": "text", "text": text}]}
+
+
+def _format_hit_lines(
+    hits: Sequence[Tuple[Path, float, str]], root: Path, *, query: str
+) -> Dict[str, Any]:
+    """Render `(path, score, snippet)` tuples into the canonical text shape."""
+    if not hits:
+        return _text_response(f"(no results for {query!r})")
+    lines = [
+        f"{path.relative_to(root) if path.is_absolute() else path}  score={score:.2f}  {snippet}"
+        for path, score, snippet in hits
+    ]
+    return _text_response("\n".join(lines))
+
+
+def _parse_search_args(args: Dict[str, Any]) -> Tuple[str, int]:
+    """Extract `query` and `k` from MCP-tool args (lenient on `k`)."""
+    query = str(args.get("query") or "").strip()
+    try:
+        k = int(args.get("k") or 5)
+    except (TypeError, ValueError):
+        k = 5
+    return query, max(1, min(20, k))
+
+
+def _run_bm25_search(args: Dict[str, Any], root: Path) -> Dict[str, Any]:
+    query, k = _parse_search_args(args)
+    if not query:
+        return _text_response("(bm25_search: empty query)")
+    if not root.exists():
+        return _text_response("(library is empty — no entries to search)")
+    try:
+        index = load_or_build(root)
+    except FileNotFoundError:
+        return _text_response("(library has no entries yet)")
+    except Exception as e:
+        log.exception("bm25 index load/build failed")
+        return _text_response(f"(bm25 backend error: {e})")
+    return _format_hit_lines(index.search(query, k=k), root, query=query)
+
+
+def _run_embedding_search(args: Dict[str, Any], root: Path) -> Dict[str, Any]:
+    query, k = _parse_search_args(args)
+    if not query:
+        return _text_response("(embedding_search: empty query)")
+    if not root.exists():
+        return _text_response("(library is empty — no entries to search)")
+    try:
+        index = embeddings_load_or_build(root)
+    except FileNotFoundError:
+        return _text_response("(library has no entries yet)")
+    except Exception as e:
+        log.exception("embedding index load/build failed")
+        return _text_response(f"(embedding backend error: {e})")
+    raw = index.search(query, k=k)
+    as_tuples: list[Tuple[Path, float, str]] = [(h.path, h.score, h.snippet) for h in raw]
+    return _format_hit_lines(as_tuples, root, query=query)
+
+
 def make_library_mcp_server(knowledge_dir: Path) -> McpServerConfig:
-    """Build and return an SDK MCP server config exposing BM25 search.
+    """Build and return an SDK MCP server config exposing the library tools.
 
     Returns the value to pass into ``ClaudeAgentOptions.mcp_servers``
     under any dict key (the daemon uses ``SERVER_NAME``). The
-    knowledge_dir is captured at construction time so the tool always
-    searches the same store — no path injection possible from the model.
+    knowledge_dir is captured at construction time so the tools always
+    search the same store — no path injection possible from the model.
+
+    Exposed tools:
+      - ``bm25_search`` — lexical relevance.
+      - ``embedding_search`` — semantic similarity. Designed to be
+        fanned out in parallel with ``bm25_search``.
+      - ``move_entries`` — atomic multi-file move + wikilink rewrite.
     """
     root = knowledge_dir.expanduser().resolve()
 
@@ -70,50 +144,31 @@ def make_library_mcp_server(knowledge_dir: Path) -> McpServerConfig:
             "lines of `<path>  score=<float>  <one-line snippet>`. Use "
             "this when you suspect an entry already covers a topic but "
             "don't see it in the library snapshot — it complements Glob "
-            "(filename pattern) and Grep (literal regex). Typical k is "
-            "3-8; larger values just add noise on a small corpus."
+            "(filename pattern) and Grep (literal regex). Run in parallel "
+            "with `embedding_search` for any concept query. Typical k 3-8."
         ),
         {"query": str, "k": int},
     )
     async def bm25_search(args: Dict[str, Any]) -> Dict[str, Any]:
-        query = str(args.get("query") or "").strip()
-        try:
-            k = int(args.get("k") or 5)
-        except (TypeError, ValueError):
-            k = 5
-        if not query:
-            return {"content": [{"type": "text", "text": "(bm25_search: empty query)"}]}
+        return _run_bm25_search(args, root)
 
-        if not root.exists():
-            return {
-                "content": [{"type": "text", "text": "(library is empty — no entries to search)"}]
-            }
-
-        try:
-            index = load_or_build(root)
-        except FileNotFoundError:
-            return {"content": [{"type": "text", "text": "(library has no entries yet)"}]}
-        except Exception as e:
-            log.exception("bm25 index load/build failed")
-            return {"content": [{"type": "text", "text": f"(bm25 backend error: {e})"}]}
-
-        hits = index.search(query, k=max(1, min(20, k)))
-        if not hits:
-            return {"content": [{"type": "text", "text": f"(no results for {query!r})"}]}
-
-        lines = [
-            f"{Path(p).relative_to(root) if Path(p).is_absolute() else p}  "
-            f"score={score:.2f}  {snippet}"
-            for p, score, snippet in hits
-        ]
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": "\n".join(lines),
-                }
-            ]
-        }
+    @tool(
+        _EMBEDDING_TOOL_NAME,
+        (
+            "Search the agent-mem knowledge library by semantic similarity "
+            "(sentence-transformer embeddings, cosine similarity). Returns "
+            "the top-K most similar entries as lines of `<path>  score=<float>  "
+            "<one-line snippet>`. Complements `bm25_search` (lexical): call "
+            "BOTH in parallel for any concept query — BM25 catches exact "
+            "vocabulary matches, embeddings catch paraphrases. You may also "
+            "fan out N parallel calls to either tool with different queries "
+            "in a single turn (one tool_use block per query); they run "
+            "concurrently. Typical k 3-8."
+        ),
+        {"query": str, "k": int},
+    )
+    async def embedding_search(args: Dict[str, Any]) -> Dict[str, Any]:
+        return _run_embedding_search(args, root)
 
     @tool(
         _MOVE_TOOL_NAME,
@@ -140,7 +195,7 @@ def make_library_mcp_server(knowledge_dir: Path) -> McpServerConfig:
     return create_sdk_mcp_server(
         name=SERVER_NAME,
         version="1.0.0",
-        tools=[bm25_search, move_entries],
+        tools=[bm25_search, embedding_search, move_entries],
     )
 
 
