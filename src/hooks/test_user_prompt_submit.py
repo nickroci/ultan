@@ -118,7 +118,12 @@ class _FakeRpcServer(threading.Thread):
         self._socket_path = socket_path
         self._handler = handler
         self._server: socket.socket | None = None
-        self._stop = threading.Event()
+        # NB: ``threading.Thread`` itself uses ``self._stop`` internally
+        # (it's the method ``Thread.join()`` calls on teardown). Picking
+        # a different name avoids shadowing it with our Event and
+        # crashing the cleanup with ``TypeError: 'Event' object is not
+        # callable``.
+        self._stop_event = threading.Event()
         self._ready = threading.Event()
 
     def start_and_wait(self, timeout: float = 2.0) -> None:
@@ -141,7 +146,7 @@ class _FakeRpcServer(threading.Thread):
         self._server = self._bind()
         self._ready.set()
         try:
-            while not self._stop.is_set():
+            while not self._stop_event.is_set():
                 try:
                     conn, _ = self._server.accept()
                 except socket.timeout:
@@ -197,7 +202,7 @@ class _FakeRpcServer(threading.Thread):
                 pass
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
         if self._server:
             try:
                 self._server.close()
