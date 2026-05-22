@@ -36,7 +36,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple, cast
 
 # PLAN §5 — pinned per-turn / per-session budgets.
 DEFAULT_PER_TURN_BUDGET = 1
@@ -140,10 +140,11 @@ def parse_nudges(body: str) -> List[Nudge]:
 def _load_budget(session_id: str) -> Dict[str, int]:
     path = budget_state_path(session_id)
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data: Any = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(data, dict):
+            data_map = cast("Mapping[str, Any]", data)
             return {
-                "consumed": int(data.get("consumed", 0)),
+                "consumed": int(data_map.get("consumed", 0) or 0),
             }
     except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError, TypeError):
         pass
@@ -304,6 +305,28 @@ def _read_and_clear_nudges_file(path: Path) -> str:
     return body
 
 
+def _load_consumed(session_id: str, override_path: Optional[Path]) -> int:
+    """Return the per-session consumed count.
+
+    Reads from ``override_path`` when supplied (test seam) or falls back
+    to the env-var-resolved budget file via ``_load_budget``. Any decode
+    error returns 0 — the worst case is one extra nudge gets through.
+    """
+    if override_path is None:
+        return _load_budget(session_id)["consumed"]
+    try:
+        data: Any = json.loads(override_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError, TypeError):
+        return 0
+    if not isinstance(data, dict):
+        return 0
+    data_map = cast("Mapping[str, Any]", data)
+    try:
+        return int(data_map.get("consumed", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def take_nudges(
     session_id: str,
     *,
@@ -370,14 +393,7 @@ def take_nudges(
 
     # Load consumed counter. We compute the budget path lazily so tests
     # can inject one without having to set AGENT_MEM_HOME globally.
-    if _budget_state_path is not None:
-        try:
-            data = json.loads(_budget_state_path.read_text(encoding="utf-8"))
-            consumed = int(data.get("consumed", 0)) if isinstance(data, dict) else 0
-        except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError, TypeError):
-            consumed = 0
-    else:
-        consumed = _load_budget(session_id)["consumed"]
+    consumed = _load_consumed(session_id, _budget_state_path)
 
     remaining_session = max(0, per_session_budget - consumed)
     take = min(per_turn_budget, remaining_session, len(queued))

@@ -43,6 +43,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Any, Callable, Optional, cast
 
 _THIS_DIR = Path(__file__).resolve().parent
 _CODE_ROOT = _THIS_DIR.parent
@@ -52,10 +53,21 @@ if str(_SCRIPTS_DIR) not in sys.path:
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-from _events import append_event  # noqa: E402
+# Local re-typed view of ``scope.current_project_slug``. The shared
+# ``scope`` module is owned by a different slice and still uses an
+# untyped ``os.PathLike`` parameter, so its inferred signature leaks
+# ``Unknown`` into every caller. We import it via a runtime ``getattr``
+# and cast back to a clean ``str | None -> str`` callable — this keeps
+# strict mode happy without touching upstream.
+import scope  # noqa: E402
+from _events import HookPayload, append_event  # noqa: E402
 from _nudges import render_context, take_nudges  # noqa: E402
 from _priming_client import get_priming  # noqa: E402
-from scope import current_project_slug  # noqa: E402
+
+current_project_slug: Callable[[Optional[str]], str] = cast(
+    Callable[[Optional[str]], str],
+    getattr(scope, "current_project_slug"),
+)
 
 
 def _emit_additional_context(context: str) -> None:
@@ -75,7 +87,7 @@ def _emit_additional_context(context: str) -> None:
     print(json.dumps(output))
 
 
-def _parse_stdin() -> dict | None:
+def _parse_stdin() -> Optional[HookPayload]:
     """Parse the JSON hook_input from stdin; return None on any failure.
 
     Same Windows-backslash workaround as the other hooks.
@@ -83,16 +95,18 @@ def _parse_stdin() -> dict | None:
     try:
         raw = sys.stdin.read()
         try:
-            parsed = json.loads(raw)
+            parsed: Any = json.loads(raw)
         except json.JSONDecodeError:
             fixed = re.sub(r'(?<!\\)\\(?!["\\])', r"\\\\", raw)
             parsed = json.loads(fixed)
     except (json.JSONDecodeError, ValueError, EOFError):
         return None
-    return parsed if isinstance(parsed, dict) else None
+    if not isinstance(parsed, dict):
+        return None
+    return cast("HookPayload", parsed)
 
 
-def _priming_part(prompt: object) -> str:
+def _priming_part(prompt: str) -> str:
     """Half 2a: ambient priming. Returns rendered markdown or empty string.
 
     Sub-200 ms in the daemon-served path (Unix socket round trip);
@@ -100,7 +114,7 @@ def _priming_part(prompt: object) -> str:
     missing — priming is session-agnostic and ``get_priming`` enforces
     its own char budget.
     """
-    if not isinstance(prompt, str) or not prompt.strip():
+    if not prompt.strip():
         return ""
     try:
         priming_md = get_priming(prompt)
@@ -112,7 +126,7 @@ def _priming_part(prompt: object) -> str:
     return priming_md.strip()
 
 
-def _nudges_part(hook_input: dict) -> str:
+def _nudges_part(hook_input: HookPayload) -> str:
     """Half 2b: nudge injection. Returns rendered markdown or empty string.
 
     Needs a session_id to enforce the per-session budget. If we don't
@@ -128,8 +142,9 @@ def _nudges_part(hook_input: dict) -> str:
     # in unrelated repos. ``current_project_slug`` falls back to
     # ``os.getcwd()`` when the hook payload omits cwd.
     hook_cwd = hook_input.get("cwd")
+    cwd_arg = hook_cwd if isinstance(hook_cwd, str) else None
     try:
-        project_slug = current_project_slug(hook_cwd if isinstance(hook_cwd, str) else None)
+        project_slug: Optional[str] = current_project_slug(cwd_arg)
     except Exception:
         project_slug = None
 
@@ -154,8 +169,9 @@ def main() -> None:
     if hook_input is None:
         return
 
-    prompt = hook_input.get("prompt", "")
-    prompt_len = len(prompt) if isinstance(prompt, str) else 0
+    raw_prompt: Any = hook_input.get("prompt", "")
+    prompt: str = raw_prompt if isinstance(raw_prompt, str) else ""
+    prompt_len = len(prompt)
 
     # Half 1: daemon event. Append before doing the nudge work — the
     # daemon's view of "turn started" should not be gated on whether we
@@ -167,7 +183,7 @@ def main() -> None:
         hook_input,
         payload={
             "role": "user",
-            "text": prompt if isinstance(prompt, str) else "",
+            "text": prompt,
             "prompt_len": prompt_len,
         },
     )

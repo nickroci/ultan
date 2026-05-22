@@ -23,6 +23,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Any, Callable, Optional, cast
 
 _THIS_DIR = Path(__file__).resolve().parent
 _CODE_ROOT = _THIS_DIR.parent
@@ -32,8 +33,19 @@ if str(_SCRIPTS_DIR) not in sys.path:
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-from _events import append_event  # noqa: E402
+import scope  # noqa: E402
+from _events import HookPayload, append_event  # noqa: E402
 from _flush_spawn import snapshot_and_spawn_flush  # noqa: E402
+
+# Local re-typed view of ``scope.current_project_slug`` — see
+# ``user_prompt_submit.py`` for the rationale. The upstream signature
+# still uses untyped ``os.PathLike`` so its inferred type leaks
+# Unknown; ``getattr`` + ``cast`` recovers a clean ``str | None ->
+# str`` callable without touching scope.py (owned by another slice).
+_current_project_slug: Callable[[Optional[str]], str] = cast(
+    Callable[[Optional[str]], str],
+    getattr(scope, "current_project_slug"),
+)
 
 MIN_TURNS_TO_FLUSH = 1
 
@@ -89,25 +101,31 @@ def main() -> None:
     # the regex below escapes lone ones before retrying the JSON parse.
     try:
         raw_input = sys.stdin.read()
+        parsed: Any
         try:
-            hook_input: dict = json.loads(raw_input)
+            parsed = json.loads(raw_input)
         except json.JSONDecodeError:
             fixed_input = re.sub(r'(?<!\\)\\(?!["\\])', r"\\\\", raw_input)
-            hook_input = json.loads(fixed_input)
+            parsed = json.loads(fixed_input)
     except (json.JSONDecodeError, ValueError, EOFError) as e:
         logging.error("Failed to parse stdin: %s", e)
         return
 
-    if not isinstance(hook_input, dict):
+    if not isinstance(parsed, dict):
         return
+    hook_input: HookPayload = cast("HookPayload", parsed)
 
-    session_id = hook_input.get("session_id", "unknown")
+    raw_session: Any = hook_input.get("session_id", "unknown")
+    session_id: str = raw_session if isinstance(raw_session, str) else str(raw_session)
     # NB: Claude Code's SessionEnd payload uses ``reason``, not
     # ``source``. Accept both for backwards-compat and synthetic test
     # events.
-    source = hook_input.get("source") or hook_input.get("reason") or "unknown"
-    transcript_path_str = hook_input.get("transcript_path", "")
-    hook_cwd = hook_input.get("cwd") or os.getcwd()
+    raw_source: Any = hook_input.get("source") or hook_input.get("reason") or "unknown"
+    source: str = raw_source if isinstance(raw_source, str) else str(raw_source)
+    raw_transcript: Any = hook_input.get("transcript_path", "")
+    transcript_path_str: str = raw_transcript if isinstance(raw_transcript, str) else ""
+    raw_cwd: Any = hook_input.get("cwd")
+    hook_cwd: str = raw_cwd if isinstance(raw_cwd, str) and raw_cwd else os.getcwd()
 
     # Daemon event: emit BEFORE the flush.py spawn so a slow disk
     # doesn't delay the daemon's view of session end. Payload is empty
@@ -115,11 +133,10 @@ def main() -> None:
     append_event("SessionEnd", hook_input, payload={})
 
     # Project slug is derived from the host agent's cwd, NOT this
-    # hook's own cwd. Pass it explicitly to current_project_slug — the
-    # hook may be invoked from anywhere depending on shell wrapping.
-    from scope import current_project_slug  # local import: cheap, keeps top fast
-
-    project_slug = current_project_slug(hook_cwd)
+    # hook's own cwd. Pass it explicitly to ``_current_project_slug``
+    # — the hook may be invoked from anywhere depending on shell
+    # wrapping.
+    project_slug = _current_project_slug(hook_cwd)
 
     logging.info(
         "SessionEnd fired: session=%s source=%s project=%s",
@@ -129,8 +146,8 @@ def main() -> None:
     )
 
     snapshot_and_spawn_flush(
-        transcript_path_str if isinstance(transcript_path_str, str) else "",
-        str(session_id),
+        transcript_path_str,
+        session_id,
         project_slug,
         state_dir=store / "state",
         code_root=_CODE_ROOT,

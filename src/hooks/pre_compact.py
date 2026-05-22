@@ -20,6 +20,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Any, Callable, Optional, cast
 
 _THIS_DIR = Path(__file__).resolve().parent
 _CODE_ROOT = _THIS_DIR.parent
@@ -29,8 +30,19 @@ if str(_SCRIPTS_DIR) not in sys.path:
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-from _events import append_event  # noqa: E402
+import scope  # noqa: E402
+from _events import HookPayload, append_event  # noqa: E402
 from _flush_spawn import snapshot_and_spawn_flush  # noqa: E402
+
+# Local re-typed view of ``scope.current_project_slug`` — see
+# ``user_prompt_submit.py`` for the rationale. The upstream signature
+# still uses untyped ``os.PathLike`` so its inferred type leaks
+# Unknown; ``getattr`` + ``cast`` recovers a clean ``str | None ->
+# str`` callable without touching scope.py (owned by another slice).
+_current_project_slug: Callable[[Optional[str]], str] = cast(
+    Callable[[Optional[str]], str],
+    getattr(scope, "current_project_slug"),
+)
 
 MIN_TURNS_TO_FLUSH = 5
 
@@ -74,25 +86,28 @@ def main() -> None:
 
     try:
         raw_input = sys.stdin.read()
+        parsed: Any
         try:
-            hook_input: dict = json.loads(raw_input)
+            parsed = json.loads(raw_input)
         except json.JSONDecodeError:
             fixed_input = re.sub(r'(?<!\\)\\(?!["\\])', r"\\\\", raw_input)
-            hook_input = json.loads(fixed_input)
+            parsed = json.loads(fixed_input)
     except (json.JSONDecodeError, ValueError, EOFError) as e:
         logging.error("Failed to parse stdin: %s", e)
         return
 
-    if not isinstance(hook_input, dict):
+    if not isinstance(parsed, dict):
         return
+    hook_input: HookPayload = cast("HookPayload", parsed)
 
-    session_id = hook_input.get("session_id", "unknown")
-    transcript_path_str = hook_input.get("transcript_path", "")
-    hook_cwd = hook_input.get("cwd") or os.getcwd()
+    raw_session: Any = hook_input.get("session_id", "unknown")
+    session_id: str = raw_session if isinstance(raw_session, str) else str(raw_session)
+    raw_transcript: Any = hook_input.get("transcript_path", "")
+    transcript_path_str: str = raw_transcript if isinstance(raw_transcript, str) else ""
+    raw_cwd: Any = hook_input.get("cwd")
+    hook_cwd: str = raw_cwd if isinstance(raw_cwd, str) and raw_cwd else os.getcwd()
 
-    from scope import current_project_slug
-
-    project_slug = current_project_slug(hook_cwd)
+    project_slug = _current_project_slug(hook_cwd)
 
     # Daemon event: PreCompact is treated as a SessionEnd-like signal so
     # the daemon's existing turn-sealing path applies. Per the task spec,
@@ -104,8 +119,8 @@ def main() -> None:
     logging.info("PreCompact fired: session=%s project=%s", session_id, project_slug)
 
     snapshot_and_spawn_flush(
-        transcript_path_str if isinstance(transcript_path_str, str) else "",
-        str(session_id),
+        transcript_path_str,
+        session_id,
         project_slug,
         state_dir=store / "state",
         code_root=_CODE_ROOT,

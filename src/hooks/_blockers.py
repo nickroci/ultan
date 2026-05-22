@@ -469,15 +469,13 @@ def find_match(
     Returns the first match in iteration order so the rule author can
     rely on stable behaviour when two blockers might both fire.
     """
-    if not blockers or not isinstance(tool_input, dict):
+    if not blockers:
         return None
 
-    command = tool_input.get("command")
-    file_path = tool_input.get("file_path")
-    if not isinstance(command, str):
-        command = ""
-    if not isinstance(file_path, str):
-        file_path = ""
+    command_val: Any = tool_input.get("command")
+    file_path_val: Any = tool_input.get("file_path")
+    command = command_val if isinstance(command_val, str) else ""
+    file_path = file_path_val if isinstance(file_path_val, str) else ""
 
     for blocker in blockers:
         if any(_trigger_fires(t, tool_name, command, file_path) for t in blocker.triggers):

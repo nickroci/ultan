@@ -25,23 +25,28 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Mapping, Optional, cast
 
 MAX_TURNS = 30
 MAX_CONTEXT_CHARS = 15_000
 
 
-def _extract_role_and_content(entry: dict) -> tuple[str, object]:
+def _extract_role_and_content(entry: Mapping[str, Any]) -> tuple[str, object]:
     """Pull ``role`` and ``content`` from one transcript entry.
 
     Claude Code wraps the chat payload in ``message`` for most lines
     but writes some entries flat at the top level. Try the wrapped
     shape first, fall back to the flat one.
     """
-    msg = entry.get("message", {})
-    if isinstance(msg, dict):
-        return msg.get("role", ""), msg.get("content", "")
-    return entry.get("role", ""), entry.get("content", "")
+    msg_any: Any = entry.get("message", {})
+    if isinstance(msg_any, dict):
+        msg = cast("Mapping[str, Any]", msg_any)
+        role_any: Any = msg.get("role", "")
+        content_any: Any = msg.get("content", "")
+        return (role_any if isinstance(role_any, str) else ""), content_any
+    role_flat: Any = entry.get("role", "")
+    content_flat: Any = entry.get("content", "")
+    return (role_flat if isinstance(role_flat, str) else ""), content_flat
 
 
 def _content_to_text(content: object) -> str:
@@ -54,10 +59,14 @@ def _content_to_text(content: object) -> str:
         return content
     if not isinstance(content, list):
         return ""
+    blocks = cast("list[Any]", content)
     parts: list[str] = []
-    for block in content:
-        if isinstance(block, dict) and block.get("type") == "text":
-            parts.append(block.get("text", ""))
+    for block in blocks:
+        if isinstance(block, dict):
+            block_map = cast("Mapping[str, Any]", block)
+            if block_map.get("type") == "text":
+                text_any: Any = block_map.get("text", "")
+                parts.append(text_any if isinstance(text_any, str) else "")
         elif isinstance(block, str):
             parts.append(block)
     return "\n".join(parts)
@@ -132,7 +141,7 @@ def snapshot_and_spawn_flush(
     few turns, or extraction error). Every short-circuit is logged but
     never raised — the host agent must never see a flush failure.
     """
-    if not transcript_path_str or not isinstance(transcript_path_str, str):
+    if not transcript_path_str:
         logging.info("SKIP[%s]: no transcript path", log_tag)
         return None
 
