@@ -158,9 +158,10 @@ def _handle_priming(req: dict) -> dict:
     if k <= 0 or char_budget <= 0:
         return {"ok": False, "error": "k and char_budget must be positive"}
 
-    # ``project_slug`` is accepted but not yet used for filtering — keeps
-    # the wire shape stable so the client can grow the feature without a
-    # second protocol bump.
+    raw_slug = req.get("project_slug")
+    current_project_slug: Optional[str] = (
+        raw_slug.strip() if isinstance(raw_slug, str) and raw_slug.strip() else None
+    )
 
     kdir = knowledge_dir()
     if not kdir.exists():
@@ -188,7 +189,11 @@ def _handle_priming(req: dict) -> dict:
         took_ms = int((time.monotonic() - t0) * 1000)
         return {"ok": True, "priming_md": "", "took_ms": took_ms, "lane": lane}
 
-    ranked = priming._boost_with_reinforcement(hits)
+    ranked = priming._boost_with_reinforcement(
+        hits,
+        knowledge_dir=kdir,
+        current_project_slug=current_project_slug,
+    )
     body = priming._assemble_output(
         ranked,
         kdir,

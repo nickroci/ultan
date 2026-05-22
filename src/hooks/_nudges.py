@@ -179,6 +179,76 @@ def _save_budget(session_id: str, consumed: int) -> None:
 # ── Nudge file consumption ────────────────────────────────────────────
 
 
+def _serialize_nudges(nudges: List[Nudge]) -> str:
+    """Serialise back to pending-nudges.md wire format. Inverse of
+    :func:`parse_nudges`."""
+    chunks: List[str] = []
+    for n in nudges:
+        chunks.append(f"---\nid: {n.id}\ncreated: {n.created}\nlesson: {n.lesson}\n---\n{n.text}\n")
+    return "\n".join(chunks)
+
+
+def _requeue_nudges(path: Path, nudges: List[Nudge]) -> None:
+    """Write ``nudges`` back to the pending-nudges file atomically.
+
+    Called when ``take_nudges`` filters out cross-project nudges that
+    should be preserved for a future session in the matching project.
+    Errors are swallowed — a broken re-queue must never crash the hook.
+    """
+    if not nudges:
+        return
+    body = _serialize_nudges(nudges)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=str(path.parent),
+            prefix=path.name + ".",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            tmp.write(body)
+            tmp_path = Path(tmp.name)
+        os.replace(tmp_path, path)
+    except OSError:
+        pass
+
+
+def _lesson_project_bucket(lesson_path: str) -> Optional[str]:
+    """Extract the project bucket name from a lesson path.
+
+    - ``projects/<bucket>/...`` -> ``"<bucket>"``
+    - ``global/...``           -> ``"__global__"``
+    - anything else            -> ``None`` (treated as universal so we
+      don't accidentally drop a nudge whose path layout we don't
+      recognise).
+    """
+    if not lesson_path:
+        return None
+    parts = lesson_path.strip().lstrip("/").split("/")
+    if len(parts) >= 2 and parts[0] == "projects":
+        return parts[1] or None
+    if parts and parts[0] == "global":
+        return "__global__"
+    return None
+
+
+def _nudge_matches_project(nudge: Nudge, current_project_slug: Optional[str]) -> bool:
+    """True if a nudge should be delivered to a session in the given
+    project. Global and unrecognised-bucket nudges deliver to anyone;
+    project-scoped nudges only deliver to the matching project. When
+    the session has no project context, we deliver everything (better
+    to over-deliver than to silently lose a nudge that no future
+    session can claim either)."""
+    bucket = _lesson_project_bucket(nudge.lesson)
+    if bucket is None or bucket == "__global__":
+        return True
+    if not current_project_slug:
+        return True
+    return bucket == current_project_slug
+
+
 def _read_and_clear_nudges_file(path: Path) -> str:
     """Read the nudges file and move it aside in one shot.
 
@@ -221,6 +291,7 @@ def take_nudges(
     *,
     per_turn_budget: int = DEFAULT_PER_TURN_BUDGET,
     per_session_budget: int = DEFAULT_PER_SESSION_BUDGET,
+    current_project_slug: Optional[str] = None,
     now: Optional[float] = None,
     _nudges_path: Optional[Path] = None,
     _budget_state_path: Optional[Path] = None,
@@ -230,10 +301,20 @@ def take_nudges(
     Honours the per-session ceiling: even if 100 nudges are queued, a
     session that has already shown 3 returns ``([], 3)``.
 
+    If ``current_project_slug`` is supplied, nudges whose ``lesson:``
+    path is scoped to a different project (``projects/<other>/...``) are
+    filtered out and **re-queued** for a future session in the matching
+    project. Global nudges (``global/...``) and nudges with no
+    recognisable project bucket are delivered to any session.
+
     Args:
         session_id: derived from the hook's stdin payload.
         per_turn_budget: max nudges this single turn may emit.
         per_session_budget: cumulative cap across the whole session.
+        current_project_slug: derived from the hook's cwd. ``None`` means
+            "session has no project context" — in that case the filter is
+            permissive (deliver everything) so a non-repo session can
+            still consume global nudges.
         now: clock override for tests.
         _nudges_path / _budget_state_path: test seams; production code
             resolves these via the env-var-aware helpers above.
@@ -252,7 +333,19 @@ def take_nudges(
     # waiting for a session that has already declined them all. This
     # matches PLAN §5: the budget is a per-session ceiling, not a queue.
     body = _read_and_clear_nudges_file(nudges_path)
-    queued = parse_nudges(body)
+    all_queued = parse_nudges(body)
+
+    # Cross-project filter: nudges scoped to another project are put
+    # back on disk for the next session in that project to consume.
+    queued: List[Nudge] = []
+    requeue: List[Nudge] = []
+    for n in all_queued:
+        if _nudge_matches_project(n, current_project_slug):
+            queued.append(n)
+        else:
+            requeue.append(n)
+    if requeue:
+        _requeue_nudges(nudges_path, requeue)
 
     # Load consumed counter. We compute the budget path lazily so tests
     # can inject one without having to set AGENT_MEM_HOME globally.

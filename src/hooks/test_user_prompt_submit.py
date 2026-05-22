@@ -339,6 +339,66 @@ def test_take_nudges_clears_file_even_when_over_budget(tmp_path: Path):
     assert not nudges_path.exists()  # cleared
 
 
+def test_take_nudges_filters_cross_project_and_requeues(tmp_path: Path):
+    """A vol-predictor nudge surfaced in an agent-mem session must be
+    skipped AND re-queued for a future session in the matching project.
+    Global and current-project nudges are delivered normally."""
+    nudges_path = tmp_path / "pending-nudges.md"
+    state_path = tmp_path / "state" / "nudge-budget-s1.json"
+    blocks = [
+        # other project — should be filtered out and re-queued
+        "---\nid: a1\ncreated: 2026-05-21T00:00:00+00:00\n"
+        "lesson: projects/vol-predictor/foo.md\n---\nVOL text\n",
+        # global — should always pass
+        "---\nid: a2\ncreated: 2026-05-21T00:00:00+00:00\n"
+        "lesson: global/bar.md\n---\nGLOBAL text\n",
+        # current project — should pass
+        "---\nid: a3\ncreated: 2026-05-21T00:00:00+00:00\n"
+        "lesson: projects/agent-mem/baz.md\n---\nAGENTMEM text\n",
+    ]
+    nudges_path.write_text("\n".join(blocks), encoding="utf-8")
+
+    selected, _consumed = _nudges.take_nudges(
+        "s1",
+        per_turn_budget=5,
+        current_project_slug="agent-mem",
+        _nudges_path=nudges_path,
+        _budget_state_path=state_path,
+    )
+    ids = [n.id for n in selected]
+    assert "a1" not in ids, "cross-project nudge should NOT be delivered"
+    assert ids == ["a2", "a3"], f"order preserved among eligible nudges: {ids}"
+
+    # The vol-predictor nudge should have been written back to the file
+    # so a future session in that project can claim it.
+    assert nudges_path.exists(), "re-queue should re-create the nudges file"
+    requeued_body = nudges_path.read_text(encoding="utf-8")
+    assert "a1" in requeued_body
+    assert "a2" not in requeued_body
+    assert "a3" not in requeued_body
+
+
+def test_take_nudges_no_slug_is_permissive(tmp_path: Path):
+    """When the session has no project context (no slug derivable from
+    cwd) we deliver every queued nudge — better than letting it sit
+    forever waiting on a session that never comes."""
+    nudges_path = tmp_path / "pending-nudges.md"
+    state_path = tmp_path / "state" / "nudge-budget-s1.json"
+    nudges_path.write_text(
+        "---\nid: a1\ncreated: 2026-05-21T00:00:00+00:00\n"
+        "lesson: projects/vol-predictor/foo.md\n---\nVOL text\n",
+        encoding="utf-8",
+    )
+    selected, _ = _nudges.take_nudges(
+        "s1",
+        per_turn_budget=5,
+        current_project_slug=None,
+        _nudges_path=nudges_path,
+        _budget_state_path=state_path,
+    )
+    assert [n.id for n in selected] == ["a1"]
+
+
 def test_render_context_includes_count_and_paths():
     nudges = [
         _nudges.Nudge(id="a", created="t", lesson="l/a", text="alpha text"),
