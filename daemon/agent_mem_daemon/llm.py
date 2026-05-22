@@ -513,7 +513,7 @@ def run_librarian_call(
         # Register the in-process BM25 search tool so the Librarian can
         # find semantically related entries without the daemon doing a
         # regex pre-pass. Complements Glob (filename) and Grep (literal).
-        mcp_servers[library_tools._SERVER_NAME] = library_tools.make_library_mcp_server(cwd)
+        mcp_servers[library_tools.SERVER_NAME] = library_tools.make_library_mcp_server(cwd)
         librarian_tools.append(library_tools.fully_qualified_tool_name())
 
     options = ClaudeAgentOptions(
@@ -577,7 +577,7 @@ def run_scholar_call(
     # the atomic move_entries tool (which rewrites inbound wikilinks
     # programmatically — the LLM should NEVER move files by hand).
     mcp_servers: dict[str, McpServerConfig] = {
-        library_tools._SERVER_NAME: library_tools.make_library_mcp_server(boundary),
+        library_tools.SERVER_NAME: library_tools.make_library_mcp_server(boundary),
     }
     options = ClaudeAgentOptions(
         model=model,

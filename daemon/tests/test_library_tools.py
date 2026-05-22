@@ -331,7 +331,7 @@ def test_make_library_mcp_server_registers_two_tools(tmp_path: Path) -> None:
     # The config is a TypedDict-like or pydantic object; depending on
     # SDK version we just check it serialises something sensible.
     s = repr(config)
-    assert library_tools._SERVER_NAME in s or "agent_mem_library" in s
+    assert library_tools.SERVER_NAME in s or "agent_mem_library" in s
 
 
 def test_bm25_tool_callable_returns_empty_query_message(tmp_path: Path) -> None:

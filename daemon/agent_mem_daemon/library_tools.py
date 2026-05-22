@@ -34,17 +34,17 @@ log = logging.getLogger("agent_mem_daemon.library_tools")
 
 # Server + tool naming. Keep stable; allowed_tools entries in llm.py
 # refer to them.
-_SERVER_NAME = "agent_mem_library"
+SERVER_NAME = "agent_mem_library"
 _BM25_TOOL_NAME = "bm25_search"
 _MOVE_TOOL_NAME = "move_entries"
 
 
 def fully_qualified_bm25_name() -> str:
-    return f"mcp__{_SERVER_NAME}__{_BM25_TOOL_NAME}"
+    return f"mcp__{SERVER_NAME}__{_BM25_TOOL_NAME}"
 
 
 def fully_qualified_move_name() -> str:
-    return f"mcp__{_SERVER_NAME}__{_MOVE_TOOL_NAME}"
+    return f"mcp__{SERVER_NAME}__{_MOVE_TOOL_NAME}"
 
 
 def fully_qualified_tool_name() -> str:
@@ -56,7 +56,7 @@ def make_library_mcp_server(knowledge_dir: Path) -> McpServerConfig:
     """Build and return an SDK MCP server config exposing BM25 search.
 
     Returns the value to pass into ``ClaudeAgentOptions.mcp_servers``
-    under any dict key (the daemon uses ``_SERVER_NAME``). The
+    under any dict key (the daemon uses ``SERVER_NAME``). The
     knowledge_dir is captured at construction time so the tool always
     searches the same store — no path injection possible from the model.
     """
@@ -138,7 +138,7 @@ def make_library_mcp_server(knowledge_dir: Path) -> McpServerConfig:
         return _move_entries_impl(root, args)
 
     return create_sdk_mcp_server(
-        name=_SERVER_NAME,
+        name=SERVER_NAME,
         version="1.0.0",
         tools=[bm25_search, move_entries],
     )
