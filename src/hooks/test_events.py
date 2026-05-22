@@ -30,7 +30,6 @@ def _reload_events_with_home(monkeypatch, home: Path):
         del sys.modules["config"]
     if "_events" in sys.modules:
         del sys.modules["_events"]
-    import _events  # noqa: F401
 
     return importlib.import_module("_events")
 

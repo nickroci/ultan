@@ -182,7 +182,7 @@ def _handle_priming(req: dict) -> dict:
     # operator can see at a glance whether the model is loaded.
     lane = "hybrid"
     try:
-        from embeddings import load_or_build as _emb_check  # noqa: F401
+        __import__("embeddings")
     except Exception:
         lane = "bm25"
 

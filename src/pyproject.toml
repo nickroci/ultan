@@ -32,10 +32,14 @@ select = ["E", "F", "I", "W", "C901", "PLR0912", "PLR0915"]
 [tool.pyright]
 include = ["hooks", "scripts"]
 exclude = [".venv", "**/__pycache__", "build", "dist", "_dot_claude_disabled"]
+venvPath = "."
+venv = ".venv"
 pythonVersion = "3.12"
 typeCheckingMode = "basic"
 reportMissingTypeStubs = false
 reportMissingImports = "warning"
+reportUnusedImport = "error"
+reportPrivateUsage = "warning"
 # Hook and script files use sys.path manipulation at runtime to import sibling
 # modules from src/scripts/ (e.g. `import config`, `import scope`). Adding the
 # directories to extraPaths lets pyright resolve those imports without ignores.

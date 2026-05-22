@@ -76,10 +76,14 @@ select = ["E", "F", "I", "W", "C901", "PLR0912", "PLR0915"]
 [tool.pyright]
 include = ["agent_mem_daemon", "tests"]
 exclude = [".venv", "**/__pycache__", "build", "dist"]
+venvPath = "."
+venv = ".venv"
 pythonVersion = "3.12"
 typeCheckingMode = "basic"
 reportMissingTypeStubs = false
 reportMissingImports = "warning"
+reportUnusedImport = "error"
+reportPrivateUsage = "warning"
 
 [dependency-groups]
 dev = [

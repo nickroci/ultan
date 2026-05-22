@@ -61,10 +61,14 @@ exclude_lines = [
 [tool.pyright]
 include = ["bm25.py", "cli.py", "embeddings.py", "frontmatter.py", "aliases.py", "test_*.py"]
 exclude = [".venv", "**/__pycache__", "build", "dist", "fixtures"]
+venvPath = "."
+venv = ".venv"
 pythonVersion = "3.12"
 typeCheckingMode = "basic"
 reportMissingTypeStubs = false
 reportMissingImports = "warning"
+reportUnusedImport = "error"
+reportPrivateUsage = "warning"
 
 [dependency-groups]
 dev = [
