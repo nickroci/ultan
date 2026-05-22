@@ -44,8 +44,13 @@ assembled a list of ProposedActions below — restructuring moves it wants \
 applied to the library. For each proposal, you must:
 
   1. **Verify the claim**: Read the referenced files via your Read/Glob/Grep \
-tools. Trust nothing the Librarian asserts — the snapshot it saw was \
-truncated and it sometimes hallucinates content.
+tools. When the Librarian claims novelty/duplication/contradiction, also \
+sanity-check by calling ``mcp__agent_mem_library__bm25_search`` AND \
+``mcp__agent_mem_library__embedding_search`` in parallel for the entry's \
+core claim — fan them out in a single turn (multiple tool_use blocks; \
+the SDK runs them concurrently). BM25 catches exact-vocabulary matches; \
+embeddings catch paraphrases. Trust nothing the Librarian asserts — the \
+snapshot it saw was truncated and it sometimes hallucinates content.
   2. **Decide**: APPROVE (execute the action via Write/Edit) or VETO (drop \
 with a one-sentence reason).
   3. **Execute on approve**: use Write/Edit to actually perform the action.

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from textwrap import dedent
 
 from agent_mem_daemon import librarian_prompt as lp
 
@@ -94,119 +93,6 @@ def test_format_rolling_buffer_compacts_whitespace():
 
 def test_format_rolling_buffer_empty():
     assert "(empty" in lp.format_rolling_buffer([])
-
-
-# ── extract_seed_phrases ──────────────────────────────────────────────
-
-
-def test_seed_extraction_finds_imperatives_and_directives():
-    txt = dedent("""
-        We should wrap upstream errors at the boundary.
-        Always stub the factory, not the service.
-        Never construct services directly from controllers.
-        The fix is to convert errors to domain types.
-        The gotcha is sqlite lacks Postgres constraint types.
-        Don't mock the database in tests.
-        Use a factory pattern for new APIs.
-    """).strip()
-    seeds = lp.extract_seed_phrases(txt)
-    text = " || ".join(seeds).lower()
-    assert "should wrap upstream" in text
-    assert "always stub the factory" in text
-    assert "never construct services" in text
-    assert "the fix is" in text
-    assert "the gotcha is" in text
-    assert "mock the database" in text
-    assert any("factory pattern" in s.lower() for s in seeds)
-
-
-def test_seed_extraction_dedupes_substrings():
-    txt = (
-        "Always wrap upstream errors at the boundary. Always wrap upstream errors at the boundary."
-    )
-    seeds = lp.extract_seed_phrases(txt)
-    assert len(seeds) == 1
-
-
-def test_seed_extraction_returns_empty_on_plain_text():
-    txt = "I renamed utils_v2.py to utils.py and updated the three import sites."
-    seeds = lp.extract_seed_phrases(txt)
-    assert seeds == []
-
-
-def test_seed_extraction_caps_at_max():
-    txt = " ".join([f"Always do thing-{i} for reasons." for i in range(30)])
-    seeds = lp.extract_seed_phrases(txt, max_seeds=5)
-    assert len(seeds) == 5
-
-
-# ── attach_bm25_hits / format_bm25_seeds ──────────────────────────────
-
-
-class _StubIndex:
-    def __init__(self, knowledge_dir: Path, results_for: dict):
-        self.knowledge_dir = knowledge_dir
-        self._results = results_for
-
-    def search(self, query: str, k: int = 10):
-        for needle, hits in self._results.items():
-            if needle in query.lower():
-                return hits[:k]
-        return []
-
-
-def test_attach_bm25_hits_renders_relative_paths(tmp_path):
-    kdir = tmp_path / "knowledge"
-    kdir.mkdir()
-    target = kdir / "global" / "tooling" / "factory-pattern-for-apis.md"
-    target.parent.mkdir(parents=True)
-    target.write_text("dummy", encoding="utf-8")
-
-    idx = _StubIndex(kdir, {"factory": [(target, 14.8, "snippet")]})
-    out = lp.attach_bm25_hits(
-        ["Use a factory: ReportingServiceFactory.create(...)"],
-        idx,
-        knowledge_dir=kdir,
-    )
-    assert len(out) == 1
-    assert out[0]["seed"].startswith("Use a factory")
-    hits = out[0]["hits"]
-    assert len(hits) == 1
-    assert hits[0]["entry_id"] == "factory-pattern-for-apis"
-    assert hits[0]["path"] == "global/tooling/factory-pattern-for-apis.md"
-    assert hits[0]["score"] == 14.8
-
-
-def test_attach_bm25_hits_handles_none_index():
-    out = lp.attach_bm25_hits(["seed1", "seed2"], None)
-    assert [e["seed"] for e in out] == ["seed1", "seed2"]
-    assert all(e["hits"] == [] for e in out)
-
-
-def test_format_bm25_seeds_empty_message():
-    assert "regex extractor found no candidate seeds" in lp.format_bm25_seeds([])
-
-
-def test_format_bm25_seeds_includes_hits_and_no_hit_marker():
-    s = lp.format_bm25_seeds(
-        [
-            {
-                "seed": "use a factory",
-                "hits": [
-                    {
-                        "entry_id": "factory-pattern-for-apis",
-                        "score": 14.8,
-                        "path": "global/tooling/factory-pattern-for-apis.md",
-                    },
-                ],
-            },
-            {"seed": "renamed file", "hits": []},
-        ]
-    )
-    assert 'seed: "use a factory"' in s
-    assert "hit 1: entry_id=factory-pattern-for-apis" in s
-    assert "score=14.8" in s
-    assert "(no hits)" in s
 
 
 # ── read_index_md / build_applies_when_table ──────────────────────────

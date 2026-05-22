@@ -13,12 +13,12 @@ receives:
        - root README excerpt
        - index.md content (truncated)
        - top-level folder READMEs
-  3. BM25 dedup near-hits for any regex-extracted seed phrases.
-
 …and emits a `LibrarianProposal` JSON object: a list of typed
-`ProposedAction` items. The Librarian also has Read+Glob tools so it
-can inspect specific entries before proposing actions; the final text
-message it produces must be the JSON.
+`ProposedAction` items. The Librarian has Read/Glob/Grep tools plus
+two in-process MCP search tools (``bm25_search`` for lexical match,
+``embedding_search`` for semantic match) that it is expected to fan
+out in parallel when checking for duplicates / contradictions. The
+final text message it produces must be the JSON.
 
 The Scholar is the gatekeeper that approves/vetoes each proposal —
 the Librarian never writes to disk.
@@ -39,10 +39,8 @@ from typing import (
     List,
     Mapping,
     Optional,
-    Protocol,
     Sequence,
     Tuple,
-    TypedDict,
     cast,
 )
 
@@ -66,39 +64,13 @@ log = logging.getLogger("agent_mem_daemon.librarian_prompt")
 LIBRARY_SNAPSHOT_MAX_CHARS = 3 * 1024
 
 
-# ── Shape definitions (BM25 protocol, seed/hit payloads) ──────────────
+# ── Shape definitions ─────────────────────────────────────────────────
 #
 # Buffer snapshots come from ``buffer.BufferStore.snapshot()`` as plain
 # dicts; their detailed shape varies (extra keys, optional payload
 # fields), so the snapshot-walking functions below accept the broadest
 # safe signature, ``Mapping[str, Any]``, and validate each level with
 # ``_as_str_map`` / ``isinstance(list, ...)`` at the boundary.
-
-
-class BM25HitDict(TypedDict):
-    """Single BM25 hit, rendered for the prompt."""
-
-    entry_id: str
-    score: float
-    path: str
-
-
-class SeedWithHits(TypedDict):
-    """One seed phrase plus its BM25 hits (may be empty)."""
-
-    seed: str
-    hits: List[BM25HitDict]
-
-
-class _BM25Like(Protocol):
-    """Structural type for the BM25 index ``attach_bm25_hits`` uses.
-
-    Tests pass a ``_StubIndex`` and production passes
-    ``agent_mem_search.bm25.BM25Index`` — both expose this surface."""
-
-    knowledge_dir: Path
-
-    def search(self, query: str, k: int = ...) -> Sequence[Tuple[Path, float, str]]: ...
 
 
 def _as_str_map(obj: object) -> Mapping[str, Any]:
@@ -212,128 +184,6 @@ def format_rolling_buffer(flat: Sequence[Tuple[int, str, str, bool]]) -> str:
         prefix = "[USER-ASSERTED] " if user_asserted else ""
         lines.append(f"[{tid}] [{role}] {prefix}{squashed}")
     return "\n".join(lines)
-
-
-# ── Seed extraction (BM25 pre-pass — recall-oriented) ─────────────────
-
-
-_SEED_PATTERNS: Tuple[re.Pattern[str], ...] = (
-    re.compile(r"\b(?:always|never)\s+[a-z][^.!?\n]{6,200}", re.IGNORECASE),
-    re.compile(
-        r"\b(?:we|you|i)\s+(?:should|must|need to|have to|ought to)\s+[a-z][^.!?\n]{4,200}",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"\bthe\s+(?:fix|gotcha|rule|trick|catch|key|trap|issue|problem)\s+(?:is|was)\s+[^.!?\n]{4,200}",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\b(?:don'?t|do not)\s+[a-z][^.!?\n]{4,200}", re.IGNORECASE),
-    re.compile(
-        r"(?:^|[.!?\n]\s+)\s*(?:use|prefer|avoid|stub|wrap|stop)\s+[a-z][^.!?\n]{6,200}",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"\b[a-z][a-z0-9 -]{2,40}\s+(?:pattern|principle|convention|approach)\b[^.!?\n]{0,80}",
-        re.IGNORECASE,
-    ),
-)
-
-
-def extract_seed_phrases(buffer_text: str, *, max_seeds: int = 12) -> List[str]:
-    """Regex over the rolling buffer text. Returns deduped seed phrases."""
-    raw: List[str] = []
-    seen_norm: set[str] = set()
-    for pat in _SEED_PATTERNS:
-        for m in pat.finditer(buffer_text):
-            phrase = m.group(0).strip(" \t\n.,;:-")
-            phrase = " ".join(phrase.split())
-            if len(phrase) < 8 or len(phrase) > 240:
-                continue
-            norm = phrase.lower()
-            if norm in seen_norm:
-                continue
-            seen_norm.add(norm)
-            raw.append(phrase)
-
-    deduped: List[str] = []
-    for s in sorted(raw, key=len, reverse=True):
-        s_low = s.lower()
-        if any(s_low in d.lower() for d in deduped):
-            continue
-        deduped.append(s)
-
-    by_first = sorted(deduped, key=lambda x: raw.index(x) if x in raw else 1_000_000)
-    return by_first[:max_seeds]
-
-
-# ── BM25 hit attachment ───────────────────────────────────────────────
-
-
-def attach_bm25_hits(
-    seeds: Sequence[str],
-    bm25_index: Optional[_BM25Like],
-    *,
-    knowledge_dir: Optional[Path] = None,
-    k: int = 3,
-) -> List[SeedWithHits]:
-    """For each seed, run BM25 and return ``{seed, hits: [...]}``."""
-    out: List[SeedWithHits] = []
-    if bm25_index is None:
-        for seed in seeds:
-            out.append({"seed": seed, "hits": []})
-        return out
-    root: Optional[Path] = knowledge_dir
-    if root is None:
-        root = getattr(bm25_index, "knowledge_dir", None)
-    for seed in seeds:
-        try:
-            raw_hits: Sequence[Tuple[Path, float, str]] = bm25_index.search(seed, k=k)
-        except Exception:
-            log.exception("bm25 search failed for seed=%r", seed)
-            raw_hits = []
-        hit_dicts: List[BM25HitDict] = []
-        for path, score, _snippet in raw_hits:
-            p = Path(path)
-            try:
-                rel = str(p.relative_to(root)) if root else str(p)
-            except (TypeError, ValueError):
-                rel = str(p)
-            hit_dicts.append(
-                {
-                    "entry_id": p.stem,
-                    "score": round(float(score), 3),
-                    "path": rel,
-                }
-            )
-        out.append({"seed": seed, "hits": hit_dicts})
-    return out
-
-
-def format_bm25_seeds(seeds_with_hits: Sequence[Mapping[str, Any]]) -> str:
-    """Render the ``<bm25_seeds>`` block."""
-    if not seeds_with_hits:
-        return "(none — regex extractor found no candidate seeds)"
-    blocks: List[str] = []
-    for entry in seeds_with_hits:
-        seed = entry.get("seed", "")
-        hits_raw_obj: object = entry.get("hits") or []
-        hits: List[Mapping[str, Any]] = []
-        if isinstance(hits_raw_obj, list):
-            for h in cast(List[Any], hits_raw_obj):
-                h_map = _as_str_map(h)
-                if h_map:
-                    hits.append(h_map)
-        lines = [f'seed: "{seed}"']
-        if not hits:
-            lines.append("  (no hits)")
-        else:
-            for i, h_map in enumerate(hits, 1):
-                lines.append(
-                    f"  hit {i}: entry_id={h_map.get('entry_id', '?')}  "
-                    f"score={h_map.get('score', 0.0)}  path={h_map.get('path', '?')}"
-                )
-        blocks.append("\n".join(lines))
-    return "\n\n".join(blocks)
 
 
 # ── Library snapshot (new in this architecture) ───────────────────────
@@ -746,9 +596,14 @@ a stricter check. Better to surface a maybe-novel candidate and let the \
 Scholar veto than to silently drop a real one.
 
 To classify ``contradicts`` / ``reinforces`` honestly, you MUST actually \
-search the library first. Use ``mcp__agent_mem_library__bm25_search`` on \
-the topic, Read the top hit, then decide. Without that search you can't \
-claim ``novel`` truthfully either — you'd just be guessing.
+search the library first. Call \
+``mcp__agent_mem_library__bm25_search`` AND \
+``mcp__agent_mem_library__embedding_search`` IN PARALLEL (emit both \
+tool_use blocks in the same turn — the SDK runs them concurrently) on \
+the topic, then Read the top hits and decide. BM25 catches exact \
+vocabulary matches; embeddings catch paraphrases. Without these \
+searches you can't claim ``novel`` truthfully either — you'd just be \
+guessing.
 
 ═══════════════════════════════════════════════════════════════════
 IMPORTANT: YOU ARE THE ONLY MEMORY SYSTEM HERE
@@ -818,28 +673,39 @@ because the wording is short.
 right?" is not a question to debate — it's the user implicitly setting \
 an expectation. Treat it as a high-trust candidate, not as conversation.
 
-5. **You have three search tools — use them.** The library snapshot in \
-this prompt is a teaser; if you suspect an entry already covers a \
-candidate, look. The three tools complement each other:
+5. **You have four search tools — use them, and use them in parallel.** \
+The library snapshot in this prompt is a teaser; if you suspect an entry \
+already covers a candidate, look. The four tools complement each other:
 
   - ``Glob("**/*.md")`` — find by **filename pattern**. Use when you're \
 hunting for a specific path or a folder's contents.
   - ``Grep(pattern="...", path="...")`` — find by **literal regex** match \
 in file contents. Use for exact strings or known phrasings.
   - ``mcp__agent_mem_library__bm25_search(query="...", k=5)`` — find by \
-**content relevance** (BM25 ranking). Use when you have a concept or \
-phrase and want the top-K semantically related entries. This is the \
-right tool for "does anything in the library already cover this idea?" \
-— much better than guessing keywords for Grep.
+**lexical relevance** (BM25 over markdown bodies + paraphrases + \
+keywords). Best for queries that share vocabulary with stored entries.
+  - ``mcp__agent_mem_library__embedding_search(query="...", k=5)`` — \
+find by **semantic similarity** (sentence-transformer cosine). Best \
+when the user's phrasing differs from how the entry is written ("we \
+shouldn't ship without review" vs an entry titled "require PR \
+approval before deploy"). Catches paraphrases BM25 misses.
 
-  Use BOTH bm25 (for relevance) AND glob/grep (for verification) when \
-checking for duplicates: bm25 surfaces candidates, then Read the top hit \
-to confirm. Aim for ~5 tool calls per run; you are Haiku-tier and your \
-budget is tight.
+  **Run them in parallel.** Emit multiple tool_use blocks in the same \
+turn — the SDK runs them concurrently, so calling \
+``bm25_search`` and ``embedding_search`` for the same query (or \
+fanning out N different queries across both tools) costs you one \
+turn, not N. For "does anything already cover this concept?", default \
+to firing BOTH bm25 + embedding for the candidate's core claim, then \
+Read the top hits to confirm.
+
+  Aim for ~5 turns per run; you are Haiku-tier and your budget is \
+tight, but parallel tool fan-out is the lever that keeps you under \
+budget while expanding recall.
 
 6. **Then Read the candidates** the search returned to verify they're \
-actually the same thing. BM25 false-positives happen — never propose \
-UpdateEntry/MergeEntries without Reading the target first.
+actually the same thing. Both BM25 and embedding return false \
+positives — never propose UpdateEntry/MergeEntries without Reading \
+the target first.
 
 ═══════════════════════════════════════════════════════════════════
 INPUTS
@@ -993,9 +859,9 @@ sources:
 OUTPUT
 ═══════════════════════════════════════════════════════════════════
 
-After any Read/Glob/bm25_search calls you need, your FINAL message must \
-be a single JSON object — nothing else, no fences, no commentary, no \
-markdown around it. The schema is:
+After any Read/Glob/Grep/bm25_search/embedding_search calls you need, \
+your FINAL message must be a single JSON object — nothing else, no \
+fences, no commentary, no markdown around it. The schema is:
 
 {{RESPONSE_SHAPE}}
 
