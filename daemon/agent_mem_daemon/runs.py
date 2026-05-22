@@ -30,7 +30,7 @@ import traceback
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, cast
 
 from .paths import home
 
@@ -65,7 +65,7 @@ def _today_iso() -> str:
     return date.today().isoformat()
 
 
-def load_cost_state() -> dict:
+def load_cost_state() -> Dict[str, Any]:
     """Read ~/.agent-mem/cost.json. Returns a defaulted dict on any error.
 
     Schema:
@@ -75,17 +75,23 @@ def load_cost_state() -> dict:
     """
     path = cost_file()
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {"today": _today_iso(), "today_usd": 0.0, "lifetime_usd": 0.0}
+    # json.loads returns Any; if the file isn't a JSON object treat it as
+    # corrupt and reset rather than propagating a stranger shape downstream.
+    if not isinstance(raw, dict):
+        return {"today": _today_iso(), "today_usd": 0.0, "lifetime_usd": 0.0}
+    data: Dict[str, Any] = cast("Dict[str, Any]", raw)
     today = _today_iso()
     if data.get("today") != today:
         # Day rolled over — reset today_usd; keep lifetime.
-        data = {
+        fresh: Dict[str, Any] = {
             "today": today,
             "today_usd": 0.0,
             "lifetime_usd": float(data.get("lifetime_usd", 0.0) or 0.0),
         }
+        data = fresh
     # Coerce types defensively.
     data.setdefault("today", today)
     data["today_usd"] = float(data.get("today_usd", 0.0) or 0.0)
@@ -93,7 +99,7 @@ def load_cost_state() -> dict:
     return data
 
 
-def save_cost_state(state: dict) -> None:
+def save_cost_state(state: Dict[str, Any]) -> None:
     path = cost_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -104,7 +110,7 @@ def save_cost_state(state: dict) -> None:
         log.warning("could not write cost file %s: %s", path, e)
 
 
-def add_cost(usd: float) -> dict:
+def add_cost(usd: float) -> Dict[str, Any]:
     """Append `usd` to today_usd and lifetime_usd. Returns the new state."""
     state = load_cost_state()
     state["today_usd"] = float(state["today_usd"]) + float(usd or 0.0)
@@ -149,7 +155,7 @@ class InvocationRecord:
     input_buffer_turns: int = 0
     output_raw: str = ""
     parsed_ok: bool = False
-    decisions: Dict[str, int] = field(default_factory=dict)
+    decisions: Dict[str, int] = field(default_factory=dict[str, int])
     cost_usd: float = 0.0
     duration_ms: int = 0
     error: Optional[str] = None

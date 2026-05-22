@@ -23,11 +23,19 @@ import signal
 import sys
 import threading
 from pathlib import Path
+from types import FrameType
 
 from .buffer import DEFAULT_INACTIVITY_SECONDS, DEFAULT_MAX_TURNS, RollingBuffer
 from .ingest import DEFAULT_POLL_INTERVAL, JsonlTailer
 from .logging_setup import configure as configure_logging
-from .paths import ensure_home, events_path, log_path, offset_state_path, pid_path
+from .paths import (
+    ensure_home,
+    events_path,
+    knowledge_dir,
+    log_path,
+    offset_state_path,
+    pid_path,
+)
 from .priming_rpc import PrimingRpcThread
 from .scheduler import (
     DEFAULT_LIBRARIAN_CONCURRENCY,
@@ -240,35 +248,40 @@ def _build_parser() -> argparse.ArgumentParser:
 # ---- main loop ------------------------------------------------------
 
 
-def _prewarm_indexes(knowledge_dir: Path, log: logging.Logger) -> None:
+def _prewarm_indexes(knowledge_root: Path, log: logging.Logger) -> None:
     """Verify the BM25 and embedding indexes match the markdown source
     of truth at startup. Rebuild on drift; log either way.
 
     Run synchronously before worker threads start so first retrieval
     doesn't pay the rebuild cost. Failures fail-soft to lazy rebuild —
     a broken index never blocks daemon start.
+
+    Note: bm25 and embeddings live in a sibling ``tools/search`` package
+    not always on the daemon's ``sys.path``; the imports are kept local
+    to this function and wrapped in best-effort ``try/except`` so a
+    missing module degrades to lazy rebuild rather than blocking startup.
     """
-    if not knowledge_dir.exists():
-        log.info("startup: knowledge dir %s missing — skipping index prewarm", knowledge_dir)
+    if not knowledge_root.exists():
+        log.info("startup: knowledge dir %s missing — skipping index prewarm", knowledge_root)
         return
     try:
-        from bm25 import load_or_build as bm25_load
+        from bm25 import load_or_build as bm25_load  # noqa: PLC0415
 
-        idx = bm25_load(knowledge_dir)
+        idx = bm25_load(knowledge_root)
         log.info("startup: bm25 index ready (%d docs)", len(idx.docs))
     except Exception:
         log.exception("startup: bm25 prewarm failed (lazy rebuild on first use)")
     try:
-        from embeddings import load_or_build as emb_load
+        from embeddings import load_or_build as emb_load  # noqa: PLC0415
 
-        idx = emb_load(knowledge_dir)
+        idx = emb_load(knowledge_root)
         log.info("startup: embedding index ready (%d docs)", len(idx.docs))
     except Exception:
         log.exception("startup: embedding prewarm failed (lazy rebuild on first use)")
 
 
 def _install_signal_handlers(stop_event: threading.Event) -> None:
-    def handler(signum, _frame):
+    def handler(signum: int, _frame: FrameType | None) -> None:
         # signal.Signals(signum).name avoids hardcoding numbers in the
         # log line — clearer when reading post-mortem.
         try:
@@ -304,9 +317,7 @@ def run(args: argparse.Namespace) -> int:
     # Rebuilds on drift (manual edits, git pull from another machine,
     # restore from backup); logs "ready (N docs)" otherwise. Failures
     # fail-soft — first retrieval rebuilds.
-    from .paths import knowledge_dir as _knowledge_dir
-
-    _prewarm_indexes(_knowledge_dir(), log)
+    _prewarm_indexes(knowledge_dir(), log)
 
     stop_event = threading.Event()
     _install_signal_handlers(stop_event)
