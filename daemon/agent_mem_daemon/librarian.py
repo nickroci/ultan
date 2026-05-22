@@ -96,11 +96,16 @@ def scan(buffer_snapshot: Dict[str, Any]) -> EvidencePacket:
         kdir = knowledge_dir()
         library_snapshot = lp.build_library_snapshot(kdir)
         applies_when_table = lp.build_applies_when_table(kdir)
-        slug = lp.derive_project_slug(buffer_snapshot)
+        # Bucket = the on-disk directory name everyone should agree on
+        # (librarian's path proposals, scholar's writes, priming's
+        # scope boost, the nudge filter). Resolved through the single
+        # ``aliases.session_bucket`` entry point so any consistency
+        # drift between layers gets caught here.
+        bucket = lp.derive_project_bucket(buffer_snapshot)
 
         # ── Step 3: assemble + invoke ──────────────────────────────
         prompt = lp.assemble_prompt(
-            project_slug=slug,
+            project_slug=bucket,
             rolling_buffer=formatted_buffer,
             library_snapshot=library_snapshot,
             applies_when_table=applies_when_table,
@@ -108,9 +113,9 @@ def scan(buffer_snapshot: Dict[str, Any]) -> EvidencePacket:
         record.input_prompt = prompt
 
         log.debug(
-            "librarian.scan: session=%s slug=%s turns=%d prompt_chars=%d",
+            "librarian.scan: session=%s bucket=%s turns=%d prompt_chars=%d",
             session_id,
-            slug,
+            bucket,
             len(flat),
             len(prompt),
         )

@@ -453,6 +453,12 @@ def build_applies_when_table(knowledge_dir: Path) -> str:
 
 
 def derive_project_slug(snapshot: Dict[str, Any]) -> str:
+    """Return the *canonical project slug* (git-URL flattened form or
+    cwd basename fallback) — what ``current_project_slug()`` on the
+    hook side produces. This is the project's identity, not its
+    directory name. Use :func:`derive_project_bucket` when you need the
+    on-disk bucket directory the librarian + scholar should write to.
+    """
     explicit = snapshot.get("project_slug")
     if isinstance(explicit, str) and explicit.strip():
         return _slugify(explicit)
@@ -467,6 +473,60 @@ def derive_project_slug(snapshot: Dict[str, Any]) -> str:
     if isinstance(cwd, str) and cwd:
         return _slugify(os.path.basename(cwd.rstrip("/")) or "unknown")
     return "unknown"
+
+
+def _snapshot_cwd(snapshot: Dict[str, Any]) -> Optional[str]:
+    """Pull the user's cwd off a buffer snapshot.
+
+    Mirrors the slug-extraction order: top-level field first, then a
+    sweep of recent event payloads (most recent wins). Returns ``None``
+    when no cwd is recoverable — caller should then skip bucket
+    resolution and use the slug verbatim.
+    """
+    top = snapshot.get("cwd")
+    if isinstance(top, str) and top.strip():
+        return top
+    for turn in reversed(snapshot.get("turns") or []):
+        for ev in reversed(turn.get("events") or []):
+            pl = ev.get("payload") or {}
+            if isinstance(pl, dict):
+                cand = pl.get("cwd")
+                if isinstance(cand, str) and cand.strip():
+                    return cand
+            ev_cwd = ev.get("cwd")
+            if isinstance(ev_cwd, str) and ev_cwd.strip():
+                return ev_cwd
+    return None
+
+
+def derive_project_bucket(snapshot: Dict[str, Any]) -> str:
+    """Return the on-disk bucket directory name that all components —
+    librarian's path proposals, scholar's writes, priming's scope
+    boost, the nudge filter — should use for this session's project.
+
+    Calls :func:`aliases.session_bucket` so the bucket name comes from
+    the same single-source-of-truth resolver every other call site uses.
+    Falls back to the slug verbatim when the snapshot has no cwd or the
+    resolver returns ``None``, so older snapshots / mid-session edge
+    cases still produce something usable.
+    """
+    # Lazy imports: keeps librarian_prompt's import graph small and
+    # avoids any cycle with paths.py.
+    from aliases import session_bucket  # type: ignore[import-not-found]
+
+    from .paths import home as _home
+
+    slug = derive_project_slug(snapshot)
+    cwd_str = _snapshot_cwd(snapshot)
+    if not cwd_str:
+        return slug
+    try:
+        from pathlib import Path as _Path
+
+        bucket = session_bucket(_home(), _Path(cwd_str), slug)
+    except Exception:
+        bucket = None
+    return bucket or slug
 
 
 _SLUG_NONALNUM = re.compile(r"[^a-z0-9]+")
