@@ -124,6 +124,11 @@ class _FakeRpcServer(threading.Thread):
         self._socket_path = socket_path
         self._handler = handler
         self._server: socket.socket | None = None
+        # NB: ``threading.Thread`` itself uses ``self._stop`` internally
+        # (it's the method ``Thread.join()`` calls on teardown). Picking
+        # a different name avoids shadowing it with our Event and
+        # crashing the cleanup with ``TypeError: 'Event' object is not
+        # callable``.
         self._stop_event = threading.Event()
         self._ready = threading.Event()
 
@@ -348,10 +353,11 @@ def test_take_nudges_clears_file_even_when_over_budget(tmp_path: Path):
 def test_take_nudges_filters_cross_project_and_requeues(tmp_path: Path, monkeypatch):
     """A vol-predictor nudge surfaced in an agent-mem session must be
     skipped AND re-queued for a future session in the matching project.
-    Global and current-project nudges are delivered normally."""
-    # Pin AGENT_MEM_HOME to a fresh tmp dir so the user's real
-    # ~/.agent-mem/project-aliases.json (which translates agent-mem to a
-    # different canonical slug) can't bleed into the test.
+    Global and current-project nudges are delivered normally.
+
+    Pin AGENT_MEM_HOME so the real ``~/.agent-mem/project-aliases.json``
+    can't bleed into the assertions (the auto-bootstrap may have
+    populated it between turns)."""
     monkeypatch.setenv("AGENT_MEM_HOME", str(tmp_path))
     nudges_path = tmp_path / "pending-nudges.md"
     state_path = tmp_path / "state" / "nudge-budget-s1.json"
