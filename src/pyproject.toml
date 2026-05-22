@@ -7,7 +7,14 @@ dependencies = [
     "claude-agent-sdk>=0.1.29",
     "python-dotenv>=1.0.0",
     "tzdata>=2024.1",
+    # Shared utilities (project-bucket alias resolution, BM25 tokenizer/
+    # indexer) used by both the daemon and the hook side. Pulled in as a
+    # path dep so the hooks always see the same code the daemon does.
+    "agent-mem-search",
 ]
+
+[tool.uv.sources]
+agent-mem-search = { path = "../tools/search", editable = true }
 
 [tool.ruff]
 line-length = 100

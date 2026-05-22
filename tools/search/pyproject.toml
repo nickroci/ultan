@@ -20,7 +20,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 # Flat module layout: cli.py, bm25.py, frontmatter.py live at package root.
-only-include = ["cli.py", "bm25.py", "frontmatter.py", "embeddings.py"]
+only-include = ["cli.py", "bm25.py", "frontmatter.py", "embeddings.py", "aliases.py"]
 sources = ["."]
 
 [tool.ruff]
@@ -35,7 +35,7 @@ select = ["E", "F", "I", "W"]
 "test_*.py" = ["E501"]
 
 [tool.pyright]
-include = ["bm25.py", "cli.py", "embeddings.py", "frontmatter.py", "test_*.py"]
+include = ["bm25.py", "cli.py", "embeddings.py", "frontmatter.py", "aliases.py", "test_*.py"]
 exclude = [".venv", "**/__pycache__", "build", "dist", "fixtures"]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"

@@ -118,7 +118,12 @@ class _FakeRpcServer(threading.Thread):
         self._socket_path = socket_path
         self._handler = handler
         self._server: socket.socket | None = None
-        self._stop = threading.Event()
+        # NB: ``threading.Thread`` itself uses ``self._stop`` internally
+        # (it's the method ``Thread.join()`` calls on teardown). Picking
+        # a different name avoids shadowing it with our Event and
+        # crashing the cleanup with ``TypeError: 'Event' object is not
+        # callable``.
+        self._stop_event = threading.Event()
         self._ready = threading.Event()
 
     def start_and_wait(self, timeout: float = 2.0) -> None:
@@ -141,7 +146,7 @@ class _FakeRpcServer(threading.Thread):
         self._server = self._bind()
         self._ready.set()
         try:
-            while not self._stop.is_set():
+            while not self._stop_event.is_set():
                 try:
                     conn, _ = self._server.accept()
                 except socket.timeout:
@@ -197,7 +202,7 @@ class _FakeRpcServer(threading.Thread):
                 pass
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
         if self._server:
             try:
                 self._server.close()
@@ -337,6 +342,104 @@ def test_take_nudges_clears_file_even_when_over_budget(tmp_path: Path):
     assert selected == []
     assert consumed == 3
     assert not nudges_path.exists()  # cleared
+
+
+def test_take_nudges_filters_cross_project_and_requeues(tmp_path: Path, monkeypatch):
+    """A vol-predictor nudge surfaced in an agent-mem session must be
+    skipped AND re-queued for a future session in the matching project.
+    Global and current-project nudges are delivered normally.
+
+    Pin AGENT_MEM_HOME so the real ``~/.agent-mem/project-aliases.json``
+    can't bleed into the assertions (the auto-bootstrap may have
+    populated it between turns)."""
+    monkeypatch.setenv("AGENT_MEM_HOME", str(tmp_path))
+    nudges_path = tmp_path / "pending-nudges.md"
+    state_path = tmp_path / "state" / "nudge-budget-s1.json"
+    blocks = [
+        # other project — should be filtered out and re-queued
+        "---\nid: a1\ncreated: 2026-05-21T00:00:00+00:00\n"
+        "lesson: projects/vol-predictor/foo.md\n---\nVOL text\n",
+        # global — should always pass
+        "---\nid: a2\ncreated: 2026-05-21T00:00:00+00:00\n"
+        "lesson: global/bar.md\n---\nGLOBAL text\n",
+        # current project — should pass
+        "---\nid: a3\ncreated: 2026-05-21T00:00:00+00:00\n"
+        "lesson: projects/agent-mem/baz.md\n---\nAGENTMEM text\n",
+    ]
+    nudges_path.write_text("\n".join(blocks), encoding="utf-8")
+
+    selected, _consumed = _nudges.take_nudges(
+        "s1",
+        per_turn_budget=5,
+        current_project_slug="agent-mem",
+        _nudges_path=nudges_path,
+        _budget_state_path=state_path,
+    )
+    ids = [n.id for n in selected]
+    assert "a1" not in ids, "cross-project nudge should NOT be delivered"
+    assert ids == ["a2", "a3"], f"order preserved among eligible nudges: {ids}"
+
+    # The vol-predictor nudge should have been written back to the file
+    # so a future session in that project can claim it.
+    assert nudges_path.exists(), "re-queue should re-create the nudges file"
+    requeued_body = nudges_path.read_text(encoding="utf-8")
+    assert "a1" in requeued_body
+    assert "a2" not in requeued_body
+    assert "a3" not in requeued_body
+
+
+def test_take_nudges_uses_alias_map_to_match_slug_to_bucket(tmp_path: Path, monkeypatch):
+    """Bucket ``agent-mem`` declares its canonical slug as
+    ``github.com-nickroci-ultan``; a session with that slug should
+    then deliver the agent-mem nudge. File shape is
+    ``{<bucket>: <canonical-slug>}``."""
+    monkeypatch.setenv("AGENT_MEM_HOME", str(tmp_path))
+    aliases = tmp_path / "project-aliases.json"
+    aliases.write_text('{"agent-mem": "github.com-nickroci-ultan"}', encoding="utf-8")
+
+    nudges_path = tmp_path / "pending-nudges.md"
+    state_path = tmp_path / "state" / "nudge-budget-s1.json"
+    blocks = [
+        # agent-mem entry — should pass once the alias is honoured
+        "---\nid: a1\ncreated: 2026-05-21T00:00:00+00:00\n"
+        "lesson: projects/agent-mem/baz.md\n---\nAGENTMEM text\n",
+        # vol-predictor entry — should still be filtered out
+        "---\nid: a2\ncreated: 2026-05-21T00:00:00+00:00\n"
+        "lesson: projects/vol-predictor/foo.md\n---\nVOL text\n",
+    ]
+    nudges_path.write_text("\n".join(blocks), encoding="utf-8")
+
+    selected, _ = _nudges.take_nudges(
+        "s1",
+        per_turn_budget=5,
+        current_project_slug="github.com-nickroci-ultan",
+        _nudges_path=nudges_path,
+        _budget_state_path=state_path,
+    )
+    assert [n.id for n in selected] == ["a1"], "alias should let slug match bucket"
+    requeued = nudges_path.read_text(encoding="utf-8")
+    assert "a2" in requeued and "a1" not in requeued
+
+
+def test_take_nudges_no_slug_is_permissive(tmp_path: Path):
+    """When the session has no project context (no slug derivable from
+    cwd) we deliver every queued nudge — better than letting it sit
+    forever waiting on a session that never comes."""
+    nudges_path = tmp_path / "pending-nudges.md"
+    state_path = tmp_path / "state" / "nudge-budget-s1.json"
+    nudges_path.write_text(
+        "---\nid: a1\ncreated: 2026-05-21T00:00:00+00:00\n"
+        "lesson: projects/vol-predictor/foo.md\n---\nVOL text\n",
+        encoding="utf-8",
+    )
+    selected, _ = _nudges.take_nudges(
+        "s1",
+        per_turn_budget=5,
+        current_project_slug=None,
+        _nudges_path=nudges_path,
+        _budget_state_path=state_path,
+    )
+    assert [n.id for n in selected] == ["a1"]
 
 
 def test_render_context_includes_count_and_paths():

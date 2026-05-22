@@ -4,6 +4,7 @@ Centralised so tests can override the root via ``AGENT_MEM_HOME`` and so
 the rest of the daemon never hardcodes a path. The hook author (other
 agent) reads the same env var, so the contract stays in one file.
 """
+
 from __future__ import annotations
 
 import os

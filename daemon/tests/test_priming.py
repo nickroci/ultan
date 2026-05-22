@@ -466,10 +466,11 @@ def test_refresh_never_raises_on_garbage_inputs(tmp_path):
     # No assertion needed — the test passes if no exception escapes.
 
 
-def test_bullet_format_includes_summary_and_count(tmp_path):
-    """Wire-shape pin: ``- [[path]] (×N) — summary`` for reinforced;
-    ``- [[path]] — summary`` for unreinforced. Tested directly so a
-    formatting refactor can't silently change the on-disk shape.
+def test_bullet_format_includes_title_hook_and_count(tmp_path):
+    """Wire-shape pin: ``- [[path]] (×N) — Title — applies-when hook``
+    for reinforced; ``- [[path]] — Title — hook`` for unreinforced.
+    Tested directly so a formatting refactor can't silently change the
+    on-disk shape.
 
     We layer the two target entries on top of the seeded library so
     BM25 has enough corpus to give the topical tokens nonzero IDF.
@@ -507,8 +508,87 @@ def test_bullet_format_includes_summary_and_count(tmp_path):
     )
     body = out.read_text(encoding="utf-8")
 
-    assert "[[global/always-vinglex]] (×4) — installing vinglex frobnitz" in body
-    assert "[[global/qwoxlate-plain]] — some qwoxlate cromulent situation" in body
+    assert (
+        "[[global/always-vinglex]] (×4) — Always use vinglex — installing vinglex frobnitz" in body
+    )
+    assert "[[global/qwoxlate-plain]] — A plain entry — some qwoxlate cromulent situation" in body
+
+
+def test_scope_bonus_prefers_current_project_then_global(tmp_path):
+    """Three entries with identical RRF scores but different scopes:
+    current-project gets the +0.020 bump, global gets +0.005, other
+    project gets nothing. Ordering after _boost_with_reinforcement must
+    reflect that."""
+    k = tmp_path / "knowledge"
+    cur_path = k / "projects" / "myproj" / "entry.md"
+    other_path = k / "projects" / "otherproj" / "entry.md"
+    global_path = k / "global" / "entry.md"
+    _write(cur_path, _entry(id_="cur", title="Cur", applies_when="x", keywords=["x"]))
+    _write(other_path, _entry(id_="oth", title="Oth", applies_when="x", keywords=["x"]))
+    _write(global_path, _entry(id_="glb", title="Glb", applies_when="x", keywords=["x"]))
+
+    # Tied RRF score so only the scope bonus orders them.
+    hits = [(other_path, 0.05), (global_path, 0.05), (cur_path, 0.05)]
+    ranked = priming._boost_with_reinforcement(hits, knowledge_dir=k, current_project_slug="myproj")
+    paths = [str(p.relative_to(k)) for p, _, _ in ranked]
+    assert paths == [
+        "projects/myproj/entry.md",
+        "global/entry.md",
+        "projects/otherproj/entry.md",
+    ]
+
+
+def test_scope_bonus_uses_alias_map_to_resolve_bucket_slug(tmp_path):
+    """A bucket named ``agent-mem`` whose canonical slug is declared in
+    project-aliases.json as ``github.com-nickroci-ultan`` should win the
+    current-project boost when that session slug arrives. The autouse
+    fixture points AGENT_MEM_HOME at tmp_path, so the alias file lives
+    at tmp_path/project-aliases.json for the duration of the test."""
+    k = tmp_path / "knowledge"
+    cur_path = k / "projects" / "agent-mem" / "entry.md"
+    other_path = k / "projects" / "vol-predictor" / "entry.md"
+    _write(cur_path, _entry(id_="cur", title="Cur", applies_when="x", keywords=["x"]))
+    _write(other_path, _entry(id_="oth", title="Oth", applies_when="x", keywords=["x"]))
+
+    aliases_file = tmp_path / "project-aliases.json"
+    aliases_file.write_text('{"agent-mem": "github.com-nickroci-ultan"}', encoding="utf-8")
+
+    hits = [(other_path, 0.05), (cur_path, 0.05)]
+    ranked = priming._boost_with_reinforcement(
+        hits, knowledge_dir=k, current_project_slug="github.com-nickroci-ultan"
+    )
+    paths = [str(p.relative_to(k)) for p, _, _ in ranked]
+    assert paths == ["projects/agent-mem/entry.md", "projects/vol-predictor/entry.md"]
+
+
+def test_alias_helpers_default_to_identity_when_empty():
+    """No alias file -> ``{}`` map -> bucket maps to itself. The
+    canonical resolver lives in tools/search/aliases.py (shared with
+    the hook side); we re-export it through priming so this test
+    pins the daemon-visible behaviour."""
+    assert priming.load_aliases(Path("/nonexistent/path/that/does/not/exist")) == {}
+    assert priming.bucket_canonical_slug("agent-mem", {}) == "agent-mem"
+    assert priming.bucket_canonical_slug(None, {}) is None
+    assert (
+        priming.bucket_canonical_slug("agent-mem", {"agent-mem": "github.com-nickroci-ultan"})
+        == "github.com-nickroci-ultan"
+    )
+
+
+def test_scope_bonus_off_when_slug_missing(tmp_path):
+    """Without a current_project_slug, only the global bonus applies —
+    current-project and other-project entries get nothing, so the global
+    one floats above ties."""
+    k = tmp_path / "knowledge"
+    other_path = k / "projects" / "otherproj" / "entry.md"
+    global_path = k / "global" / "entry.md"
+    _write(other_path, _entry(id_="oth", title="Oth", applies_when="x", keywords=["x"]))
+    _write(global_path, _entry(id_="glb", title="Glb", applies_when="x", keywords=["x"]))
+
+    hits = [(other_path, 0.05), (global_path, 0.05)]
+    ranked = priming._boost_with_reinforcement(hits, knowledge_dir=k, current_project_slug=None)
+    paths = [str(p.relative_to(k)) for p, _, _ in ranked]
+    assert paths == ["global/entry.md", "projects/otherproj/entry.md"]
 
 
 def test_idempotence_skips_write_after_initial(tmp_path, monkeypatch):

@@ -58,6 +58,7 @@ if str(_THIS_DIR) not in sys.path:
 from _events import append_event  # noqa: E402
 from _nudges import render_context, take_nudges  # noqa: E402
 from _priming_client import get_priming  # noqa: E402
+from scope import current_project_slug  # noqa: E402
 
 
 def _emit_additional_context(context: str) -> None:
@@ -134,8 +135,18 @@ def main() -> None:
     # Priming may still have been added above.
     session_id = hook_input.get("session_id")
     if session_id:
+        # Derive the project slug from the hook's cwd so cross-project
+        # nudges (e.g. a vol-predictor nudge queued earlier) don't fire
+        # in unrelated repos. ``current_project_slug`` falls back to
+        # ``os.getcwd()`` when the hook payload omits cwd.
+        hook_cwd = hook_input.get("cwd")
         try:
-            nudges, _consumed = take_nudges(str(session_id))
+            project_slug = current_project_slug(hook_cwd if isinstance(hook_cwd, str) else None)
+        except Exception:
+            project_slug = None
+
+        try:
+            nudges, _consumed = take_nudges(str(session_id), current_project_slug=project_slug)
         except Exception:
             # Best effort. A broken nudges file must never crash the host.
             nudges = []

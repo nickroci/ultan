@@ -34,6 +34,7 @@ if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
 from _events import append_event  # noqa: E402
+from aliases import session_bucket  # noqa: E402
 from config import (  # noqa: E402
     DAILY_DIR,
     INDEX_FILE,
@@ -129,6 +130,22 @@ def main():
         hook_cwd = os.getcwd()
 
     project_slug = current_project_slug(hook_cwd)
+
+    # Resolve which library bucket this session belongs to. Same call
+    # the nudge filter (and eventually scholar's write path) uses — one
+    # function answers "what bucket?" for every layer. Auto-creates the
+    # alias entry inside session_bucket when there's evidence of a real
+    # bucket. Wrapped in try/except because session-start MUST never
+    # fail the host.
+    try:
+        _agent_mem_home_path = (
+            Path(os.environ["AGENT_MEM_HOME"]).expanduser()
+            if os.environ.get("AGENT_MEM_HOME")
+            else Path.home() / ".agent-mem"
+        )
+        session_bucket(_agent_mem_home_path, Path(hook_cwd), project_slug)
+    except Exception:
+        pass
 
     context = build_context(project_slug)
 

@@ -129,16 +129,19 @@ def _reinforced_count(fm: Dict[str, Any]) -> int:
     return n if n > 0 else 0
 
 
-def _entry_summary(fm: Dict[str, Any], path: Path) -> str:
-    """One-line summary: prefer applies-when's first line, else title,
-    else the slug. Always non-empty."""
-    s = _first_line(fm.get("applies-when") or fm.get("applies_when"))
-    if s:
-        return s
+def _entry_title(fm: Dict[str, Any], path: Path) -> str:
+    """Punchy human-readable title for the entry. Falls back to the
+    slug (de-kebabed) if no ``title:`` frontmatter is present."""
     title = fm.get("title")
     if isinstance(title, str) and title.strip():
         return _shorten(title.strip())
     return path.stem.replace("-", " ")
+
+
+def _entry_applies_when(fm: Dict[str, Any]) -> str:
+    """First line of the applies-when block, shortened. May be empty
+    if the frontmatter has no applies-when at all."""
+    return _first_line(fm.get("applies-when") or fm.get("applies_when"))
 
 
 def _wikilink_path(entry: Path, knowledge_dir: Path) -> str:
@@ -376,21 +379,97 @@ def _hybrid_search(
     return _rrf_merge([bm25_hits, emb_hits], k_top=k)
 
 
+# Scope bonuses are calibrated against the RRF top-rank score (~0.016 for
+# rank 1, ~0.033 with both lanes hitting the top). Current-project +0.020
+# is roughly a 4-rank bump; global +0.005 is roughly a 1-rank bump; cross-
+# project entries get no bonus. Designed to break near-ties and gently
+# reorder, not to override a strong topical match. Tune here if needed.
+_SCOPE_BONUS_CURRENT = 0.020
+_SCOPE_BONUS_GLOBAL = 0.005
+
+
+# Project-scope alias resolution lives in ``tools/search/aliases.py``
+# (shared with the hook side) — see that module's docstring for shape
+# and contract.
+from aliases import bucket_canonical_slug, load_aliases  # noqa: E402
+
+
+def _path_project_bucket(path: Path, knowledge_dir: Path) -> Optional[str]:
+    """Return the project bucket name for entries under ``projects/<bucket>/``,
+    the sentinel ``"__global__"`` for entries under ``global/``, or ``None``
+    for root-level entries (READMEs etc. that belong to no specific scope).
+    """
+    try:
+        rel = path.resolve().relative_to(knowledge_dir.resolve())
+    except ValueError:
+        return None
+    parts = rel.parts
+    if len(parts) >= 2 and parts[0] == "projects":
+        return parts[1]
+    if parts and parts[0] == "global":
+        return "__global__"
+    return None
+
+
+def _scope_bonus(
+    bucket: Optional[str],
+    current_project_slug: Optional[str],
+    aliases: Mapping[str, str],
+) -> float:
+    """Score adjustment for project-scope preference.
+
+    - Entries under the user's current project: ``+_SCOPE_BONUS_CURRENT``
+    - Global entries: ``+_SCOPE_BONUS_GLOBAL``
+    - Other-project entries (and root entries with no bucket): ``0.0``
+
+    Matching is done by translating the bucket name to its canonical
+    slug (via ``_bucket_canonical_slug``) and comparing against the
+    session's slug — buckets not listed in the alias map default to
+    slug == bucket name.
+    """
+    if bucket is None:
+        return 0.0
+    if bucket == "__global__":
+        return _SCOPE_BONUS_GLOBAL
+    if current_project_slug and bucket_canonical_slug(bucket, aliases) == current_project_slug:
+        return _SCOPE_BONUS_CURRENT
+    return 0.0
+
+
 def _boost_with_reinforcement(
     hits: List[Tuple[Path, float]],
+    *,
+    knowledge_dir: Optional[Path] = None,
+    current_project_slug: Optional[str] = None,
 ) -> List[Tuple[Path, float, int]]:
-    """Re-rank by ``score + reinforced * 0.5``.
+    """Re-rank by ``score + reinforced * 0.5 + scope_bonus``.
 
-    The multiplier is gentle on purpose: reinforced is an integer
-    counter the user has driven up by repetition, and BM25 scores on a
-    small corpus typically sit in the 1.0–4.0 range, so half a point per
-    reinforcement reliably nudges a reasserted entry up without
+    The reinforcement multiplier is gentle on purpose: reinforced is an
+    integer counter the user has driven up by repetition, and BM25 scores
+    on a small corpus typically sit in the 1.0–4.0 range, so half a point
+    per reinforcement reliably nudges a reasserted entry up without
     overwhelming a genuinely better BM25 match.
+
+    When ``knowledge_dir`` is supplied, also applies the scope bonus
+    (see ``_scope_bonus``). ``current_project_slug`` may be ``None``;
+    in that case only the global bonus fires (no current-project boost).
+    Each bucket's canonical slug is read from
+    ``~/.agent-mem/project-aliases.json`` (see ``aliases.load_aliases``);
+    buckets absent from that file default to ``slug == bucket name``.
 
     Returns ``(path, ranked_score, reinforced_count)`` sorted desc by
     the BOOSTED score. Stable on tie via path string so output is
     deterministic across runs.
     """
+    # Load the alias map once per call. The lookup is cheap (one small
+    # JSON read) and skipping it on the no-scope path keeps that path
+    # zero-cost.
+    aliases: Mapping[str, str] = {}
+    if knowledge_dir is not None:
+        from .paths import home as _agent_mem_home
+
+        aliases = load_aliases(_agent_mem_home())
+
     enriched: List[Tuple[Path, float, int, float]] = []
     for path, score in hits:
         try:
@@ -400,7 +479,14 @@ def _boost_with_reinforcement(
             continue
         fm = _parse_frontmatter(text)
         reinforced = _reinforced_count(fm)
-        boosted = score + reinforced * 0.5
+        scope = 0.0
+        if knowledge_dir is not None:
+            scope = _scope_bonus(
+                _path_project_bucket(path, knowledge_dir),
+                current_project_slug,
+                aliases,
+            )
+        boosted = score + reinforced * 0.5 + scope
         enriched.append((path, boosted, reinforced, score))
     enriched.sort(key=lambda t: (-t[1], str(t[0])))
     return [(p, ranked, reinforced) for p, ranked, reinforced, _orig in enriched]
@@ -416,8 +502,10 @@ def _render_bullet(
     *,
     title_only: bool = False,
 ) -> str:
-    """Render one bullet line. ``title_only`` drops the summary suffix
-    (used as a fallback when the budget is tight)."""
+    """Render one bullet line. ``title_only`` drops the applies-when
+    hook (used as a fallback when the budget is tight) while keeping
+    the title so the agent always has something semantic to anchor on.
+    """
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
@@ -425,12 +513,19 @@ def _render_bullet(
     fm = _parse_frontmatter(text)
     link = _wikilink_path(path, knowledge_dir)
     count_suffix = f" (×{reinforced})" if reinforced > 0 else ""
+    title = _entry_title(fm, path)
     if title_only:
-        return f"- [[{link}]]{count_suffix}"
-    summary = _entry_summary(fm, path)
-    if not summary:
-        return f"- [[{link}]]{count_suffix}"
-    return f"- [[{link}]]{count_suffix} — {summary}"
+        if not title:
+            return f"- [[{link}]]{count_suffix}"
+        return f"- [[{link}]]{count_suffix} — {title}"
+    hook = _entry_applies_when(fm)
+    if title and hook:
+        return f"- [[{link}]]{count_suffix} — {title} — {_shorten(hook, max_chars=70)}"
+    if title:
+        return f"- [[{link}]]{count_suffix} — {title}"
+    if hook:
+        return f"- [[{link}]]{count_suffix} — {_shorten(hook)}"
+    return f"- [[{link}]]{count_suffix}"
 
 
 def _assemble_output(
@@ -496,6 +591,7 @@ def refresh_hot_context(
     *,
     top_k: int = 5,
     char_budget: int = 1500,
+    current_project_slug: Optional[str] = None,
 ) -> Optional[Path]:
     """Recompute the hot-context file from the recent buffer.
 
@@ -543,7 +639,11 @@ def refresh_hot_context(
                 return out_path
             return None
 
-        ranked = _boost_with_reinforcement(hits)
+        ranked = _boost_with_reinforcement(
+            hits,
+            knowledge_dir=knowledge_dir,
+            current_project_slug=current_project_slug,
+        )
         body = _assemble_output(
             ranked,
             knowledge_dir,

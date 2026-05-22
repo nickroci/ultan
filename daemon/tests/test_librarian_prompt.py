@@ -353,6 +353,33 @@ def test_derive_project_slug_unknown_when_nothing():
     assert lp.derive_project_slug({}) == "unknown"
 
 
+def test_derive_project_bucket_uses_session_bucket_resolver(tmp_path, monkeypatch):
+    """``derive_project_bucket`` must route through
+    ``aliases.session_bucket`` so the daemon's path generation stays in
+    sync with the hook side. We point AGENT_MEM_HOME at tmp_path, lay
+    down a real bucket dir + a git repo, and verify the resolver picks
+    the bucket name (not the slug) for the LLM prompt."""
+    monkeypatch.setenv("AGENT_MEM_HOME", str(tmp_path))
+    # On-disk bucket named "agent-mem", git repo with that basename,
+    # session slug from the (hypothetical) git remote.
+    (tmp_path / "knowledge" / "projects" / "agent-mem").mkdir(parents=True)
+    repo = tmp_path / "agent-mem"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+
+    snap = {"cwd": str(repo), "project_slug": "github.com-nickroci-ultan"}
+    assert lp.derive_project_bucket(snap) == "agent-mem"
+
+
+def test_derive_project_bucket_falls_back_to_slug_without_cwd():
+    """Older snapshots / weird inputs without cwd should still produce
+    a usable value — return the (slugified) slug rather than crashing.
+    ``derive_project_slug`` flattens non-alphanum to dashes, hence
+    ``github.com-...`` becomes ``github-com-...``."""
+    snap = {"project_slug": "github.com-nickroci-ultan"}
+    assert lp.derive_project_bucket(snap) == "github-com-nickroci-ultan"
+
+
 # ── load_prompt_template / assemble_prompt ────────────────────────────
 
 
