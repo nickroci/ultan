@@ -11,6 +11,7 @@ Logging is a debugging aid, never a hard dependency: every failure path
 here is best-effort and silent so a logging hiccup can never block the
 daemon from coming up.
 """
+
 from __future__ import annotations
 
 import logging
