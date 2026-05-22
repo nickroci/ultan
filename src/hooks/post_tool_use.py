@@ -29,6 +29,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Any, Mapping, Optional, cast
 
 _THIS_DIR = Path(__file__).resolve().parent
 _CODE_ROOT = _THIS_DIR.parent
@@ -38,10 +39,10 @@ if str(_SCRIPTS_DIR) not in sys.path:
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-from _events import append_event  # noqa: E402
+from _events import EventPayload, HookPayload, append_event  # noqa: E402
 
 
-def _parse_stdin() -> dict | None:
+def _parse_stdin() -> Optional[HookPayload]:
     """Parse the JSON hook_input from stdin; return None on any failure.
 
     Same Windows-backslash workaround as the other hooks — Claude Code
@@ -51,19 +52,21 @@ def _parse_stdin() -> dict | None:
     try:
         raw = sys.stdin.read()
         try:
-            parsed = json.loads(raw)
+            parsed: Any = json.loads(raw)
         except json.JSONDecodeError:
             fixed = re.sub(r'(?<!\\)\\(?!["\\])', r"\\\\", raw)
             parsed = json.loads(fixed)
     except (json.JSONDecodeError, ValueError, EOFError):
         return None
-    return parsed if isinstance(parsed, dict) else None
+    if not isinstance(parsed, dict):
+        return None
+    return cast("HookPayload", parsed)
 
 
-def _first_str_field(d: dict, keys: tuple[str, ...]) -> str:
+def _first_str_field(d: Mapping[str, Any], keys: tuple[str, ...]) -> str:
     """Return the first non-empty string field from ``d`` keyed by ``keys``."""
     for key in keys:
-        v = d.get(key)
+        v: Any = d.get(key)
         if isinstance(v, str) and v:
             return v
     return ""
@@ -74,11 +77,12 @@ def _response_text(tool_response: object) -> str:
     if isinstance(tool_response, str):
         return tool_response
     if isinstance(tool_response, dict):
-        return str(tool_response.get("content") or tool_response.get("output") or "")
+        resp = cast("Mapping[str, Any]", tool_response)
+        return str(resp.get("content") or resp.get("output") or "")
     return ""
 
 
-def _build_payload(hook_input: dict) -> dict:
+def _build_payload(hook_input: HookPayload) -> EventPayload:
     """Assemble the small payload dict that ships with the PostToolUse event.
 
     Field names align with what the daemon's Librarian extracts (see
@@ -86,16 +90,18 @@ def _build_payload(hook_input: dict) -> dict:
     / command / new_string when present; ``summary`` gets a one-line
     synthesized description as a fallback.
     """
-    name = str(hook_input.get("tool_name") or "unknown")
+    raw_name: Any = hook_input.get("tool_name") or "unknown"
+    name = str(raw_name) if not isinstance(raw_name, str) else raw_name
     # Success heuristic: PostToolUse carries ``tool_response``; the
     # corresponding failure event carries ``error`` instead. Default to
     # True so we don't falsely flag every event when the shape is odd.
-    ok = not (hook_input.get("error"))
+    ok = not hook_input.get("error")
 
-    tool_input = hook_input.get("tool_input") or {}
+    raw_tool_input: Any = hook_input.get("tool_input") or {}
     target = ""
     content = ""
-    if isinstance(tool_input, dict):
+    if isinstance(raw_tool_input, dict):
+        tool_input = cast("Mapping[str, Any]", raw_tool_input)
         target = _first_str_field(tool_input, ("file_path", "path", "url", "pattern", "query"))
         content = _first_str_field(tool_input, ("new_string", "content", "command", "code"))
 

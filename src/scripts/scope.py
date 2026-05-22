@@ -15,7 +15,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 # ── Slug normaliser ────────────────────────────────────────────────────
 
@@ -88,7 +88,7 @@ def _git_remote_slug(cwd: Path) -> Optional[str]:
 # ── Public API ─────────────────────────────────────────────────────────
 
 
-def current_project_slug(cwd: Optional[str | os.PathLike] = None) -> str:
+def current_project_slug(cwd: Optional[Union[str, "os.PathLike[str]"]] = None) -> str:
     """Best-effort project slug for the given (or current) working directory.
 
     Order of preference:

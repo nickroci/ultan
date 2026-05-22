@@ -16,6 +16,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any, Callable, Optional, cast
 
 _THIS_DIR = Path(__file__).resolve().parent
 _CODE_ROOT = _THIS_DIR.parent
@@ -25,8 +26,16 @@ if str(_SCRIPTS_DIR) not in sys.path:
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-from _events import append_event  # noqa: E402
+import scope  # noqa: E402
+from _events import HookPayload, append_event  # noqa: E402
 from aliases import session_bucket  # noqa: E402
+
+# Local re-typed view of ``scope.current_project_slug`` — see
+# ``user_prompt_submit.py`` for the rationale.
+_current_project_slug: Callable[[Optional[str]], str] = cast(
+    Callable[[Optional[str]], str],
+    getattr(scope, "current_project_slug"),
+)
 
 MAX_CONTEXT_CHARS = 20_000
 MAX_LOG_LINES = 30
@@ -65,7 +74,7 @@ def get_recent_log(daily_dir: Path) -> str:
 
 def build_context(project_slug: str, store: Path) -> str:
     """Assemble the context to inject into the conversation."""
-    parts = []
+    parts: list[str] = []
 
     today = datetime.now(timezone.utc).astimezone()
     parts.append(
@@ -103,15 +112,16 @@ def main() -> None:
     _ensure_store_dirs(store)
 
     # Read hook input if present; fall back to environment otherwise.
-    hook_input: dict = {}
-    hook_cwd = None
+    hook_input: HookPayload = {}
+    raw_cwd: Optional[str] = None
     try:
         raw = sys.stdin.read()
         if raw.strip():
-            hook_input = json.loads(raw)
-            if not isinstance(hook_input, dict):
-                hook_input = {}
-            hook_cwd = hook_input.get("cwd")
+            parsed: Any = json.loads(raw)
+            if isinstance(parsed, dict):
+                hook_input = cast("HookPayload", parsed)
+                cwd_val: Any = hook_input.get("cwd")
+                raw_cwd = cwd_val if isinstance(cwd_val, str) else None
     except (json.JSONDecodeError, ValueError, OSError):
         hook_input = {}
 
@@ -119,15 +129,13 @@ def main() -> None:
     # payload — one of startup|resume|clear|compact — and is the only
     # bit of state the daemon needs to distinguish a fresh boot from a
     # mid-conversation resume.
-    source = hook_input.get("source") or "unknown"
-    append_event("SessionStart", hook_input, payload={"source": str(source)})
+    raw_source: Any = hook_input.get("source") or "unknown"
+    source: str = raw_source if isinstance(raw_source, str) else str(raw_source)
+    append_event("SessionStart", hook_input, payload={"source": source})
 
-    if not hook_cwd:
-        hook_cwd = os.getcwd()
+    hook_cwd: str = raw_cwd if raw_cwd else os.getcwd()
 
-    from scope import current_project_slug  # local import keeps fast path lean
-
-    project_slug = current_project_slug(hook_cwd)
+    project_slug = _current_project_slug(hook_cwd)
 
     # Resolve which library bucket this session belongs to. Same call
     # the nudge filter (and eventually scholar's write path) uses — one

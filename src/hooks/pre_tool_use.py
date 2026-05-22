@@ -43,6 +43,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 _THIS_DIR = Path(__file__).resolve().parent
 _CODE_ROOT = _THIS_DIR.parent
@@ -53,7 +54,7 @@ if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
 from _blockers import find_match, load_blockers, rel_to_knowledge  # noqa: E402
-from _events import append_event  # noqa: E402
+from _events import EventPayload, HookPayload, append_event  # noqa: E402
 
 
 def _knowledge_dir() -> Path:
@@ -69,27 +70,32 @@ def _knowledge_dir() -> Path:
     return Path.home() / ".agent-mem" / "knowledge"
 
 
-def _read_hook_input() -> dict:
+def _read_hook_input() -> HookPayload:
     """Parse the stdin JSON Claude Code sends, with the same Windows
     backslash workaround used by the other hooks.
     """
     raw = sys.stdin.read()
+    parsed: Any
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
     except json.JSONDecodeError:
         # Lone backslashes in file paths sometimes break strict JSON
         # parsing on Windows; double them up and retry.
         fixed = re.sub(r'(?<!\\)\\(?!["\\])', r"\\\\", raw)
-        return json.loads(fixed)
+        parsed = json.loads(fixed)
+    if not isinstance(parsed, dict):
+        # Caller catches and short-circuits.
+        raise ValueError("hook payload was not a JSON object")
+    return cast("HookPayload", parsed)
 
 
-def _emit_hook_output(extra: dict) -> None:
+def _emit_hook_output(extra: dict[str, Any]) -> None:
     """Write the PreToolUse JSON response to stdout."""
     sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", **extra}}))
     sys.stdout.flush()
 
 
-def _handle_block(tool_name: str, wiki: str, rule: str, payload: dict) -> None:
+def _handle_block(tool_name: str, wiki: str, rule: str, payload: EventPayload) -> None:
     """Emit a ``permissionDecision: deny`` response and tag the payload."""
     reason = (
         f"⚠ Library blocks this action: [[{wiki}]] - {rule} Confirm with the user before retrying."
@@ -101,7 +107,7 @@ def _handle_block(tool_name: str, wiki: str, rule: str, payload: dict) -> None:
     payload["summary"] = f"{tool_name} blocked by [[{wiki}]]"
 
 
-def _handle_advise(tool_name: str, wiki: str, rule: str, payload: dict) -> None:
+def _handle_advise(tool_name: str, wiki: str, rule: str, payload: EventPayload) -> None:
     """Emit an ``additionalContext`` FYI response and tag the payload."""
     notice = f"📚 Library note (FYI; agent decides): [[{wiki}]] applies here — {rule}"
     _emit_hook_output({"additionalContext": notice})
@@ -122,21 +128,21 @@ def main() -> None:
         hook_input = _read_hook_input()
     except (json.JSONDecodeError, ValueError, EOFError):
         return
-    if not isinstance(hook_input, dict):
-        return
 
-    tool_name = hook_input.get("tool_name") or ""
-    tool_input = hook_input.get("tool_input") or {}
-    if not isinstance(tool_input, dict):
-        tool_input = {}
+    raw_tool_name: Any = hook_input.get("tool_name") or ""
+    tool_name = raw_tool_name if isinstance(raw_tool_name, str) else str(raw_tool_name)
+    raw_tool_input: Any = hook_input.get("tool_input") or {}
+    tool_input: dict[str, Any] = (
+        cast("dict[str, Any]", raw_tool_input) if isinstance(raw_tool_input, dict) else {}
+    )
 
     # ── 2. Blocker check. Cached, sub-100ms even with hundreds of
     # entries (see _blockers.py for the cache strategy). ───────────────
-    decision_payload: dict = {"role": "assistant", "tool": str(tool_name), "phase": "pre"}
+    decision_payload: EventPayload = {"role": "assistant", "tool": tool_name, "phase": "pre"}
     knowledge_dir = _knowledge_dir()
     try:
         blockers = load_blockers(knowledge_dir)
-        match = find_match(blockers, str(tool_name), tool_input)
+        match = find_match(blockers, tool_name, tool_input)
     except Exception:
         # The blocker check must never crash the host agent. Worst case
         # is "no block" — same as today's behaviour without this tier.
@@ -152,9 +158,9 @@ def main() -> None:
         except Exception:
             wiki = match.entry_path.stem
         if match.severity == "block":
-            _handle_block(str(tool_name), wiki, rule, decision_payload)
+            _handle_block(tool_name, wiki, rule, decision_payload)
         else:
-            _handle_advise(str(tool_name), wiki, rule, decision_payload)
+            _handle_advise(tool_name, wiki, rule, decision_payload)
 
     # ── 3. Event append (always, regardless of deny). The daemon needs
     # to see both the call and the block decision; PostToolUse won't

@@ -21,6 +21,13 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
+from claude_agent_sdk import (  # noqa: E402
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ResultMessage,
+    TextBlock,
+    query,
+)
 from config import (  # noqa: E402
     KNOWLEDGE_DIR,
     QA_DIR,
@@ -37,14 +44,6 @@ from utils import (  # noqa: E402
 
 async def run_query(question: str, file_back: bool = False) -> str:
     """Query the knowledge base and optionally file the answer back."""
-    from claude_agent_sdk import (
-        AssistantMessage,
-        ClaudeAgentOptions,
-        ResultMessage,
-        TextBlock,
-        query,
-    )
-
     wiki_content = read_all_wiki_content()
 
     tools = ["Read", "Glob", "Grep"]
@@ -63,8 +62,8 @@ After answering, do the following:
    of the question (e.g., knowledge/global/qa/how-to-handle-auth-redirects.md)
 2. Use the Q&A article format from the schema (frontmatter with title, question,
    consulted articles, filed date)
-3. Update {KNOWLEDGE_DIR / 'index.md'} with a new row for this Q&A article
-4. Append to {KNOWLEDGE_DIR / 'log.md'}:
+3. Update {KNOWLEDGE_DIR / "index.md"} with a new row for this Q&A article
+4. Append to {KNOWLEDGE_DIR / "log.md"}:
    ## [{timestamp}] query (filed) | question summary
    - Question: {question}
    - Consulted: [[list of articles read]]
@@ -124,7 +123,7 @@ consulting the knowledge base below.
     return answer
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Query the personal knowledge base")
     parser.add_argument("question", help="The question to ask")
     parser.add_argument(

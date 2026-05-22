@@ -20,6 +20,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
+from typing import TypedDict
 
 from config import (
     DAILY_DIR,
@@ -31,17 +32,44 @@ from config import (
     STATE_FILE,
 )
 
+# ── State shape ───────────────────────────────────────────────────────
+
+
+class IngestedEntry(TypedDict):
+    """One row in ``state["ingested"]`` — what compile.py wrote about a log."""
+
+    hash: str
+    compiled_at: str
+    cost_usd: float
+
+
+class State(TypedDict, total=False):
+    """Persistent state stored in ``~/.agent-mem/state/state.json``.
+
+    ``total=False`` because legacy state files on disk may be missing keys; the
+    loader fills in defaults, but downstream code should treat every key as
+    optional and use ``.get(...)`` with a default.
+    """
+
+    ingested: dict[str, IngestedEntry]
+    query_count: int
+    last_lint: str | None
+    total_cost: float
+
+
 # ── State management ──────────────────────────────────────────────────
 
 
-def load_state() -> dict:
+def load_state() -> State:
     """Load persistent state from state.json."""
     if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        # json.loads returns Any; we trust the schema we wrote ourselves.
+        loaded: State = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        return loaded
     return {"ingested": {}, "query_count": 0, "last_lint": None, "total_cost": 0.0}
 
 
-def save_state(state: dict) -> None:
+def save_state(state: State) -> None:
     """Save state to state.json."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")

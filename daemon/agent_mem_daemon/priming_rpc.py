@@ -61,12 +61,20 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from enum import StrEnum
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Mapping, Optional, cast
 
 from bm25 import load_or_build as bm25_load_or_build
 
 from . import priming
 from .paths import knowledge_dir, priming_socket_path
+
+# Wire-level type aliases. JSON parses into arbitrary nested values, so
+# we type incoming requests as Mapping[str, object] and use isinstance
+# narrowing at each access site. Responses are dicts the dispatch layer
+# serialises via json.dumps, so dict[str, object] is the right shape.
+RpcRequest = Mapping[str, object]
+RpcResponse = dict[str, object]
+RpcHandler = Callable[[RpcRequest], RpcResponse]
 
 log = logging.getLogger("agent_mem_daemon.priming_rpc")
 
@@ -132,7 +140,7 @@ def _recv_message(sock: socket.socket) -> Optional[bytes]:
 # ── Request handler ──────────────────────────────────────────────────
 
 
-def _handle_priming(req: dict) -> dict:
+def _handle_priming(req: RpcRequest) -> RpcResponse:
     """Render a priming snippet for ``req['prompt']``.
 
     Reuses ``priming._hybrid_search`` (BM25 + embeddings via RRF) and
@@ -142,26 +150,28 @@ def _handle_priming(req: dict) -> dict:
 
     Returns a wire-ready dict (no socket I/O here).
     """
-    prompt = req.get("prompt") or ""
-    if not isinstance(prompt, str):
+    raw_prompt: object = req.get("prompt") or ""
+    if not isinstance(raw_prompt, str):
         return {"ok": False, "error": "prompt must be a string"}
-    prompt = prompt.strip()
+    prompt = raw_prompt.strip()
     if not prompt:
         # Empty prompt -> empty render, but not an error. The hook
         # treats empty markdown as "nothing to inject" and moves on.
         return {"ok": True, "priming_md": "", "took_ms": 0, "lane": "bm25"}
 
-    k = req.get("k", 5)
-    char_budget = req.get("char_budget", 1500)
+    raw_k: object = req.get("k", 5)
+    raw_budget: object = req.get("char_budget", 1500)
+    if not isinstance(raw_k, (int, float, str)) or not isinstance(raw_budget, (int, float, str)):
+        return {"ok": False, "error": "k and char_budget must be ints"}
     try:
-        k = int(k)
-        char_budget = int(char_budget)
+        k = int(raw_k)
+        char_budget = int(raw_budget)
     except (TypeError, ValueError):
         return {"ok": False, "error": "k and char_budget must be ints"}
     if k <= 0 or char_budget <= 0:
         return {"ok": False, "error": "k and char_budget must be positive"}
 
-    raw_slug = req.get("project_slug")
+    raw_slug: object = req.get("project_slug")
     current_project_slug: Optional[str] = (
         raw_slug.strip() if isinstance(raw_slug, str) and raw_slug.strip() else None
     )
@@ -174,7 +184,7 @@ def _handle_priming(req: dict) -> dict:
     # Pull a few extras so the reinforcement boost can promote a
     # low-BM25-but-heavily-reinforced entry into the top_k. Mirrors
     # priming.refresh_hot_context's strategy.
-    hits = priming._hybrid_search(
+    hits = priming._hybrid_search(  # pyright: ignore[reportPrivateUsage]  # sibling-module helper
         kdir,
         prompt,
         k=max(k * 2, k + 3),
@@ -192,12 +202,12 @@ def _handle_priming(req: dict) -> dict:
         took_ms = int((time.monotonic() - t0) * 1000)
         return {"ok": True, "priming_md": "", "took_ms": took_ms, "lane": lane}
 
-    ranked = priming._boost_with_reinforcement(
+    ranked = priming._boost_with_reinforcement(  # pyright: ignore[reportPrivateUsage]
         hits,
         knowledge_dir=kdir,
         current_project_slug=current_project_slug,
     )
-    body = priming._assemble_output(
+    body = priming._assemble_output(  # pyright: ignore[reportPrivateUsage]
         ranked,
         kdir,
         top_k=k,
@@ -207,7 +217,7 @@ def _handle_priming(req: dict) -> dict:
     return {"ok": True, "priming_md": body or "", "took_ms": took_ms, "lane": lane}
 
 
-def _handle_bm25_search(req: dict) -> dict:
+def _handle_bm25_search(req: RpcRequest) -> RpcResponse:
     """BM25 keyword search over the knowledge library.
 
     Mirrors what the in-process Librarian MCP tool offers
@@ -215,11 +225,14 @@ def _handle_bm25_search(req: dict) -> dict:
     socket so end-user skills can reach it without spawning an SDK
     call. Returns a list of ``{path, score, snippet}`` hits.
     """
-    query = req.get("query")
+    query: object = req.get("query")
     if not isinstance(query, str) or not query.strip():
         return {"ok": False, "error": "query must be a non-empty string"}
+    raw_k: object = req.get("k", 5)
+    if not isinstance(raw_k, (int, float, str)):
+        return {"ok": False, "error": "k must be an int"}
     try:
-        k = int(req.get("k", 5))
+        k = int(raw_k)
     except (TypeError, ValueError):
         return {"ok": False, "error": "k must be an int"}
     k = max(1, min(20, k))
@@ -238,7 +251,7 @@ def _handle_bm25_search(req: dict) -> dict:
 
     raw = index.search(query.strip(), k=k)
     kroot = kdir.resolve()
-    hits = []
+    hits: list[dict[str, object]] = []
     for p, score, snippet in raw:
         pp = Path(p)
         rel = str(pp.relative_to(kroot)) if pp.is_absolute() else str(pp)
@@ -246,7 +259,7 @@ def _handle_bm25_search(req: dict) -> dict:
     return {"ok": True, "hits": hits}
 
 
-def _handle_fetch_entry(req: dict) -> dict:
+def _handle_fetch_entry(req: RpcRequest) -> RpcResponse:
     """Fetch an entry + its directory context (siblings, subdirs, parent README).
 
     Accepts a wikilink (``[[...]]``) or plain relative path (with or
@@ -255,7 +268,7 @@ def _handle_fetch_entry(req: dict) -> dict:
     enough structural context for the caller to traverse without a
     second tool call per neighbour.
     """
-    path_arg = req.get("path")
+    path_arg: object = req.get("path")
     if not isinstance(path_arg, str) or not path_arg.strip():
         return {"ok": False, "error": "path must be a non-empty string"}
 
@@ -312,15 +325,17 @@ class RpcOp(StrEnum):
     FETCH_ENTRY = "fetch_entry"
 
 
-_HANDLERS: dict[RpcOp, Callable[[dict], dict]] = {
+_HANDLERS: dict[RpcOp, RpcHandler] = {
     RpcOp.PRIMING: _handle_priming,
     RpcOp.BM25_SEARCH: _handle_bm25_search,
     RpcOp.FETCH_ENTRY: _handle_fetch_entry,
 }
 
 
-def _dispatch(req: dict) -> dict:
-    op_raw = req.get("op")
+def _dispatch(req: RpcRequest) -> RpcResponse:
+    op_raw: object = req.get("op")
+    if not isinstance(op_raw, str):
+        return {"ok": False, "error": f"unknown op: {op_raw!r}"}
     try:
         op = RpcOp(op_raw)
     except ValueError:
@@ -328,7 +343,9 @@ def _dispatch(req: dict) -> dict:
     return _HANDLERS[op](req)
 
 
-def _read_request(conn: socket.socket) -> tuple[Optional[dict], Optional[dict]]:
+def _read_request(
+    conn: socket.socket,
+) -> tuple[Optional[RpcRequest], Optional[RpcResponse]]:
     """Read one length-prefixed JSON request. Returns ``(req, err_resp)``.
 
     Exactly one of the tuple slots is non-None:
@@ -340,15 +357,20 @@ def _read_request(conn: socket.socket) -> tuple[Optional[dict], Optional[dict]]:
     if raw is None:
         return None, None
     try:
-        req = json.loads(raw.decode("utf-8"))
+        parsed: object = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
         return None, {"ok": False, "error": f"bad json: {e}"}
-    if not isinstance(req, dict):
+    if not isinstance(parsed, dict):
         return None, {"ok": False, "error": "request must be a JSON object"}
+    # json.loads on an object yields dict[Any, Any]; the RPC protocol
+    # only ever uses string keys, so coerce on the way in to give the
+    # rest of the handler chain a fully-typed Mapping[str, object].
+    parsed_dict = cast("dict[object, object]", parsed)
+    req: RpcRequest = {str(k): v for k, v in parsed_dict.items()}
     return req, None
 
 
-def _safe_dispatch(req: dict) -> dict:
+def _safe_dispatch(req: RpcRequest) -> RpcResponse:
     """Run ``_dispatch`` and turn unexpected exceptions into a JSON error."""
     try:
         return _dispatch(req)
@@ -357,7 +379,7 @@ def _safe_dispatch(req: dict) -> dict:
         return {"ok": False, "error": f"handler error: {e.__class__.__name__}"}
 
 
-def _serialise_response(resp: dict) -> bytes:
+def _serialise_response(resp: RpcResponse) -> bytes:
     """JSON-encode ``resp`` with a fallback for unserialisable payloads."""
     try:
         return json.dumps(resp).encode("utf-8")
@@ -365,14 +387,21 @@ def _serialise_response(resp: dict) -> bytes:
         return json.dumps({"ok": False, "error": f"unserializable response: {e}"}).encode("utf-8")
 
 
-def _handle_connection(conn: socket.socket, addr) -> None:
-    """One client, one request, close. Never raises."""
+def _handle_connection(conn: socket.socket, addr: object) -> None:
+    """One client, one request, close. Never raises.
+
+    ``addr`` is the peer address from ``socket.accept()``; for AF_UNIX
+    sockets it's typically an empty string but the contract only
+    promises *something*, so we keep it as ``object`` (we don't use it).
+    """
+    del addr  # unused; kept positional so executor.submit's signature matches
     deadline = time.monotonic() + SERVER_REQUEST_TIMEOUT_S
     try:
         conn.settimeout(SERVER_REQUEST_TIMEOUT_S)
         req, err_resp = _read_request(conn)
         if req is None and err_resp is None:
             return
+        resp: RpcResponse
         if err_resp is not None:
             resp = err_resp
         elif time.monotonic() > deadline:

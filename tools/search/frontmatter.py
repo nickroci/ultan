@@ -10,6 +10,11 @@ The API is intentionally small:
     write(path, fm, body) -> None              (atomic)
     set_status(path, s)   -> None              (also bumps `updated`)
     bump_updated(path)    -> None
+
+Type model: YAML frontmatter is fundamentally untyped at the boundary
+(any scalar/list/dict per field), so the in-memory shape is
+``dict[str, object]``. Callers narrow individual fields with isinstance
+checks (see ``cli.py`` for examples).
 """
 
 from __future__ import annotations
@@ -19,11 +24,16 @@ import re
 import tempfile
 from datetime import date
 from pathlib import Path
-from typing import Any, Tuple
+from typing import Any, Mapping, cast
 
 import yaml
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+
+# In-memory frontmatter shape. YAML values can be anything (str, int, list,
+# dict, None) so ``object`` is the only honest annotation at the boundary.
+# Callers narrow individual fields via ``isinstance`` before using them.
+Frontmatter = dict[str, object]
 
 
 # The canonical order of fields documented in src/AGENTS.md §2. Anything not
@@ -55,7 +65,7 @@ class FrontmatterError(ValueError):
     """Raised when a file has no frontmatter or malformed frontmatter."""
 
 
-def read(path: Path) -> Tuple[dict, str]:
+def read(path: Path) -> tuple[Frontmatter, str]:
     """Read a markdown file's YAML frontmatter and body.
 
     Returns ``({}, full_text)`` if there is no frontmatter block — callers
@@ -68,20 +78,26 @@ def read(path: Path) -> Tuple[dict, str]:
         return {}, text
     raw = m.group(1)
     try:
-        fm = yaml.safe_load(raw) or {}
+        loaded: object = yaml.safe_load(raw)
     except yaml.YAMLError as e:
         raise FrontmatterError(f"malformed YAML frontmatter in {path}: {e}") from e
-    if not isinstance(fm, dict):
+    if loaded is None:
+        fm: Frontmatter = {}
+    elif isinstance(loaded, dict):
+        # yaml.safe_load can produce non-string keys (ints, bools). Coerce keys
+        # to strings to honour our Frontmatter contract.
+        fm = {str(k): v for k, v in loaded.items()}  # type: ignore[misc]
+    else:
         raise FrontmatterError(
-            f"frontmatter in {path} is not a mapping (got {type(fm).__name__})"
+            f"frontmatter in {path} is not a mapping (got {type(loaded).__name__})"
         )
-    body = text[m.end():]
+    body = text[m.end() :]
     return fm, body
 
 
-def _ordered(fm: dict) -> dict:
+def _ordered(fm: Mapping[str, object]) -> Frontmatter:
     """Return a new dict with canonical fields first, others trailing."""
-    out: dict = {}
+    out: Frontmatter = {}
     for key in _CANONICAL_ORDER:
         if key in fm:
             out[key] = fm[key]
@@ -91,7 +107,7 @@ def _ordered(fm: dict) -> dict:
     return out
 
 
-def _dump_yaml(fm: dict) -> str:
+def _dump_yaml(fm: Mapping[str, object]) -> str:
     """Dump frontmatter as YAML.
 
     - Preserves the multi-line block style of ``applies-when`` when it is a
@@ -100,18 +116,23 @@ def _dump_yaml(fm: dict) -> str:
     - sort_keys=False so our ordering wins.
     - allow_unicode=True so non-ASCII content stays readable.
     """
+
     # Coerce: any string value with a newline gets block-scalar style.
     class _Dumper(yaml.SafeDumper):
         pass
 
-    def _str_representer(dumper: yaml.SafeDumper, data: str):
+    def _str_representer(dumper: yaml.SafeDumper, data: str) -> yaml.ScalarNode:
         style = "|" if "\n" in data else None
-        return dumper.represent_scalar("tag:yaml.org,2002:str", data, style=style)
+        # PyYAML's stubs annotate ``represent_scalar`` partially (the value
+        # parameter type is Unknown), which trips strict pyright. Cast through
+        # Any at this single call site rather than spraying ignores.
+        rep = cast(Any, dumper).represent_scalar("tag:yaml.org,2002:str", data, style=style)
+        return cast(yaml.ScalarNode, rep)
 
     _Dumper.add_representer(str, _str_representer)
 
     return yaml.dump(
-        fm,
+        dict(fm),
         Dumper=_Dumper,
         sort_keys=False,
         allow_unicode=True,
@@ -119,7 +140,7 @@ def _dump_yaml(fm: dict) -> str:
     )
 
 
-def write(path: Path, fm: dict, body: str) -> None:
+def write(path: Path, fm: Mapping[str, object], body: str) -> None:
     """Atomically write frontmatter + body to ``path``.
 
     Uses a tmp file in the same directory + ``os.replace`` so callers never
@@ -166,18 +187,16 @@ def bump_updated(path: Path, today: str | None = None) -> None:
 def set_status(path: Path, status: str, *, today: str | None = None) -> None:
     """Set ``status:`` and bump ``updated:`` in one atomic write."""
     if status not in {"provisional", "confirmed", "stale"}:
-        raise ValueError(
-            f"invalid status {status!r}; expected provisional|confirmed|stale"
-        )
+        raise ValueError(f"invalid status {status!r}; expected provisional|confirmed|stale")
     fm, body = read(path)
     fm["status"] = status
     fm["updated"] = today or _today()
     write(path, fm, body)
 
 
-def get_status(fm_or_path: Any) -> str | None:
+def get_status(fm_or_path: Mapping[str, object] | Path | str) -> str | None:
     """Best-effort status lookup. Accepts a dict (parsed fm) or a path."""
-    if isinstance(fm_or_path, dict):
+    if isinstance(fm_or_path, Mapping):
         v = fm_or_path.get("status")
     else:
         fm, _ = read(Path(fm_or_path))

@@ -27,10 +27,28 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping, NamedTuple, Protocol, Sequence, cast
 
 import yaml
 from rank_bm25 import BM25Okapi
+
+# ── Type model ─────────────────────────────────────────────────────────────────
+
+# Frontmatter values can be anything YAML emits (str, int, list, dict, None);
+# ``object`` is the only honest annotation at the boundary. Callers narrow
+# with isinstance.
+FrontmatterDict = dict[str, object]
+
+
+class _BM25Backend(Protocol):
+    """Minimal slice of ``rank_bm25.BM25Okapi`` we actually use.
+
+    The library has no py.typed marker, so pyright sees its methods as
+    Unknown. We pin the shape locally and cast at the boundary.
+    """
+
+    def get_scores(self, query: Sequence[str]) -> "Sequence[float]": ...
+
 
 # ── Tokenization ───────────────────────────────────────────────────────────────
 
@@ -38,34 +56,37 @@ _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
 
 
-def _strip_and_extract_frontmatter(text: str) -> tuple[str, dict]:
+def _strip_and_extract_frontmatter(text: str) -> tuple[str, FrontmatterDict]:
     """Return (body_without_frontmatter, parsed_frontmatter_dict)."""
     m = _FRONTMATTER_RE.match(text)
     if not m:
         return text, {}
     try:
-        fm = yaml.safe_load(m.group(1)) or {}
-        if not isinstance(fm, dict):
-            fm = {}
+        loaded: object = yaml.safe_load(m.group(1))
     except yaml.YAMLError:
-        fm = {}
-    body = text[m.end():]
+        return text[m.end() :], {}
+    if not isinstance(loaded, dict):
+        return text[m.end() :], {}
+    fm: FrontmatterDict = {str(k): v for k, v in loaded.items()}  # type: ignore[misc]
+    body = text[m.end() :]
     return body, fm
 
 
-def _frontmatter_search_text(fm: dict) -> str:
+def _frontmatter_search_text(fm: Mapping[str, object]) -> str:
     """Pull out the search-relevant frontmatter fields per PLAN section 2."""
     parts: list[str] = []
 
     keywords = fm.get("keywords")
     if isinstance(keywords, list):
-        parts.extend(str(k) for k in keywords)
+        keywords_list = cast(list[object], keywords)
+        parts.extend(str(k) for k in keywords_list)
     elif isinstance(keywords, str):
         parts.append(keywords)
 
     applies_when = fm.get("applies-when") or fm.get("applies_when")
     if isinstance(applies_when, list):
-        parts.extend(str(a) for a in applies_when)
+        applies_when_list = cast(list[object], applies_when)
+        parts.extend(str(a) for a in applies_when_list)
     elif isinstance(applies_when, str):
         parts.append(applies_when)
 
@@ -84,6 +105,15 @@ def tokenize(text: str) -> list[str]:
     return [tok for tok in _TOKEN_SPLIT_RE.split(combined) if len(tok) >= 2]
 
 
+# ── Public aliases for cross-module use ────────────────────────────────────────
+# ``embeddings.py`` reuses the same file-selection and frontmatter discipline.
+# We expose non-private aliases so it can import them without tripping
+# ``reportPrivateUsage``. Tests continue to import the underscore-prefixed
+# originals (back-compat).
+# (Defined after the helpers themselves further down so they reference final
+# objects.)
+
+
 # ── Index dataclass ────────────────────────────────────────────────────────────
 
 
@@ -96,13 +126,26 @@ class _DocRecord:
     raw_text: str  # full file text, kept for snippet generation
 
 
+class BM25Hit(NamedTuple):
+    """A single BM25 search result.
+
+    Destructures as ``(path, score, snippet)`` for callers that already
+    unpack tuples (the daemon's priming code does this). Adding a typed
+    NamedTuple gives static guarantees without breaking those call sites.
+    """
+
+    path: Path
+    score: float
+    snippet: str
+
+
 @dataclass
 class BM25Index:
     """BM25 index over markdown bodies."""
 
     knowledge_dir: Path
-    docs: list[_DocRecord] = field(default_factory=list)
-    tokenized: list[list[str]] = field(default_factory=list)
+    docs: list[_DocRecord] = field(default_factory=list[_DocRecord])
+    tokenized: list[list[str]] = field(default_factory=list[list[str]])
     bm25: BM25Okapi | None = None
     built_at: float = 0.0
 
@@ -112,7 +155,7 @@ class BM25Index:
         self,
         query: str,
         k: int = 10,
-    ) -> list[tuple[Path, float, str]]:
+    ) -> list[BM25Hit]:
         """Top-k hits as (path, score, one-line snippet).
 
         Returns at most k results, ordered by descending score. Filters out
@@ -123,19 +166,21 @@ class BM25Index:
         q_tokens = [tok for tok in _TOKEN_SPLIT_RE.split(query.lower()) if len(tok) >= 2]
         if not q_tokens:
             return []
-        scores = self.bm25.get_scores(q_tokens)
-        ranked = sorted(
+        backend = cast(_BM25Backend, self.bm25)
+        raw_scores = backend.get_scores(q_tokens)
+        scores: list[float] = [float(s) for s in raw_scores]
+        ranked: list[tuple[int, float]] = sorted(
             enumerate(scores),
             key=lambda iv: iv[1],
             reverse=True,
         )
-        results: list[tuple[Path, float, str]] = []
+        results: list[BM25Hit] = []
         for idx, score in ranked[:k]:
             if score <= 0:
                 continue
             rec = self.docs[idx]
             snippet = _build_snippet(rec.raw_text, q_tokens)
-            results.append((Path(rec.path), float(score), snippet))
+            results.append(BM25Hit(path=Path(rec.path), score=float(score), snippet=snippet))
         return results
 
 
@@ -203,6 +248,15 @@ def _iter_markdown(knowledge_dir: Path) -> list[Path]:
     return files
 
 
+# Public aliases so ``embeddings.py`` (a sibling module in this package) can
+# reuse the helpers without tripping pyright's reportPrivateUsage warning.
+# Tests still import the underscore-prefixed originals.
+build_snippet = _build_snippet
+frontmatter_search_text = _frontmatter_search_text
+iter_markdown = _iter_markdown
+strip_and_extract_frontmatter = _strip_and_extract_frontmatter
+
+
 def _default_index_path(knowledge_dir: Path) -> Path:
     """`~/.agent-mem/.bm25.idx` when knowledge_dir is `~/.agent-mem/knowledge`."""
     return knowledge_dir.parent / ".bm25.idx"
@@ -252,7 +306,7 @@ def save_index(index: BM25Index, index_path: Path | None = None) -> Path:
 def _load_pickled(index_path: Path) -> BM25Index | None:
     try:
         with index_path.open("rb") as f:
-            obj = pickle.load(f)
+            obj: object = pickle.load(f)
         if isinstance(obj, BM25Index):
             return obj
     except (OSError, pickle.UnpicklingError, EOFError, AttributeError, ModuleNotFoundError):

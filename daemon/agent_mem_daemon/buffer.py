@@ -44,15 +44,15 @@ class Event:
     session_id: str
     type: str  # PostToolUse | Stop | SessionEnd | ...
     cwd: Optional[str] = None
-    payload: Dict[str, Any] = field(default_factory=dict)
-    raw: Dict[str, Any] = field(default_factory=dict)
+    payload: Dict[str, Any] = field(default_factory=dict[str, Any])
+    raw: Dict[str, Any] = field(default_factory=dict[str, Any])
 
 
 @dataclass
 class Turn:
     """One sealed turn (a list of events between two Stops)."""
 
-    events: List[Event] = field(default_factory=list)
+    events: List[Event] = field(default_factory=list["Event"])
     started_at: float = 0.0
     sealed_at: float = 0.0
 
@@ -64,7 +64,7 @@ class Turn:
 class SessionState:
     session_id: str
     cwd: Optional[str] = None
-    turns: Deque[Turn] = field(default_factory=deque)
+    turns: Deque[Turn] = field(default_factory=deque["Turn"])
     open_turn: Turn = field(default_factory=Turn)
     # Set to the ts of the most recent event ingested for this session.
     # We trust the event's ts as the source of truth (it's the hook's

@@ -22,7 +22,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 
 import yaml
 
@@ -390,11 +390,15 @@ def _packets_to_indexed_json(
     cursor = 0
     annotated: List[Dict[str, Any]] = []
     for p in packets:
-        proposals = p.get("proposals") or []
-        annotated_proposals = []
+        raw_proposals: object = p.get("proposals") or []
+        proposals: Sequence[object] = (
+            cast(Sequence[object], raw_proposals) if isinstance(raw_proposals, list) else []
+        )
+        annotated_proposals: List[Dict[str, Any]] = []
         for prop in proposals:
             if isinstance(prop, dict):
-                annotated_proposals.append({"_action_index": cursor, **prop})
+                prop_dict = cast(Dict[str, Any], prop)
+                annotated_proposals.append({"_action_index": cursor, **prop_dict})
                 cursor += 1
             else:
                 annotated_proposals.append({"_action_index": cursor, "raw": str(prop)})
@@ -432,8 +436,8 @@ def build_prompt(
     packets_json, _total = _packets_to_indexed_json(packets)
     if library_snapshot is None:
         # Defer to librarian_prompt's snapshot generator — same logic,
-        # same truncation policy.
-        from . import librarian_prompt as lp
+        # same truncation policy. Lazy to avoid heavy import on hot path.
+        from . import librarian_prompt as lp  # noqa: PLC0415
 
         library_snapshot = lp.build_library_snapshot(knowledge_dir())
     # We use .replace() rather than .format() so the schema-derived
@@ -442,7 +446,7 @@ def build_prompt(
     # RESPONSE_SHAPE placeholders are generated from _schemas.py at
     # call time so the prompt instructions can never drift from the
     # Pydantic models the parser validates against.
-    from ._schemas import (
+    from ._schemas import (  # noqa: PLC0415 — lazy schema-shape import
         describe_action_types_markdown,
         describe_scholar_response_shape,
     )
@@ -488,14 +492,25 @@ def summarise_decisions(parsed: Optional[Dict[str, Any]]) -> Dict[str, int]:
     counters: Dict[str, int] = {}
     if not isinstance(parsed, dict):
         return counters
-    for item in parsed.get("decisions", []) or []:
+    parsed_dict: Dict[str, Any] = parsed
+    decisions_raw: object = parsed_dict.get("decisions", []) or []
+    decisions_list: Sequence[object] = (
+        cast(Sequence[object], decisions_raw) if isinstance(decisions_raw, list) else []
+    )
+    for item in decisions_list:
         if isinstance(item, dict):
-            d = str(item.get("decision", "")).strip().lower()
+            item_dict = cast(Dict[str, Any], item)
+            d = str(item_dict.get("decision", "")).strip().lower()
             if d:
                 counters[d] = counters.get(d, 0) + 1
-    for item in parsed.get("interrupts_processed", []) or []:
+    interrupts_raw: object = parsed_dict.get("interrupts_processed", []) or []
+    interrupts_list: Sequence[object] = (
+        cast(Sequence[object], interrupts_raw) if isinstance(interrupts_raw, list) else []
+    )
+    for item in interrupts_list:
         if isinstance(item, dict):
-            action = str(item.get("action", "")).strip().lower()
+            item_dict = cast(Dict[str, Any], item)
+            action = str(item_dict.get("action", "")).strip().lower()
             if action == "approve":
                 counters["nudge"] = counters.get("nudge", 0) + 1
             elif action == "veto":
@@ -540,9 +555,11 @@ def append_nudges_from_response(
     """
     if not isinstance(parsed, dict):
         return []
-    interrupts = parsed.get("interrupts_processed") or []
-    if not isinstance(interrupts, list):
+    parsed_dict: Dict[str, Any] = parsed
+    interrupts_raw: object = parsed_dict.get("interrupts_processed") or []
+    if not isinstance(interrupts_raw, list):
         return []
+    interrupts: Sequence[object] = cast(Sequence[object], interrupts_raw)
     if now is None:
         now = datetime.now(timezone.utc)
     target = path if path is not None else pending_nudges_path()
@@ -552,15 +569,16 @@ def append_nudges_from_response(
     for item in interrupts:
         if not isinstance(item, dict):
             continue
-        action = str(item.get("action", "")).strip().lower()
+        item_dict = cast(Dict[str, Any], item)
+        action = str(item_dict.get("action", "")).strip().lower()
         if action != "approve":
             continue
-        text = str(item.get("text") or "").strip()
-        lesson_path = str(item.get("lesson_path") or item.get("lesson_id") or "").strip()
+        text = str(item_dict.get("text") or "").strip()
+        lesson_path = str(item_dict.get("lesson_path") or item_dict.get("lesson_id") or "").strip()
         if not text or not lesson_path:
             log.warning(
                 "skipping malformed nudge approval (missing text or lesson): %r",
-                item,
+                item_dict,
             )
             continue
         nudge_id = _make_nudge_id()
@@ -859,10 +877,12 @@ def _parse_frontmatter(text: str) -> Dict[str, Any]:
     if not m:
         return {}
     try:
-        fm = yaml.safe_load(m.group(1)) or {}
+        loaded: object = yaml.safe_load(m.group(1)) or {}
     except yaml.YAMLError:
         return {}
-    return fm if isinstance(fm, dict) else {}
+    if isinstance(loaded, dict):
+        return cast(Dict[str, Any], loaded)
+    return {}
 
 
 # ── Deterministic reinforcement-counter bookkeeping ──────────────────
@@ -896,11 +916,12 @@ def _bump_reinforced_counter(
     if not m:
         return False
     try:
-        fm = yaml.safe_load(m.group(1)) or {}
+        loaded: object = yaml.safe_load(m.group(1)) or {}
     except yaml.YAMLError:
         return False
-    if not isinstance(fm, dict):
+    if not isinstance(loaded, dict):
         return False
+    fm = cast(Dict[str, Any], loaded)
     fm["reinforced"] = int(fm.get("reinforced") or 0) + 1
     fm["last_reinforced"] = today_iso
     try:
@@ -918,15 +939,16 @@ def _bump_reinforced_counter(
     return True
 
 
-def _resolve_reinforce_target(prop: Any, root: Path) -> Path | None:
+def _resolve_reinforce_target(prop: object, root: Path) -> Path | None:
     """Return the absolute entry path a "reinforces" proposal targets,
     or ``None`` if the proposal isn't well-formed / cites a path outside
     the knowledge dir."""
     if not isinstance(prop, dict):
         return None
-    if prop.get("salience_signal") != "reinforces":
+    prop_dict = cast(Dict[str, Any], prop)
+    if prop_dict.get("salience_signal") != "reinforces":
         return None
-    cited = prop.get("existing_entry")
+    cited = prop_dict.get("existing_entry")
     if not isinstance(cited, str) or not cited:
         return None
     candidate = (root / cited).resolve()
@@ -961,7 +983,11 @@ def apply_reinforcement_counters(
     bumped_paths: set[Path] = set()
 
     for packet in packets:
-        for prop in packet.get("proposals") or []:
+        raw_proposals: object = packet.get("proposals") or []
+        proposals: Sequence[object] = (
+            cast(Sequence[object], raw_proposals) if isinstance(raw_proposals, list) else []
+        )
+        for prop in proposals:
             candidate = _resolve_reinforce_target(prop, root)
             if candidate is None:
                 continue
