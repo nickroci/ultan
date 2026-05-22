@@ -32,12 +32,30 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+    TypedDict,
+    cast,
+)
 
 import yaml
+from aliases import session_bucket  # type: ignore[import-not-found]
 
 from . import _response_parser
-from ._schemas import LibrarianProposal
+from ._schemas import (
+    LibrarianProposal,
+    describe_action_types_markdown,
+    describe_librarian_response_shape,
+)
+from .paths import home as _home
 
 log = logging.getLogger("agent_mem_daemon.librarian_prompt")
 
@@ -48,19 +66,66 @@ log = logging.getLogger("agent_mem_daemon.librarian_prompt")
 LIBRARY_SNAPSHOT_MAX_CHARS = 3 * 1024
 
 
+# ── Shape definitions (BM25 protocol, seed/hit payloads) ──────────────
+#
+# Buffer snapshots come from ``buffer.BufferStore.snapshot()`` as plain
+# dicts; their detailed shape varies (extra keys, optional payload
+# fields), so the snapshot-walking functions below accept the broadest
+# safe signature, ``Mapping[str, Any]``, and validate each level with
+# ``_as_str_map`` / ``isinstance(list, ...)`` at the boundary.
+
+
+class BM25HitDict(TypedDict):
+    """Single BM25 hit, rendered for the prompt."""
+
+    entry_id: str
+    score: float
+    path: str
+
+
+class SeedWithHits(TypedDict):
+    """One seed phrase plus its BM25 hits (may be empty)."""
+
+    seed: str
+    hits: List[BM25HitDict]
+
+
+class _BM25Like(Protocol):
+    """Structural type for the BM25 index ``attach_bm25_hits`` uses.
+
+    Tests pass a ``_StubIndex`` and production passes
+    ``agent_mem_search.bm25.BM25Index`` — both expose this surface."""
+
+    knowledge_dir: Path
+
+    def search(self, query: str, k: int = ...) -> Sequence[Tuple[Path, float, str]]: ...
+
+
+def _as_str_map(obj: object) -> Mapping[str, Any]:
+    """Coerce an arbitrary object to a ``Mapping[str, Any]``.
+
+    Returns an empty mapping if ``obj`` is not a dict-like. Used at the
+    edges where we read free-form payload blobs out of the buffer
+    snapshot — pyright's ``isinstance(x, Mapping)`` narrowing loses key
+    types, so the cast happens here once instead of at every call site.
+    """
+    if not isinstance(obj, dict):
+        return {}
+    return cast(Mapping[str, Any], obj)
+
+
 # ── Buffer flattening (unchanged from the previous design) ────────────
 
 
 _TEXT_KEYS: Tuple[str, ...] = ("text", "prompt", "response", "content", "message", "summary")
 
 
-def _payload_role(ev: Dict[str, Any]) -> str:
+def _payload_role(ev: Mapping[str, Any]) -> str:
     """Map an event to a [role] tag for the Librarian's prompt."""
-    pl = ev.get("payload") or {}
-    if isinstance(pl, dict):
-        explicit = pl.get("role")
-        if isinstance(explicit, str) and explicit:
-            return explicit.lower()
+    pl = _as_str_map(ev.get("payload"))
+    explicit = pl.get("role")
+    if isinstance(explicit, str) and explicit:
+        return explicit.lower()
     typ = ev.get("type") or ""
     if typ == "UserPromptSubmit":
         return "user"
@@ -69,10 +134,10 @@ def _payload_role(ev: Dict[str, Any]) -> str:
     return "assistant"
 
 
-def _payload_text(ev: Dict[str, Any]) -> str:
+def _payload_text(ev: Mapping[str, Any]) -> str:
     """Pull a string body out of an event payload."""
-    pl = ev.get("payload") or {}
-    if not isinstance(pl, dict):
+    pl = _as_str_map(ev.get("payload"))
+    if not pl:
         return ""
     for k in _TEXT_KEYS:
         v = pl.get(k)
@@ -80,15 +145,15 @@ def _payload_text(ev: Dict[str, Any]) -> str:
             return v.strip()
     tool = pl.get("tool") or pl.get("name")
     if isinstance(tool, str):
-        args = pl.get("arguments") or pl.get("args") or pl.get("input") or {}
-        if isinstance(args, dict) and args:
+        args = _as_str_map(pl.get("arguments") or pl.get("args") or pl.get("input"))
+        if args:
             keys = ",".join(sorted(args.keys())[:4])
             return f"{tool}({keys})"
         return str(tool)
     return ""
 
 
-def flatten_buffer(snapshot: Dict[str, Any]) -> List[Tuple[int, str, str, bool]]:
+def flatten_buffer(snapshot: Mapping[str, Any]) -> List[Tuple[int, str, str, bool]]:
     """Materialise a buffer snapshot as a list of
     ``(turn_id, role, text, user_asserted)``.
 
@@ -102,18 +167,32 @@ def flatten_buffer(snapshot: Dict[str, Any]) -> List[Tuple[int, str, str, bool]]
     """
     out: List[Tuple[int, str, str, bool]] = []
     counter = 0
-    for turn in snapshot.get("turns", []) or []:
-        for ev in turn.get("events", []) or []:
-            typ = ev.get("type")
+    raw_turns_obj: object = snapshot.get("turns") or []
+    if not isinstance(raw_turns_obj, list):
+        return out
+    raw_turns = cast(List[Any], raw_turns_obj)
+    for turn_obj in raw_turns:
+        turn_map = _as_str_map(turn_obj)
+        if not turn_map:
+            continue
+        raw_events_obj: object = turn_map.get("events") or []
+        if not isinstance(raw_events_obj, list):
+            continue
+        raw_events = cast(List[Any], raw_events_obj)
+        for ev_obj in raw_events:
+            ev_map = _as_str_map(ev_obj)
+            if not ev_map:
+                continue
+            typ = ev_map.get("type")
             if typ in ("Stop", "SessionEnd"):
                 continue
-            text = _payload_text(ev)
+            text = _payload_text(ev_map)
             if not text:
                 continue
-            pl = ev.get("payload") or {}
-            user_asserted = bool(isinstance(pl, dict) and pl.get("user_asserted"))
+            pl = _as_str_map(ev_map.get("payload"))
+            user_asserted = bool(pl.get("user_asserted"))
             counter += 1
-            out.append((counter, _payload_role(ev), text, user_asserted))
+            out.append((counter, _payload_role(ev_map), text, user_asserted))
     return out
 
 
@@ -127,7 +206,7 @@ def format_rolling_buffer(flat: Sequence[Tuple[int, str, str, bool]]) -> str:
     """
     if not flat:
         return "(empty — no turns with quotable text)"
-    lines = []
+    lines: List[str] = []
     for tid, role, text, user_asserted in flat:
         squashed = " ".join(text.split())
         prefix = "[USER-ASSERTED] " if user_asserted else ""
@@ -192,28 +271,28 @@ def extract_seed_phrases(buffer_text: str, *, max_seeds: int = 12) -> List[str]:
 
 def attach_bm25_hits(
     seeds: Sequence[str],
-    bm25_index,
+    bm25_index: Optional[_BM25Like],
     *,
     knowledge_dir: Optional[Path] = None,
     k: int = 3,
-) -> List[Dict[str, Any]]:
+) -> List[SeedWithHits]:
     """For each seed, run BM25 and return ``{seed, hits: [...]}``."""
-    out: List[Dict[str, Any]] = []
+    out: List[SeedWithHits] = []
     if bm25_index is None:
         for seed in seeds:
             out.append({"seed": seed, "hits": []})
         return out
-    root = knowledge_dir
+    root: Optional[Path] = knowledge_dir
     if root is None:
         root = getattr(bm25_index, "knowledge_dir", None)
     for seed in seeds:
         try:
-            raw_hits = bm25_index.search(seed, k=k)
+            raw_hits: Sequence[Tuple[Path, float, str]] = bm25_index.search(seed, k=k)
         except Exception:
             log.exception("bm25 search failed for seed=%r", seed)
             raw_hits = []
-        hit_dicts: List[Dict[str, Any]] = []
-        for path, score, _snippet in raw_hits or []:
+        hit_dicts: List[BM25HitDict] = []
+        for path, score, _snippet in raw_hits:
             p = Path(path)
             try:
                 rel = str(p.relative_to(root)) if root else str(p)
@@ -230,22 +309,28 @@ def attach_bm25_hits(
     return out
 
 
-def format_bm25_seeds(seeds_with_hits: Sequence[Dict[str, Any]]) -> str:
+def format_bm25_seeds(seeds_with_hits: Sequence[Mapping[str, Any]]) -> str:
     """Render the ``<bm25_seeds>`` block."""
     if not seeds_with_hits:
         return "(none — regex extractor found no candidate seeds)"
     blocks: List[str] = []
     for entry in seeds_with_hits:
         seed = entry.get("seed", "")
-        hits = entry.get("hits") or []
+        hits_raw_obj: object = entry.get("hits") or []
+        hits: List[Mapping[str, Any]] = []
+        if isinstance(hits_raw_obj, list):
+            for h in cast(List[Any], hits_raw_obj):
+                h_map = _as_str_map(h)
+                if h_map:
+                    hits.append(h_map)
         lines = [f'seed: "{seed}"']
         if not hits:
             lines.append("  (no hits)")
         else:
-            for i, h in enumerate(hits, 1):
+            for i, h_map in enumerate(hits, 1):
                 lines.append(
-                    f"  hit {i}: entry_id={h.get('entry_id', '?')}  "
-                    f"score={h.get('score', 0.0)}  path={h.get('path', '?')}"
+                    f"  hit {i}: entry_id={h_map.get('entry_id', '?')}  "
+                    f"score={h_map.get('score', 0.0)}  path={h_map.get('path', '?')}"
                 )
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks)
@@ -400,17 +485,21 @@ def _parse_frontmatter(text: str) -> Dict[str, Any]:
     if not m:
         return {}
     try:
-        fm = yaml.safe_load(m.group(1)) or {}
+        fm: object = yaml.safe_load(m.group(1)) or {}
     except yaml.YAMLError:
         return {}
-    return fm if isinstance(fm, dict) else {}
+    if not isinstance(fm, dict):
+        return {}
+    fm_typed = cast(Dict[Any, Any], fm)
+    return {str(k): v for k, v in fm_typed.items()}
 
 
 def _split_applies_when(raw: Any) -> List[str]:
     if raw is None:
         return []
     if isinstance(raw, list):
-        return [str(x).strip() for x in raw if str(x).strip()]
+        raw_list = cast(List[Any], raw)
+        return [str(x).strip() for x in raw_list if str(x).strip()]
     if isinstance(raw, str):
         return [ln.strip() for ln in raw.splitlines() if ln.strip()]
     return []
@@ -467,7 +556,30 @@ def build_applies_when_table(knowledge_dir: Path) -> str:
 # ── Project slug ──────────────────────────────────────────────────────
 
 
-def derive_project_slug(snapshot: Dict[str, Any]) -> str:
+def _iter_events_reversed(snapshot: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
+    """Yield events from a snapshot, most recent first.
+
+    Wraps the nested ``turns -> events`` walk so callers don't have to
+    re-do the ``isinstance(list)`` / ``isinstance(dict)`` dance. Only
+    well-shaped dict events are yielded; everything else is skipped.
+    """
+    raw_turns_obj: object = snapshot.get("turns") or []
+    if not isinstance(raw_turns_obj, list):
+        return
+    raw_turns = cast(List[Any], raw_turns_obj)
+    for turn_obj in reversed(raw_turns):
+        turn_map = _as_str_map(turn_obj)
+        raw_events_obj: object = turn_map.get("events") or []
+        if not isinstance(raw_events_obj, list):
+            continue
+        raw_events = cast(List[Any], raw_events_obj)
+        for ev_obj in reversed(raw_events):
+            ev_map = _as_str_map(ev_obj)
+            if ev_map:
+                yield ev_map
+
+
+def derive_project_slug(snapshot: Mapping[str, Any]) -> str:
     """Return the *canonical project slug* (git-URL flattened form or
     cwd basename fallback) — what ``current_project_slug()`` on the
     hook side produces. This is the project's identity, not its
@@ -477,20 +589,18 @@ def derive_project_slug(snapshot: Dict[str, Any]) -> str:
     explicit = snapshot.get("project_slug")
     if isinstance(explicit, str) and explicit.strip():
         return _slugify(explicit)
-    for turn in reversed(snapshot.get("turns") or []):
-        for ev in reversed(turn.get("events") or []):
-            pl = ev.get("payload") or {}
-            if isinstance(pl, dict):
-                cand = pl.get("project_slug") or pl.get("slug")
-                if isinstance(cand, str) and cand.strip():
-                    return _slugify(cand)
+    for ev in _iter_events_reversed(snapshot):
+        pl = _as_str_map(ev.get("payload"))
+        cand = pl.get("project_slug") or pl.get("slug")
+        if isinstance(cand, str) and cand.strip():
+            return _slugify(cand)
     cwd = snapshot.get("cwd")
     if isinstance(cwd, str) and cwd:
         return _slugify(os.path.basename(cwd.rstrip("/")) or "unknown")
     return "unknown"
 
 
-def _snapshot_cwd(snapshot: Dict[str, Any]) -> Optional[str]:
+def _snapshot_cwd(snapshot: Mapping[str, Any]) -> Optional[str]:
     """Pull the user's cwd off a buffer snapshot.
 
     Mirrors the slug-extraction order: top-level field first, then a
@@ -501,20 +611,18 @@ def _snapshot_cwd(snapshot: Dict[str, Any]) -> Optional[str]:
     top = snapshot.get("cwd")
     if isinstance(top, str) and top.strip():
         return top
-    for turn in reversed(snapshot.get("turns") or []):
-        for ev in reversed(turn.get("events") or []):
-            pl = ev.get("payload") or {}
-            if isinstance(pl, dict):
-                cand = pl.get("cwd")
-                if isinstance(cand, str) and cand.strip():
-                    return cand
-            ev_cwd = ev.get("cwd")
-            if isinstance(ev_cwd, str) and ev_cwd.strip():
-                return ev_cwd
+    for ev in _iter_events_reversed(snapshot):
+        pl = _as_str_map(ev.get("payload"))
+        cand = pl.get("cwd")
+        if isinstance(cand, str) and cand.strip():
+            return cand
+        ev_cwd = ev.get("cwd")
+        if isinstance(ev_cwd, str) and ev_cwd.strip():
+            return ev_cwd
     return None
 
 
-def derive_project_bucket(snapshot: Dict[str, Any]) -> str:
+def derive_project_bucket(snapshot: Mapping[str, Any]) -> str:
     """Return the on-disk bucket directory name that all components —
     librarian's path proposals, scholar's writes, priming's scope
     boost, the nudge filter — should use for this session's project.
@@ -525,20 +633,12 @@ def derive_project_bucket(snapshot: Dict[str, Any]) -> str:
     resolver returns ``None``, so older snapshots / mid-session edge
     cases still produce something usable.
     """
-    # Lazy imports: keeps librarian_prompt's import graph small and
-    # avoids any cycle with paths.py.
-    from aliases import session_bucket  # type: ignore[import-not-found]
-
-    from .paths import home as _home
-
     slug = derive_project_slug(snapshot)
     cwd_str = _snapshot_cwd(snapshot)
     if not cwd_str:
         return slug
     try:
-        from pathlib import Path as _Path
-
-        bucket = session_bucket(_home(), _Path(cwd_str), slug)
+        bucket = session_bucket(_home(), Path(cwd_str), slug)
     except Exception:
         bucket = None
     return bucket or slug
@@ -941,11 +1041,6 @@ def assemble_prompt(
     at call time so the prompt instructions can never drift from the
     Pydantic models the parser actually validates against.
     """
-    from ._schemas import (
-        describe_action_types_markdown,
-        describe_librarian_response_shape,
-    )
-
     out = load_prompt_template()
     for needle, value in (
         ("{{PROJECT_SLUG}}", project_slug or "unknown"),
@@ -997,7 +1092,12 @@ def normalise_packet(parsed: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
     def _clean(items: Any) -> List[Dict[str, Any]]:
         if not isinstance(items, list):
             return []
-        return [it for it in items if isinstance(it, dict)]
+        items_list = cast(List[Any], items)
+        out: List[Dict[str, Any]] = []
+        for it in items_list:
+            if isinstance(it, dict):
+                out.append(cast(Dict[str, Any], it))
+        return out
 
     return {
         "proposals": _clean(proposals_raw),
@@ -1009,7 +1109,7 @@ def normalise_packet(parsed: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
 
 
 def buffer_to_prompt_text(
-    snapshot: Dict[str, Any],
+    snapshot: Mapping[str, Any],
 ) -> Tuple[str, List[Tuple[int, str, str, bool]]]:
     """Flatten a snapshot and return both the formatted block and the
     raw 4-tuples (turn_id, role, text, user_asserted)."""

@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List, cast
 
 from bm25 import load_or_build
 from claude_agent_sdk import create_sdk_mcp_server, tool
@@ -219,7 +219,7 @@ def _resolve_destination(root: Path, raw_to: str) -> tuple[Path | None, Dict[str
 def _plan_moves(
     root: Path,
     to_folder: Path,
-    raw_files: list,
+    raw_files: List[object],
 ) -> tuple[list[tuple[Path, Path]] | None, Dict[str, str], Dict[str, Any] | None]:
     """Validate each source path and build the (src, dst) plan + the
     wikilink-rewrite mapping. Returns ``(moves, link_mapping, None)`` on
@@ -358,7 +358,7 @@ def _move_entries_impl(root: Path, args: Dict[str, Any]) -> Dict[str, Any]:
         return err
     assert to_folder is not None  # narrowed
 
-    moves, link_mapping, err = _plan_moves(root, to_folder, raw_files)
+    moves, link_mapping, err = _plan_moves(root, to_folder, cast(List[object], raw_files))
     if err is not None:
         return err
     assert moves is not None  # narrowed
