@@ -12,3 +12,4 @@ prior-art/
 # Per-machine Claude Code hook config; written by /ultan-install
 .claude/
 local/
+.coverage

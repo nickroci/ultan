@@ -34,6 +34,29 @@ select = ["E", "F", "I", "W", "C901", "PLR0912", "PLR0915"]
 [tool.ruff.lint.per-file-ignores]
 "test_*.py" = ["E501", "C901", "PLR0912", "PLR0915"]
 
+[tool.pytest.ini_options]
+addopts = "-ra --cov --cov-report=term-missing"
+
+[tool.coverage.run]
+source = ["."]
+branch = true
+omit = [
+  "test_*.py",
+  ".venv/*",
+  "fixtures/*",
+]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = false
+exclude_lines = [
+  "pragma: no cover",
+  "raise NotImplementedError",
+  "if __name__ == .__main__.:",
+  "if TYPE_CHECKING:",
+]
+
 [tool.pyright]
 include = ["bm25.py", "cli.py", "embeddings.py", "frontmatter.py", "aliases.py", "test_*.py"]
 exclude = [".venv", "**/__pycache__", "build", "dist", "fixtures"]
@@ -46,5 +69,6 @@ reportMissingImports = "warning"
 dev = [
     "pyright>=1.1.409",
     "pytest>=9.0.3",
+    "pytest-cov>=7.1.0",
     "ruff>=0.15.14",
 ]
