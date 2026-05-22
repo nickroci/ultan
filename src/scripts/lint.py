@@ -15,12 +15,21 @@ import argparse
 import asyncio
 import sys
 from pathlib import Path
+from typing import Callable, Literal, TypedDict
+
+from typing_extensions import NotRequired
 
 # Make `import config` work when invoked outside the scripts dir.
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
+from claude_agent_sdk import (  # noqa: E402
+    AssistantMessage,
+    ClaudeAgentOptions,
+    TextBlock,
+    query,
+)
 from config import (  # noqa: E402
     KNOWLEDGE_DIR,
     REPORTS_DIR,
@@ -42,10 +51,23 @@ from utils import (  # noqa: E402
     wiki_article_exists,
 )
 
+Severity = Literal["error", "warning", "suggestion"]
 
-def check_broken_links() -> list[dict]:
+
+class Issue(TypedDict):
+    """One lint finding. ``auto_fixable`` is optional — only the missing-backlink
+    check sets it today."""
+
+    severity: Severity
+    check: str
+    file: str
+    detail: str
+    auto_fixable: NotRequired[bool]
+
+
+def check_broken_links() -> list[Issue]:
     """Check for [[wikilinks]] that point to non-existent articles."""
-    issues = []
+    issues: list[Issue] = []
     for article in list_wiki_articles():
         content = article.read_text(encoding="utf-8")
         rel = article.relative_to(KNOWLEDGE_DIR)
@@ -54,58 +76,58 @@ def check_broken_links() -> list[dict]:
                 continue  # daily log references are valid
             if not wiki_article_exists(link):
                 issues.append(
-                    {
-                        "severity": "error",
-                        "check": "broken_link",
-                        "file": str(rel),
-                        "detail": f"Broken link: [[{link}]] - target does not exist",
-                    }
+                    Issue(
+                        severity="error",
+                        check="broken_link",
+                        file=str(rel),
+                        detail=f"Broken link: [[{link}]] - target does not exist",
+                    )
                 )
     return issues
 
 
-def check_orphan_pages() -> list[dict]:
+def check_orphan_pages() -> list[Issue]:
     """Check for articles with zero inbound links."""
-    issues = []
+    issues: list[Issue] = []
     for article in list_wiki_articles():
         rel = article.relative_to(KNOWLEDGE_DIR)
         link_target = str(rel).replace(".md", "").replace("\\", "/")
         inbound = count_inbound_links(link_target)
         if inbound == 0:
             issues.append(
-                {
-                    "severity": "warning",
-                    "check": "orphan_page",
-                    "file": str(rel),
-                    "detail": f"Orphan page: no other articles link to [[{link_target}]]",
-                }
+                Issue(
+                    severity="warning",
+                    check="orphan_page",
+                    file=str(rel),
+                    detail=f"Orphan page: no other articles link to [[{link_target}]]",
+                )
             )
     return issues
 
 
-def check_orphan_sources() -> list[dict]:
+def check_orphan_sources() -> list[Issue]:
     """Check for daily logs that haven't been compiled yet."""
     state = load_state()
     ingested = state.get("ingested", {})
-    issues = []
+    issues: list[Issue] = []
     for log_path in list_raw_files():
         if log_path.name not in ingested:
             issues.append(
-                {
-                    "severity": "warning",
-                    "check": "orphan_source",
-                    "file": f"daily/{log_path.name}",
-                    "detail": f"Uncompiled daily log: {log_path.name} has not been ingested",
-                }
+                Issue(
+                    severity="warning",
+                    check="orphan_source",
+                    file=f"daily/{log_path.name}",
+                    detail=f"Uncompiled daily log: {log_path.name} has not been ingested",
+                )
             )
     return issues
 
 
-def check_stale_articles() -> list[dict]:
+def check_stale_articles() -> list[Issue]:
     """Check if source daily logs have changed since compilation."""
     state = load_state()
     ingested = state.get("ingested", {})
-    issues = []
+    issues: list[Issue] = []
     for log_path in list_raw_files():
         rel = log_path.name
         if rel in ingested:
@@ -113,19 +135,19 @@ def check_stale_articles() -> list[dict]:
             current_hash = file_hash(log_path)
             if stored_hash != current_hash:
                 issues.append(
-                    {
-                        "severity": "warning",
-                        "check": "stale_article",
-                        "file": f"daily/{rel}",
-                        "detail": f"Stale: {rel} has changed since last compilation",
-                    }
+                    Issue(
+                        severity="warning",
+                        check="stale_article",
+                        file=f"daily/{rel}",
+                        detail=f"Stale: {rel} has changed since last compilation",
+                    )
                 )
     return issues
 
 
-def check_missing_backlinks() -> list[dict]:
+def check_missing_backlinks() -> list[Issue]:
     """Check for asymmetric links: A links to B but B doesn't link to A."""
-    issues = []
+    issues: list[Issue] = []
     for article in list_wiki_articles():
         content = article.read_text(encoding="utf-8")
         rel = article.relative_to(KNOWLEDGE_DIR)
@@ -139,44 +161,37 @@ def check_missing_backlinks() -> list[dict]:
                 target_content = target_path.read_text(encoding="utf-8")
                 if f"[[{source_link}]]" not in target_content:
                     issues.append(
-                        {
-                            "severity": "suggestion",
-                            "check": "missing_backlink",
-                            "file": str(rel),
-                            "detail": f"[[{source_link}]] links to [[{link}]] but not vice versa",
-                            "auto_fixable": True,
-                        }
+                        Issue(
+                            severity="suggestion",
+                            check="missing_backlink",
+                            file=str(rel),
+                            detail=f"[[{source_link}]] links to [[{link}]] but not vice versa",
+                            auto_fixable=True,
+                        )
                     )
     return issues
 
 
-def check_sparse_articles() -> list[dict]:
+def check_sparse_articles() -> list[Issue]:
     """Check for articles with fewer than 200 words."""
-    issues = []
+    issues: list[Issue] = []
     for article in list_wiki_articles():
         word_count = get_article_word_count(article)
         if word_count < 200:
             rel = article.relative_to(KNOWLEDGE_DIR)
             issues.append(
-                {
-                    "severity": "suggestion",
-                    "check": "sparse_article",
-                    "file": str(rel),
-                    "detail": f"Sparse article: {word_count} words (minimum recommended: 200)",
-                }
+                Issue(
+                    severity="suggestion",
+                    check="sparse_article",
+                    file=str(rel),
+                    detail=f"Sparse article: {word_count} words (minimum recommended: 200)",
+                )
             )
     return issues
 
 
-async def check_contradictions() -> list[dict]:
+async def check_contradictions() -> list[Issue]:
     """Use LLM to detect contradictions across articles."""
-    from claude_agent_sdk import (
-        AssistantMessage,
-        ClaudeAgentOptions,
-        TextBlock,
-        query,
-    )
-
     wiki_content = read_all_wiki_content()
 
     prompt = f"""Review this knowledge base for contradictions, inconsistencies, or
@@ -217,32 +232,32 @@ Do NOT output anything else - no preamble, no explanation, just the formatted li
                         response += block.text
     except Exception as e:
         return [
-            {
-                "severity": "error",
-                "check": "contradiction",
-                "file": "(system)",
-                "detail": f"LLM check failed: {e}",
-            }
+            Issue(
+                severity="error",
+                check="contradiction",
+                file="(system)",
+                detail=f"LLM check failed: {e}",
+            )
         ]
 
-    issues = []
+    issues: list[Issue] = []
     if "NO_ISSUES" not in response:
         for line in response.strip().split("\n"):
             line = line.strip()
             if line.startswith("CONTRADICTION:") or line.startswith("INCONSISTENCY:"):
                 issues.append(
-                    {
-                        "severity": "warning",
-                        "check": "contradiction",
-                        "file": "(cross-article)",
-                        "detail": line,
-                    }
+                    Issue(
+                        severity="warning",
+                        check="contradiction",
+                        file="(cross-article)",
+                        detail=line,
+                    )
                 )
 
     return issues
 
 
-def generate_report(all_issues: list[dict]) -> str:
+def generate_report(all_issues: list[Issue]) -> str:
     """Generate a markdown lint report."""
     errors = [i for i in all_issues if i["severity"] == "error"]
     warnings = [i for i in all_issues if i["severity"] == "warning"]
@@ -278,7 +293,7 @@ def generate_report(all_issues: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description="Lint the knowledge base")
     parser.add_argument(
         "--structural-only",
@@ -290,10 +305,10 @@ def main():
     ensure_store_dirs()
 
     print("Running knowledge base lint checks...")
-    all_issues: list[dict] = []
+    all_issues: list[Issue] = []
 
     # Structural checks (free, instant)
-    checks = [
+    checks: list[tuple[str, Callable[[], list[Issue]]]] = [
         ("Broken links", check_broken_links),
         ("Orphan pages", check_orphan_pages),
         ("Orphan sources", check_orphan_sources),

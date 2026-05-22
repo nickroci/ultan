@@ -24,6 +24,13 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
+from claude_agent_sdk import (  # noqa: E402
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ResultMessage,
+    TextBlock,
+    query,
+)
 from config import (  # noqa: E402
     AGENTS_FILE,
     CONCEPTS_DIR,
@@ -35,6 +42,8 @@ from config import (  # noqa: E402
     now_iso,
 )
 from utils import (  # noqa: E402
+    IngestedEntry,
+    State,
     file_hash,
     list_raw_files,
     list_wiki_articles,
@@ -44,32 +53,24 @@ from utils import (  # noqa: E402
 )
 
 
-async def compile_daily_log(log_path: Path, state: dict) -> float:
+async def compile_daily_log(log_path: Path, state: State) -> float:
     """Compile a single daily log into knowledge articles.
 
     Returns the API cost of the compilation.
     """
-    from claude_agent_sdk import (
-        AssistantMessage,
-        ClaudeAgentOptions,
-        ResultMessage,
-        TextBlock,
-        query,
-    )
-
     log_content = log_path.read_text(encoding="utf-8")
     schema = AGENTS_FILE.read_text(encoding="utf-8")
     wiki_index = read_wiki_index()
 
     # Read existing articles for context
     existing_articles_context = ""
-    existing = {}
+    existing: dict[str, str] = {}
     for article_path in list_wiki_articles():
         rel = article_path.relative_to(KNOWLEDGE_DIR)
         existing[str(rel)] = article_path.read_text(encoding="utf-8")
 
     if existing:
-        parts = []
+        parts: list[str] = []
         for rel_path, content in existing.items():
             parts.append(f"### {rel_path}\n```markdown\n{content}\n```")
         existing_articles_context = "\n\n".join(parts)
@@ -174,11 +175,12 @@ Read the daily log above and compile it into wiki articles following the schema 
 
     # Update state
     rel_path = log_path.name
-    state.setdefault("ingested", {})[rel_path] = {
-        "hash": file_hash(log_path),
-        "compiled_at": now_iso(),
-        "cost_usd": cost,
-    }
+    ingested = state.setdefault("ingested", {})
+    ingested[rel_path] = IngestedEntry(
+        hash=file_hash(log_path),
+        compiled_at=now_iso(),
+        cost_usd=cost,
+    )
     state["total_cost"] = state.get("total_cost", 0.0) + cost
     save_state(state)
 
@@ -202,7 +204,7 @@ def _resolve_target(file_arg: str) -> Path:
     return target
 
 
-def _select_files(args: argparse.Namespace, state: dict) -> list[Path]:
+def _select_files(args: argparse.Namespace, state: State) -> list[Path]:
     """Decide which daily logs to compile this run.
 
     - ``--file`` → exactly that one (resolved via :func:`_resolve_target`).
@@ -218,14 +220,15 @@ def _select_files(args: argparse.Namespace, state: dict) -> list[Path]:
         return all_logs
 
     changed: list[Path] = []
+    ingested = state.get("ingested", {})
     for log_path in all_logs:
-        prev = state.get("ingested", {}).get(log_path.name, {})
-        if not prev or prev.get("hash") != file_hash(log_path):
+        prev = ingested.get(log_path.name)
+        if prev is None or prev.get("hash") != file_hash(log_path):
             changed.append(log_path)
     return changed
 
 
-def _run_compile_loop(to_compile: list[Path], state: dict) -> None:
+def _run_compile_loop(to_compile: list[Path], state: State) -> None:
     """Compile each log sequentially, printing a per-file progress line."""
     total_cost = 0.0
     for i, log_path in enumerate(to_compile, 1):
@@ -239,7 +242,7 @@ def _run_compile_loop(to_compile: list[Path], state: dict) -> None:
     print(f"Knowledge base: {len(articles)} articles")
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Compile daily logs into knowledge articles")
     parser.add_argument("--all", action="store_true", help="Force recompile all logs")
     parser.add_argument("--file", type=str, help="Compile a specific daily log file")

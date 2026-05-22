@@ -25,12 +25,16 @@ import os
 os.environ["CLAUDE_INVOKED_BY"] = "memory_flush"
 
 import asyncio
+import hashlib
 import json
 import logging
+import subprocess
 import sys
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TypedDict
 
 # config.py lives next to this file in scripts/. Add scripts/ to sys.path so
 # `import config` works whether we're invoked via `uv run python flush.py …`
@@ -39,6 +43,13 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
+from claude_agent_sdk import (  # noqa: E402
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ResultMessage,
+    TextBlock,
+    query,
+)
 from config import (  # noqa: E402
     CODE_ROOT,
     DAILY_DIR,
@@ -46,6 +57,7 @@ from config import (  # noqa: E402
     STORE_DIR,
     ensure_store_dirs,
 )
+from utils import State  # noqa: E402
 
 # State files moved out of the code tree and into the user-global store.
 FLUSH_STATE_FILE = STATE_DIR / "last-flush.json"
@@ -67,16 +79,24 @@ logging.basicConfig(
 )
 
 
-def load_flush_state() -> dict:
+class FlushState(TypedDict, total=False):
+    """Persisted state for the most recent flush. Used only for dedup."""
+
+    session_id: str
+    timestamp: float
+
+
+def load_flush_state() -> FlushState:
     if FLUSH_STATE_FILE.exists():
         try:
-            return json.loads(FLUSH_STATE_FILE.read_text(encoding="utf-8"))
+            loaded: FlushState = json.loads(FLUSH_STATE_FILE.read_text(encoding="utf-8"))
+            return loaded
         except (json.JSONDecodeError, OSError):
             pass
     return {}
 
 
-def save_flush_state(state: dict) -> None:
+def save_flush_state(state: FlushState) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     FLUSH_STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
 
@@ -109,14 +129,6 @@ def append_to_daily_log(content: str, section: str, project_slug: str) -> None:
 
 async def run_flush(context: str, project_slug: str) -> str:
     """Use Claude Agent SDK to extract important knowledge from conversation context."""
-    from claude_agent_sdk import (
-        AssistantMessage,
-        ClaudeAgentOptions,
-        ResultMessage,
-        TextBlock,
-        query,
-    )
-
     prompt = f"""Review the conversation context below and respond with a concise summary
 of important items that should be preserved in the daily log. This session came
 from project **{project_slug}** — keep project-specific gotchas under "Lessons
@@ -172,8 +184,6 @@ respond with exactly: FLUSH_OK
             elif isinstance(message, ResultMessage):
                 pass
     except Exception as e:
-        import traceback
-
         logging.error("Agent SDK error: %s\n%s", e, traceback.format_exc())
         response = f"FLUSH_ERROR: {type(e).__name__}: {e}"
 
@@ -185,8 +195,6 @@ COMPILE_AFTER_HOUR = 18  # 6 PM local time
 
 def maybe_trigger_compilation() -> None:
     """If it's past the compile hour and today's log hasn't been compiled, run compile.py."""
-    import subprocess as _sp
-
     now = datetime.now(timezone.utc).astimezone()
     if now.hour < COMPILE_AFTER_HOUR:
         return
@@ -194,14 +202,12 @@ def maybe_trigger_compilation() -> None:
     today_log = f"{now.strftime('%Y-%m-%d')}.md"
     if COMPILE_STATE_FILE.exists():
         try:
-            compile_state = json.loads(COMPILE_STATE_FILE.read_text(encoding="utf-8"))
+            compile_state: State = json.loads(COMPILE_STATE_FILE.read_text(encoding="utf-8"))
             ingested = compile_state.get("ingested", {})
             if today_log in ingested:
-                from hashlib import sha256
-
                 log_path = DAILY_DIR / today_log
                 if log_path.exists():
-                    current_hash = sha256(log_path.read_bytes()).hexdigest()[:16]
+                    current_hash = hashlib.sha256(log_path.read_bytes()).hexdigest()[:16]
                     if ingested[today_log].get("hash") == current_hash:
                         return  # log unchanged since last compile
         except (json.JSONDecodeError, OSError):
@@ -214,20 +220,32 @@ def maybe_trigger_compilation() -> None:
 
     cmd = ["uv", "run", "--directory", str(CODE_ROOT), "python", str(COMPILE_SCRIPT)]
 
-    kwargs: dict = {}
-    if sys.platform == "win32":
-        kwargs["creationflags"] = _sp.CREATE_NEW_PROCESS_GROUP | _sp.DETACHED_PROCESS
-    else:
-        kwargs["start_new_session"] = True
-
+    # Spawn detached so flush.py can exit without waiting on the compile.
+    # ``creationflags`` is Windows-only, ``start_new_session`` is POSIX-only —
+    # branching here keeps the kwargs concretely typed for each platform.
     try:
         log_handle = open(str(COMPILE_LOG_FILE), "a")
-        _sp.Popen(cmd, stdout=log_handle, stderr=_sp.STDOUT, cwd=str(CODE_ROOT), **kwargs)
+        if sys.platform == "win32":
+            subprocess.Popen(
+                cmd,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                cwd=str(CODE_ROOT),
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
+            )
+        else:
+            subprocess.Popen(
+                cmd,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                cwd=str(CODE_ROOT),
+                start_new_session=True,
+            )
     except Exception as e:
         logging.error("Failed to spawn compile.py: %s", e)
 
 
-def main():
+def main() -> None:
     if len(sys.argv) < 3:
         logging.error("Usage: %s <context_file.md> <session_id> [project_slug]", sys.argv[0])
         sys.exit(1)
