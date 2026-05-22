@@ -60,12 +60,12 @@ exclude_lines = [
 ]
 
 [tool.pyright]
-include = ["bm25.py", "cli.py", "embeddings.py", "frontmatter.py", "aliases.py", "test_*.py"]
-exclude = [".venv", "**/__pycache__", "build", "dist", "fixtures"]
+include = ["bm25.py", "cli.py", "embeddings.py", "frontmatter.py", "aliases.py"]
+exclude = [".venv", "**/__pycache__", "build", "dist", "fixtures", "test_*.py", "conftest.py"]
 venvPath = "."
 venv = ".venv"
 pythonVersion = "3.12"
-typeCheckingMode = "basic"
+typeCheckingMode = "strict"
 reportMissingTypeStubs = false
 reportMissingImports = "warning"
 reportUnusedImport = "error"

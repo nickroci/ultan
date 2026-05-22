@@ -31,11 +31,19 @@ select = ["E", "F", "I", "W", "C901", "PLR0912", "PLR0915", "PLC0415"]
 
 [tool.pyright]
 include = ["hooks", "scripts"]
-exclude = [".venv", "**/__pycache__", "build", "dist", "_dot_claude_disabled"]
+exclude = [
+    ".venv",
+    "**/__pycache__",
+    "build",
+    "dist",
+    "_dot_claude_disabled",
+    "**/test_*.py",
+    "**/conftest.py",
+]
 venvPath = "."
 venv = ".venv"
 pythonVersion = "3.12"
-typeCheckingMode = "basic"
+typeCheckingMode = "strict"
 reportMissingTypeStubs = false
 reportMissingImports = "warning"
 reportUnusedImport = "error"
