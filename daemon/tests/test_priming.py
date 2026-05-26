@@ -239,18 +239,29 @@ def test_refresh_hot_context_writes_top_k_entries(tmp_path):
     assert "ultan-search" in body
     # The python/uv entry should be the strongest match.
     assert "[[global/python/use-uv-not-pip]]" in body
-    # Exactly 5 bullets (we asked for top_k=5).
+    # 1-to-top_k bullets — the rerank stage filters candidates below its
+    # relevance floor, so a tightly-targeted query (this one is python+uv
+    # only) can legitimately surface fewer than top_k matches. Pre-rerank
+    # this test asserted exactly 5; with rerank, "quality > quantity."
     bullet_lines = [line for line in body.splitlines() if line.startswith("- [[")]
-    assert len(bullet_lines) == 5
+    assert 1 <= len(bullet_lines) <= 5
 
 
 def test_refresh_respects_char_budget(tmp_path):
     k = _seed_library(tmp_path)
     out = tmp_path / "hot-context.md"
 
+    # Coherent English buffer — the cross-encoder reranker needs sentence
+    # structure to score candidates, not bare keyword soup. The buffer
+    # touches both python/uv and git/rebase entries so multiple matches
+    # land above the rerank floor and the budget actually has to trim.
     priming.refresh_hot_context(
         k,
-        rolling_buffer_text="python uv pip git rebase branch commit ruff",
+        rolling_buffer_text=(
+            "we were debugging python package installs, switching between pip and uv, "
+            "and ran into trouble rebasing a feature branch onto main after a force-push. "
+            "ruff also flagged some imports that needed reordering."
+        ),
         out_path=out,
         top_k=20,  # ask for far more than fits
         char_budget=500,
@@ -472,46 +483,56 @@ def test_bullet_format_includes_title_hook_and_count(tmp_path):
     Tested directly so a formatting refactor can't silently change the
     on-disk shape.
 
-    We layer the two target entries on top of the seeded library so
-    BM25 has enough corpus to give the topical tokens nonzero IDF.
+    Uses realistic English content — the cross-encoder reranker scores
+    based on natural-language semantic match, so synthetic nonsense
+    words ("vinglex", "qwoxlate") would fall below the rerank floor and
+    never reach this assertion. The query and the two layered entries
+    are written so each scores positively against its targeted entry.
     """
     k = _seed_library(tmp_path)
 
-    reinforced_path = k / "global" / "always-vinglex.md"
+    reinforced_path = k / "global" / "pin-docker-versions.md"
     _write(
         reinforced_path,
         _entry(
-            id_="always-vinglex",
-            title="Always use vinglex",
-            applies_when="installing vinglex frobnitz",
-            keywords=["vinglex", "frobnitz"],
+            id_="pin-docker-versions",
+            title="Pin docker image versions",
+            applies_when="writing a Dockerfile or docker-compose service",
+            keywords=["docker", "image", "version", "pin"],
             reinforced=4,
         ),
     )
-    plain_path = k / "global" / "qwoxlate-plain.md"
+    plain_path = k / "global" / "use-ripgrep.md"
     _write(
         plain_path,
         _entry(
-            id_="qwoxlate-plain",
-            title="A plain entry",
-            applies_when="some qwoxlate cromulent situation",
-            keywords=["qwoxlate", "cromulent"],
+            id_="use-ripgrep",
+            title="Prefer ripgrep over grep",
+            applies_when="searching through a code repository",
+            keywords=["ripgrep", "grep", "search"],
         ),
     )
 
     out = tmp_path / "hot-context.md"
     priming.refresh_hot_context(
         k,
-        rolling_buffer_text=("installing vinglex frobnitz and the qwoxlate cromulent situation"),
+        rolling_buffer_text=(
+            "we need to pin our docker image versions in the Dockerfile, "
+            "and use ripgrep when searching through the code repository."
+        ),
         out_path=out,
         top_k=2,
     )
     body = out.read_text(encoding="utf-8")
 
     assert (
-        "[[global/always-vinglex]] (×4) — Always use vinglex — installing vinglex frobnitz" in body
+        "[[global/pin-docker-versions]] (×4) — Pin docker image versions — "
+        "writing a Dockerfile or docker-compose service" in body
     )
-    assert "[[global/qwoxlate-plain]] — A plain entry — some qwoxlate cromulent situation" in body
+    assert (
+        "[[global/use-ripgrep]] — Prefer ripgrep over grep — "
+        "searching through a code repository" in body
+    )
 
 
 def test_scope_bonus_prefers_current_project_then_global(tmp_path):

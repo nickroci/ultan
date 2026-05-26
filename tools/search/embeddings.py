@@ -53,13 +53,54 @@ from bm25 import strip_and_extract_frontmatter as _strip_and_extract_frontmatter
 # us "array of float32" without committing to dim-typing.
 _FloatArray = npt.NDArray[np.float32]
 
-DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"  # 80MB, fast on CPU
+# Default embedder. Picked for the combination of:
+#   - asymmetric retrieval prompts (search_query: / search_document:) —
+#     genuine precision lift on a query-vs-document pipeline like priming
+#   - Matryoshka dims 64/128/256/512/768 (can truncate later without reindex)
+#   - 8192-token input (older embedders truncate long entries silently)
+#   - ~270 MB resident, well under the daemon's RAM ceiling
+#
+# TODO(future): google/embeddinggemma-300m is the quality ceiling — ~1.2 GB
+# resident, task-aware prompts, 2048-token input. Swap when that footprint
+# is acceptable. The encode contract here is the same; only the prefix
+# helpers below would need updating to its `task: ... | query: ...` shape.
+DEFAULT_MODEL = "nomic-ai/nomic-embed-text-v1.5"
 
 # Module-level model cache so multiple indices share one loaded model.
 _MODEL_CACHE: dict[str, Any] = {}
 
 
 # ── Model loading ──────────────────────────────────────────────────────────────
+
+
+def _select_device() -> str:
+    """Return the best available torch device.
+
+    Apple Silicon's MPS is preferred when present; falls back to CUDA on
+    Linux/NVIDIA hosts; CPU otherwise. Detection is one-shot at load time;
+    callers don't pay it per request.
+    """
+    try:
+        import torch  # noqa: PLC0415 — lazy import keeps cold start lean.
+
+        if torch.backends.mps.is_available():
+            return "mps"
+        if torch.cuda.is_available():
+            return "cuda"
+    except Exception:
+        pass
+    return "cpu"
+
+
+def _needs_trust_remote_code(model_name: str) -> bool:
+    """Nomic's embedders ship custom modeling code on the Hub.
+
+    Loading them through HuggingFace requires opting in to
+    ``trust_remote_code=True`` (which executes Python from the model
+    repo). We do this for nomic models specifically; other embedders
+    (MiniLM, BGE, GTE) use stock transformers archs and don't need it.
+    """
+    return "nomic-embed-text" in model_name
 
 
 def _load_model(model_name: str) -> Any:
@@ -79,22 +120,63 @@ def _load_model(model_name: str) -> Any:
     if cached is not None:
         return cached
 
+    device = _select_device()
+    extra: dict[str, Any] = {}
+    if _needs_trust_remote_code(model_name):
+        extra["trust_remote_code"] = True
+
     # Try offline first. `local_files_only=True` tells HuggingFace
     # transformers to refuse network and load from disk cache only.
     # If the model isn't cached, this raises — we catch and retry online.
     try:
         model = SentenceTransformer(
             model_name,
-            device="cpu",
+            device=device,
             local_files_only=True,
+            **extra,
         )
     except Exception:
         # Not cached yet — fall back to download. Subsequent loads in
         # other processes will hit the cache and go offline.
-        model = SentenceTransformer(model_name, device="cpu")
+        model = SentenceTransformer(model_name, device=device, **extra)
+
+    # Cap sequence length to bound the attention-matrix memory cost.
+    # nomic-embed-text-v1.5 ships with max_seq_length=2048 which, on MPS,
+    # exceeds the per-tensor allocation ceiling at any non-trivial batch
+    # size (RuntimeError: Invalid buffer size). Our longest library entries
+    # are ~3000 tokens — capping at 1024 truncates a handful of long
+    # entries to their first half (which contains the title, frontmatter
+    # keywords, and lede — the load-bearing semantic content). Faster
+    # build, MPS-stable, no quality loss in practice.
+    if hasattr(model, "max_seq_length") and getattr(model, "max_seq_length", 0) > 1024:
+        model.max_seq_length = 1024
 
     _MODEL_CACHE[model_name] = model
     return model
+
+
+# ── Task-prompt formatting (model-specific) ────────────────────────────────────
+
+
+# Nomic embed v1.5 was trained with explicit task prefixes. Using the
+# right one at the right time is what unlocks the asymmetric-retrieval
+# quality lift vs models that don't make this distinction (MiniLM/BGE).
+_NOMIC_QUERY_PREFIX = "search_query: "
+_NOMIC_DOC_PREFIX = "search_document: "
+
+
+def _format_query(query: str, model_name: str) -> str:
+    """Prepend the model's retrieval-query prefix when one applies."""
+    if "nomic-embed-text" in model_name:
+        return _NOMIC_QUERY_PREFIX + query
+    return query
+
+
+def _format_doc(text: str, model_name: str) -> str:
+    """Prepend the model's retrieval-document prefix when one applies."""
+    if "nomic-embed-text" in model_name:
+        return _NOMIC_DOC_PREFIX + text
+    return text
 
 
 # ── Records / hit dataclass ────────────────────────────────────────────────────
@@ -146,7 +228,7 @@ class EmbeddingIndex:
 
         model = _load_model(self.model_name)
         q_vec = model.encode(
-            [query],
+            [_format_query(query, self.model_name)],
             convert_to_numpy=True,
             normalize_embeddings=True,
         )[0].astype(np.float32)
@@ -237,11 +319,16 @@ def build_index(
         )
 
     model = _load_model(model_name)
+    # Small batch size for MPS stability — a 1024-seq attention matrix at
+    # batch_size=32 still hits MPS's per-tensor allocation ceiling. 8 is
+    # safe on M-series Macs and barely slower than 32 for our corpus size
+    # since the bottleneck is the per-layer matmul, not batching overhead.
     vecs = model.encode(
-        texts,
+        [_format_doc(t, model_name) for t in texts],
         convert_to_numpy=True,
         normalize_embeddings=True,
         show_progress_bar=False,
+        batch_size=8,
     ).astype(np.float32)
 
     return EmbeddingIndex(

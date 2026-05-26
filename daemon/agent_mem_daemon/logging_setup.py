@@ -90,4 +90,29 @@ def configure(
         sh.setFormatter(fmt)
         root.addHandler(sh)
 
+    # Silence noisy third-party loggers regardless of root level. Without
+    # this, running with ``-v`` (root = DEBUG) buries our own messages
+    # under HTTP wire traffic — every HuggingFace request from
+    # sentence-transformers emits dozens of DEBUG lines (full HTTP
+    # headers, connection lifecycle) per call. Pinning these at WARNING
+    # keeps the daemon log readable. Includes anything that's been seen
+    # spamming the log during model load / warmup.
+    _NOISY_LOGGERS = (
+        "httpcore",
+        "httpcore.http11",
+        "httpcore.connection",
+        "httpx",
+        "urllib3",
+        "huggingface_hub",
+        "sentence_transformers",
+        "sentence_transformers.SentenceTransformer",
+        "sentence_transformers.util",
+        "sentence_transformers.base.model",
+        "transformers",
+        "filelock",
+        "markdown_it",
+    )
+    for name in _NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
     return logging.getLogger("agent_mem_daemon")

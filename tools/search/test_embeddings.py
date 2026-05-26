@@ -123,12 +123,17 @@ def test_search_returns_empty_for_unrelated_query(built_index: EmbeddingIndex) -
     We tolerate either: empty results, or all results below a low threshold.
     Embedding models always produce *some* cosine signal — the question is
     whether it's above noise.
+
+    Threshold note: nomic-embed-text-v1.5 produces tighter cosine ranges than
+    older models (MiniLM sat ~0.2 for unrelated; nomic sits ~0.4-0.5).
+    Genuine paraphrase matches land at 0.65+, so 0.55 separates the two
+    populations with margin. Re-tune if the default embedder changes again.
     """
     hits = built_index.search("submarine periscope navigation", k=10)
     # Either no hits, or every hit is weak.
     if hits:
         top = max(h.score for h in hits)
-        assert top < 0.35, (
+        assert top < 0.55, (
             f"unrelated query produced a strong hit (score={top:.3f}); "
             f"top results: {[(h.path.name, round(h.score, 3)) for h in hits[:3]]}"
         )

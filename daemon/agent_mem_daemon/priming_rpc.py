@@ -82,10 +82,12 @@ log = logging.getLogger("agent_mem_daemon.priming_rpc")
 # ── Tunables ─────────────────────────────────────────────────────────
 
 
-# Hard cap on a single request handler's wall time. The daemon will
-# truncate / error rather than letting a runaway index rebuild block
-# the hook beyond its 200 ms total budget.
-SERVER_REQUEST_TIMEOUT_S = 1.0
+# Hard cap on a single request handler's wall time. Sits below the hook
+# client's 2s total budget so a slow handler still surfaces as a server
+# error rather than a client-side socket timeout (cleaner failure mode).
+# The cross-encoder rerank stage runs ~300ms warm on Apple Silicon; CPU
+# or older GPUs can push that to ~1s, hence the headroom here.
+SERVER_REQUEST_TIMEOUT_S = 1.8
 
 # Length-prefix size (big-endian uint32). 4 GB ceiling per message — we
 # expect bodies in the kilobyte range; the limit exists to refuse

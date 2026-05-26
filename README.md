@@ -54,7 +54,7 @@ The agent can't afford to query the library for everything it's about to do, and
 
 | Tier | Cognitive analog | Latency | Trigger | What it does |
 |---|---|---|---|---|
-| **1. Ambient priming** | Familiarity / spreading activation (Collins & Loftus, 1975) | ~0 (already in prompt context) | Daemon refreshes `hot-context.md` after every batch | Top 5 most-relevant entries injected as `additionalContext` on every UserPromptSubmit. Agent has them "in mind" without asking. Hybrid retrieval: BM25 + sentence-transformer embeddings merged via RRF, boosted by `reinforced` counter. ≤500 char budget. |
+| **1. Ambient priming** | Familiarity / spreading activation (Collins & Loftus, 1975) | <2s (Unix-socket round trip to warm daemon; budget enforced by the hook) | Hook fires a priming RPC to the daemon on every UserPromptSubmit | Top 5 most-relevant entries injected as `additionalContext` on every UserPromptSubmit. Agent has them "in mind" without asking. Three-stage retrieval: BM25 + sentence-transformer embeddings (nomic-embed-text-v1.5) → RRF fusion → cross-encoder rerank (ms-marco-MiniLM-L-12-v2), boosted by `reinforced` counter + project-scope prior. ≤1500 char budget. |
 | **2. Deliberate recall** | Hippocampal recollection (Yonelinas, 2002) | 30-60s | `/ultan-advisor <question>` invocation | Sonnet Librarian searches deeply, Opus Scholar synthesises a referenced answer. The drill-down when the priming snippet isn't enough. |
 | **3. Acute notice** | Orbital-PFC stop signal (Aron et al., 2014) | <100ms synchronous | PreToolUse hook on every tool call | Default `advise`: pattern-matches the tool call against entries with `block_triggers`; on match, emits an `additionalContext` FYI — *"📚 Library note: [[X]] applies here"* — and the tool proceeds. **The agent decides.** Opt-in `severity: block` is reserved for genuinely dangerous actions (`rm -rf /`, force-push to main); only then does the hook hard-deny. Like a human noticing a relevant memory mid-action: noticed, not paralysed. |
 
@@ -66,7 +66,7 @@ The library is structurally a graph: folder hierarchy gives the tree, wikilinks 
 
 Retrieval over the graph is split across tiers:
 
-- **Tier 1 (priming) is text-only** — hybrid BM25 + sentence-transformer embeddings merged via RRF, boosted by the `reinforced` counter. The retriever does not traverse the graph; it returns top-k entries by text similarity, with wikilinks appearing in the output as *hints*.
+- **Tier 1 (priming) is text-only** — three-stage retrieval: BM25 + sentence-transformer embeddings (nomic-embed-text-v1.5) fused via RRF, then re-ordered by a cross-encoder reranker (ms-marco-MiniLM-L-12-v2) co-attending over each `(query, body)` pair, and finally boosted by the `reinforced` counter plus project-scope prior. The retriever does not traverse the graph; it returns top-k entries by relevance, with wikilinks appearing in the output as *hints*.
 - **Tier 2 (deliberate recall) is agent-driven graph traversal.** The agent sees wikilinks in priming context and follows them via the `ultan-search` skill, which returns the entry plus its local neighborhood — siblings, subfolders, parent README — in one read. The agent decides which edges to follow and when to stop, the same "memory as tools" pattern Letta and Wire have shown beats pre-baked retrieval expansion on cross-document queries.
 
 The deliberate choice: deterministic-and-cheap text retrieval at always-on Tier 1, semantic-and-expensive graph traversal at on-demand Tier 2. PageRank-style structural expansion at Tier 1 is a possible addition (see *Roadmap*), not a current capability.
@@ -79,7 +79,9 @@ The deliberate choice: deterministic-and-cheap text retrieval at always-on Tier 
 # 1. Sync the daemon's deps (uv-managed)
 cd daemon && uv sync --group dev
 
-# 2. Sync the search CLI (separate venv, shared BM25 implementation)
+# 2. Sync the search CLI (separate venv, shared BM25 implementation).
+#    Pulls in sentence-transformers + einops; HuggingFace model weights
+#    are downloaded on first daemon start (see step 4 below).
 cd ../tools/search && uv sync
 
 # 3. Install the slash commands and hooks
@@ -100,10 +102,47 @@ cd /path/to/ultan/daemon && uv run agent-mem-daemon -v
 #    ~/.agent-mem/knowledge/ as the Scholar approves them.
 ```
 
-When the daemon is running, the ``UserPromptSubmit`` hook makes a sub-100 ms
-Unix-socket call into it to get a priming snippet keyed on your *current
-prompt* (not the last batch's curation). When the daemon is down, the hook
-falls back to a tiny in-process lexical scan so you still see relevant entries.
+### First-start expectations (model downloads)
+
+The Tier-1 retrieval pipeline uses two open HuggingFace models, downloaded
+into your local cache on first daemon start (`~/.cache/huggingface/`,
+re-used by every subsequent run):
+
+| Model | Role | Size on disk |
+|---|---|---|
+| [`nomic-ai/nomic-embed-text-v1.5`](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5) | sentence-transformer embedder (asymmetric query/document, Matryoshka 768→128) | ~270 MB |
+| [`cross-encoder/ms-marco-MiniLM-L-12-v2`](https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-12-v2) | reranker that scores (query, body) pairs after RRF fusion | ~130 MB |
+
+Both are downloaded **anonymously** — no HuggingFace account or token is
+needed. If you have outbound network restrictions, pre-cache them on a
+machine with internet access and copy `~/.cache/huggingface/hub/`
+across. nomic-embed-v1.5 requires `trust_remote_code=True` because its
+RoPE attention module ships as custom code in the model repo; the daemon
+sets this only for the nomic model name, not as a global default.
+
+Boot time on a warm M-series Mac (cold models, warm HF cache):
+
+- ~1 s for the BM25 index
+- ~17 s for the embedding model to load + index the library + JIT-warm
+  the query-side MPS kernels
+- ~5 s for the cross-encoder to load + run a full-pipeline warmup query
+
+Total: ~25 s from `uv run agent-mem-daemon -v` to "priming RPC ready".
+The startup runs a single end-to-end priming search before opening the
+socket — by the time the hook can connect, every MPS kernel in the
+retrieval path is JIT-compiled, so the first real request is hot.
+
+Steady-state resident footprint: **~2.5 GB physical memory** on Apple
+Silicon (unified memory, includes Metal device-side allocations); peak
+of ~3.4 GB during boot warmup. On a discrete-GPU box the split between
+RSS and GPU memory looks different; on CPU-only hardware the daemon
+still works but per-request rerank latency drifts up.
+
+When the daemon is running, the `UserPromptSubmit` hook makes a Unix-socket
+call into it (hard cap 2 s; warm steady-state ~300-500 ms) to get a
+priming snippet keyed on your *current prompt* (not the last batch's
+curation). When the daemon is down, the hook falls back to a tiny
+in-process lexical scan so you still see relevant entries.
 
 To save a memory explicitly: `/ultan never deploy to prod without my explicit OK`.
 
@@ -224,12 +263,11 @@ Two known gaps relative to where the bio framing points.
 
 ### Tier 1 graph signal
 
-Tier 1 priming is currently text-only (BM25 + embeddings + RRF + `reinforced`). Two cheap structural signals sit unused:
+Tier 1 priming uses BM25 + embeddings (nomic-embed-text-v1.5) + RRF + cross-encoder rerank (ms-marco-MiniLM-L-12-v2) + `reinforced` + project-scope prior. One cheap structural signal still sits unused:
 
-- **Folder-scope prior** — entries under `projects/<current-cwd-slug>/` should rank higher on text-similarity ties.
-- **Wikilink-density boost** — heavily inbound-linked entries are load-bearing (PageRank's intuition, cheap to compute on a few-thousand-entry library). One extra term in the RRF fusion.
+- **Wikilink-density boost** — heavily inbound-linked entries are load-bearing (PageRank's intuition, cheap to compute on a few-thousand-entry library). One extra term added before the cross-encoder rerank (so densely-linked entries get a better chance of surfacing into the rerank's candidate pool).
 
-Neither requires architectural change — both are reranker tweaks in `priming.py`. The agent-driven Tier 2 traversal stays as-is; this is purely about giving Tier 1 a structural prior.
+Doesn't require architectural change — it's a small addition in `priming.py` before `_rerank_candidates`. The agent-driven Tier 2 traversal stays as-is; this is purely about giving Tier 1 a structural prior on top of the relevance-only signal the cross-encoder already provides.
 
 ### Forgetting (LTD) with surprise-calibrated encoding strength
 

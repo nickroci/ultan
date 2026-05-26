@@ -52,6 +52,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, cast
 import yaml
 from bm25 import load_or_build as bm25_load_or_build
 from embeddings import load_or_build as embeddings_load_or_build
+from reranker import rerank as _cross_encoder_rerank
 
 from .paths import home as _agent_mem_home
 
@@ -317,12 +318,17 @@ def _embedding_search(
         log.exception("priming: embedding search raised")
         return []
 
-    # Filter out very weak semantic matches — cosine below ~0.25 is
-    # noise from this model and would poison RRF with irrelevant
-    # paths. Empirical: gibberish queries against unrelated entries
-    # produce scores in the 0.02-0.05 range; genuine paraphrase
-    # matches sit at 0.4+.
-    EMBEDDING_NOISE_FLOOR = 0.25
+    # Filter out very weak semantic matches before they reach RRF.
+    # Calibrated for nomic-embed-text-v1.5 — its cosine distribution
+    # sits noticeably higher than older models (unrelated ~0.40-0.50,
+    # genuine paraphrase matches ~0.65+). A floor at 0.50 separates the
+    # populations: nonsense queries against unrelated entries fall under
+    # it (so gibberish in == gibberish-free out, the "no real match
+    # clears stale priming" semantic), while real paraphrase matches
+    # comfortably clear it. Re-tune if the embedder swaps again — see
+    # test_search_returns_empty_for_unrelated_query in tools/search for
+    # the empirical handle.
+    EMBEDDING_NOISE_FLOOR = 0.50
     return [(Path(h.path), float(h.score)) for h in hits if float(h.score) >= EMBEDDING_NOISE_FLOOR]
 
 
@@ -353,31 +359,100 @@ def _rrf_merge(
     return ordered[:k_top]
 
 
+# Minimum cross-encoder logit for a candidate to count as a real match.
+# ms-marco-MiniLM-L-12-v2 outputs unnormalized relevance logits — strong
+# matches sit at +5 to +10, weak-but-real around -2 to +2, definite
+# non-matches at -5 and below. The "no real match" filter is mostly
+# handled upstream by ``EMBEDDING_NOISE_FLOOR``; this floor is the
+# rerank's own guard against an outright non-match slipping through
+# the embedding lane on lexical-only signal. A permissive value lets
+# weak-but-real matches through (a tightly-scoped lesson on a less
+# common topic can rerank around 0). Tighten toward 0 if noise leaks
+# through; loosen toward -5 if valid matches get dropped.
+_RERANK_SCORE_FLOOR = -3.0
+
+
+def _rerank_candidates(
+    query: str,
+    candidates: List[Tuple[Path, float]],
+    *,
+    k: int,
+) -> List[Tuple[Path, float]]:
+    """Cross-encoder rerank pass on ``candidates``; degrade to input on failure.
+
+    Reads each candidate's body once, hands the ``(query, body)`` pairs to
+    the cross-encoder, and returns the top-``k`` by relevance score with
+    the cross-encoder score in place of the RRF score. Candidates scoring
+    below ``_RERANK_SCORE_FLOOR`` are dropped — see the constant's docstring
+    for why. The reranker returns ``None`` on any internal failure (model
+    missing, predict raised, empty input) — in that case we hand back the
+    upstream order truncated to ``k`` so retrieval still works without
+    rerank.
+    """
+    if not candidates:
+        return []
+
+    bodies: List[Tuple[Path, str]] = []
+    for path, _ in candidates:
+        try:
+            bodies.append((path, path.read_text(encoding="utf-8")))
+        except (OSError, UnicodeDecodeError):
+            # Skip unreadable candidates rather than fail the whole rerank.
+            continue
+    if not bodies:
+        return candidates[:k]
+
+    reranked = _cross_encoder_rerank(query, bodies)
+    if reranked is None:
+        return candidates[:k]
+    above_floor = [(p, s) for p, s in reranked if s >= _RERANK_SCORE_FLOOR]
+    return above_floor[:k]
+
+
 def _hybrid_search(
     knowledge_dir: Path,
     query: str,
     *,
     k: int,
 ) -> List[Tuple[Path, float]]:
-    """Run BM25 and embedding search in parallel, merge via RRF.
+    """Run BM25 + embedding search, fuse with RRF, then cross-encoder rerank.
 
-    Each lane pulls a few more than ``k`` so RRF has overlap to work
-    with. If the embedding lane is unavailable (no model installed,
-    fresh corpus, transient failure), gracefully degrades to BM25-only.
+    Three-stage retrieval, low precision → high precision:
+
+    1. **Recall**: BM25 and embedding lanes each pull ``k * 4`` candidates.
+       BM25 catches exact-token matches; embeddings catch paraphrase.
+    2. **Fusion**: RRF merges the two ranked lists into ``k * 4``
+       topically-relevant candidates (rank-based, robust to score scale
+       differences between BM25 and cosine).
+    3. **Rerank**: a cross-encoder co-attends over each ``(query, body)``
+       pair and scores actual applicability — orthogonal signal to the
+       overlap-based lanes upstream. Returns the top ``k`` reranked.
+
+    Graceful degradation: if the embedding lane is unavailable, we
+    fall back to BM25-only feed into the reranker. If the reranker is
+    unavailable, we fall back to the RRF order verbatim. The hot path
+    must keep working when any single component breaks.
     """
-    # Pull 2× k from each lane so RRF has a chance to surface entries
-    # that one lane ranks low but the other ranks high.
+    # Pull 2× k from each lane. Wider over-fetch (e.g. 4×) would give
+    # the reranker more variety, but cross-encoder predict on MPS scales
+    # nonlinearly — measured ~60ms @ 5 candidates, ~170ms @ 10, ~600ms @
+    # 20 (graph-cache effects above the small-tensor threshold). At 4×
+    # the rerank stage alone overruns the 200ms hook budget. Stick to 2×
+    # so end-to-end fits.
     per_lane_k = max(k * 2, k + 5)
     bm25_hits = _bm25_search(knowledge_dir, query, k=per_lane_k)
     emb_hits = _embedding_search(knowledge_dir, query, k=per_lane_k)
     if not bm25_hits and not emb_hits:
         return []
+
     if not emb_hits:
-        # Embedding lane unavailable — fall back to BM25 verbatim.
-        return bm25_hits[:k]
-    if not bm25_hits:
-        return emb_hits[:k]
-    return _rrf_merge([bm25_hits, emb_hits], k_top=k)
+        fused = bm25_hits
+    elif not bm25_hits:
+        fused = emb_hits
+    else:
+        fused = _rrf_merge([bm25_hits, emb_hits], k_top=per_lane_k)
+
+    return _rerank_candidates(query, fused, k=k)
 
 
 # Scope bonuses are calibrated against the RRF top-rank score (~0.016 for

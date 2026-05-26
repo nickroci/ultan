@@ -275,9 +275,43 @@ def _prewarm_indexes(knowledge_root: Path, log: logging.Logger) -> None:
         from embeddings import load_or_build as emb_load  # noqa: PLC0415
 
         idx = emb_load(knowledge_root)
+        # Dummy search to JIT-compile the MPS kernels for the query path.
+        # ``load_or_build`` only loads weights and computes doc vectors — it
+        # never runs the query-side forward pass, so the first real priming
+        # request would pay a ~2-3s graph-compile cost without this.
+        idx.search("warmup query for kernel compile", k=1)
         log.info("startup: embedding index ready (%d docs)", len(idx.docs))
     except Exception:
         log.exception("startup: embedding prewarm failed (lazy rebuild on first use)")
+    try:
+        # Full-pipeline warmup. Just loading model weights isn't enough —
+        # MPS kernel caches are keyed on tensor shape, so a dummy predict
+        # on tiny inputs JIT-compiles kernels for the wrong shape and the
+        # first real request pays a recompile anyway. Running the actual
+        # priming pipeline against a realistic prompt warms every kernel
+        # the hook path will use: embedding query encode, cross-encoder
+        # predict on ~10 pairs of full-body documents, the works.
+        import time  # noqa: PLC0415
+
+        from .priming import _hybrid_search as priming_hybrid_search  # noqa: PLC0415
+
+        t0 = time.monotonic()
+        priming_hybrid_search(
+            knowledge_root,
+            "warmup priming query for kernel-shape JIT cache",
+            k=5,
+        )
+        log.info(
+            "startup: priming pipeline warm (%dms full warmup, BM25+embedding+rerank)",
+            int((time.monotonic() - t0) * 1000),
+        )
+    except Exception:
+        # The reranker is essential for Tier-1 precision but the daemon
+        # should still run without it — first priming request will surface
+        # the load failure loudly via the propagating exception path.
+        log.exception(
+            "startup: priming-pipeline prewarm failed (will fail loudly on first request)"
+        )
 
 
 def _install_signal_handlers(stop_event: threading.Event) -> None:
