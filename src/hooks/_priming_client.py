@@ -76,9 +76,11 @@ class PrimingResponse(TypedDict, total=False):
 
 
 # Total hook-side budget (connect + send + recv). The daemon's
-# SERVER_REQUEST_TIMEOUT_S is 1.0 — generous on its side; this is
-# our side's hard cap. Anything over 200 ms harms perceived latency.
-_TOTAL_BUDGET_MS = 200
+# SERVER_REQUEST_TIMEOUT_S sits below this. 2s accommodates the
+# cross-encoder rerank stage on slower machines — warm steady-state is
+# ~300ms on Apple Silicon, but CPU-only or older hardware can push that
+# higher and we'd rather wait than skip the precision lift.
+_TOTAL_BUDGET_MS = 2000
 
 # Length-prefix header size; must match daemon's priming_rpc.
 _LEN_HEADER = 4
