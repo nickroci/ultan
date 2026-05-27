@@ -707,6 +707,19 @@ actually the same thing. Both BM25 and embedding return false \
 positives — never propose UpdateEntry/MergeEntries without Reading \
 the target first.
 
+7. **NEVER quote secrets or credentials.** Buffer text may contain \
+API keys, auth tokens, bearer tokens, OAuth client secrets, \
+passwords, private keys (``-----BEGIN ... PRIVATE KEY-----``), \
+connection strings with embedded passwords, GitHub PATs (``ghp_*``, \
+``github_pat_*``), AWS access keys (``AKIA*``), Anthropic / OpenAI \
+keys (``sk-*``), JWTs, session cookies, or similar. **NEVER include \
+the literal value** in a proposal's body, applies-when, keywords, \
+or `reasoning` quote. If a lesson genuinely needs to reference a \
+secret, reference its LOCATION or PURPOSE only ("the deploy token \
+lives in 1Password under `prod-deploy`"), never its VALUE. When in \
+doubt, omit. Memory is plain markdown on disk and often \
+git-tracked — assume the worst.
+
 ═══════════════════════════════════════════════════════════════════
 INPUTS
 ═══════════════════════════════════════════════════════════════════

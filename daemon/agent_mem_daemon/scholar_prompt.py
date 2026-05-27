@@ -140,6 +140,19 @@ scope, status, confidence, applies-when, keywords, title, created, updated, \
 fired, fired-helpful, sources).
   5. Paths must agree with scope: ``scope: global`` ⇒ under ``global/...``; \
 ``scope: project:<slug>`` ⇒ under ``projects/<slug>/...``.
+  6. **NO LITERAL SECRETS.** VETO any proposal whose body, \
+applies-when, keywords, frontmatter, or `reasoning` quote contains \
+an API key, auth token, bearer token, OAuth client secret, password, \
+private key (``-----BEGIN ... PRIVATE KEY-----``), connection string \
+with embedded credentials, GitHub PAT (``ghp_*``, ``github_pat_*``), \
+AWS access key (``AKIA*``), Anthropic / OpenAI key (``sk-*``), JWT, \
+session cookie, or anything that looks high-entropy and secret in \
+context (long base64-ish blobs adjacent to words like "key", \
+"token", "secret", "password"). The Librarian is told not to quote \
+secrets but can miss them. Memory is plain markdown on disk and \
+often git-tracked — assume the worst. **VETO reason:** \
+``"contains-secret — would write credentials to plain-markdown library"``. \
+The lesson can recur with the secret redacted.
 
 ═══════════════════════════════════════════════════════════════════
 INPUTS
