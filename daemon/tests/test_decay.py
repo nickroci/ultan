@@ -325,3 +325,246 @@ def test_maybe_run_sweep_runs_after_cooldown(home: Path) -> None:
     out = decay.maybe_run_sweep(k, now=when_now)
     assert out is not None
     assert out.archived == 1
+
+
+# ── Defensive paths (rarely-hit error branches) ──────────────────────
+
+
+def test_run_sweep_uses_default_knowledge_dir_when_omitted(home: Path) -> None:
+    """Calling without a kwarg should resolve to the env-pointed home."""
+    # ``home`` fixture sets AGENT_MEM_HOME and creates knowledge/.
+    result = decay.run_sweep()
+    # Empty library → no archives, but the sweep should still write state.
+    assert result.archived == 0
+    assert decay.read_last_sweep_at() is not None
+
+
+def test_run_sweep_missing_knowledge_dir_returns_empty_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Knowledge dir doesn't exist — should be a no-op but still update state."""
+    monkeypatch.setenv("AGENT_MEM_HOME", str(tmp_path))
+    # Note: no `knowledge/` dir created.
+    result = decay.run_sweep()
+    assert result.archived == 0
+    assert result.kept == 0
+    # Sweep-state still written so the cooldown ticks.
+    assert decay.read_last_sweep_at() is not None
+
+
+def test_archive_destination_returns_none_for_outside_path(home: Path) -> None:
+    k = home / "knowledge"
+    outside = home / "outside" / "foo.md"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text("---\nid: x\n---\n\nbody\n")
+    assert decay._archive_destination(outside, k) is None
+
+
+def test_run_sweep_continues_after_unreadable_entry(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An entry that can't be parsed shouldn't abort the sweep — it
+    just counts toward `errored` and the loop continues to other
+    entries."""
+    k = home / "knowledge"
+    _write_entry(k / "global" / "good.md", id_="good", title="Good", created="2026-01-01")
+    bad = k / "global" / "bad.md"
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_text("not even close to a markdown entry\n")  # no frontmatter
+
+    when = datetime(2026, 5, 27, tzinfo=timezone.utc)
+    result = decay.run_sweep(knowledge_dir=k, now=when)
+    # Good one archived, bad one counted as errored.
+    assert result.archived == 1
+    assert result.errored == 1
+
+
+def test_run_sweep_catches_unexpected_exception_per_entry(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A truly-unexpected exception (e.g. permissions) on one entry
+    shouldn't crash the sweep — it goes into the errored bucket."""
+    k = home / "knowledge"
+    _write_entry(k / "global" / "good.md", id_="good", title="Good", created="2026-01-01")
+
+    # Patch the parser to raise mid-loop.
+    original = decay._read_and_parse_frontmatter
+    calls: list[Path] = []
+
+    def _flaky(path):
+        calls.append(path)
+        if "good" in str(path):
+            raise RuntimeError("simulated read failure")
+        return original(path)
+
+    monkeypatch.setattr(decay, "_read_and_parse_frontmatter", _flaky)
+    when = datetime(2026, 5, 27, tzinfo=timezone.utc)
+    result = decay.run_sweep(knowledge_dir=k, now=when)
+    assert result.errored == 1
+    assert result.archived == 0
+
+
+def test_maybe_run_sweep_short_circuits_when_lock_held(home: Path) -> None:
+    """If another sweep is in flight, the second caller bails out."""
+    k = home / "knowledge"
+    with decay._SWEEP_LOCK:
+        # Inside the lock, maybe_run_sweep should refuse to run.
+        out = decay.maybe_run_sweep(k)
+        assert out is None
+
+
+def test_parse_iso_date_handles_invalid_strings() -> None:
+    assert decay._parse_iso_date(None) is None
+    assert decay._parse_iso_date("") is None
+    assert decay._parse_iso_date("not-a-date") is None
+    assert decay._parse_iso_date("2026-13-99") is None  # invalid month/day
+    assert decay._parse_iso_date("2026-05-27") == date(2026, 5, 27)
+
+
+def test_reinforced_count_handles_bad_values() -> None:
+    assert decay._reinforced_count({}) == 0
+    assert decay._reinforced_count({"reinforced": None}) == 0
+    assert decay._reinforced_count({"reinforced": "not a number"}) == 0
+    assert decay._reinforced_count({"reinforced": -3}) == 0  # clamped to 0
+    assert decay._reinforced_count({"reinforced": 7}) == 7
+
+
+def test_arousal_pinned_accepts_both_field_names() -> None:
+    """``arousal_pin`` and ``arousal_pinned`` both work — the design
+    doc switches between them so accept either."""
+    assert decay._is_arousal_pinned({"arousal_pin": True}) is True
+    assert decay._is_arousal_pinned({"arousal_pinned": True}) is True
+    assert decay._is_arousal_pinned({}) is False
+    assert decay._is_arousal_pinned({"arousal_pin": False}) is False
+
+
+def test_write_last_sweep_at_swallows_oserror(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """If the sweep-state file can't be written, the function returns
+    silently — bookkeeping must never crash the sweep itself."""
+    monkeypatch.setattr(Path, "mkdir", _raise_oserror)
+    # Should not raise.
+    decay.write_last_sweep_at(datetime(2026, 5, 27, tzinfo=timezone.utc))
+
+
+def _raise_oserror(*args, **kwargs):
+    raise OSError("simulated")
+
+
+def test_atomic_write_entry_swallows_oserror(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The atomic-write helper returns False on disk error (rather than
+    propagating) so callers can degrade gracefully."""
+    p = home / "knowledge" / "global" / "foo.md"
+    _write_entry(p, id_="foo", title="Foo")
+    monkeypatch.setattr(Path, "write_text", _raise_oserror)
+    ok = decay._atomic_write_entry(p, {"id": "foo"}, "body")
+    assert ok is False
+
+
+def test_archive_entry_returns_false_on_destination_write_failure(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the archive destination write fails, the source must stay
+    in place (no partial archive)."""
+    k = home / "knowledge"
+    p = k / "global" / "old.md"
+    _write_entry(p, id_="old", title="Old", created="2026-01-01")
+    parsed = decay._read_and_parse_frontmatter(p)
+    assert parsed is not None
+    fm, _raw, body = parsed
+    monkeypatch.setattr(Path, "write_text", _raise_oserror)
+    ok = decay._archive_entry(p, k, fm, body, today_iso="2026-05-27")
+    assert ok is False
+    # Source untouched.
+    assert p.exists()
+
+
+def test_iter_entries_skips_top_level_admin_files(home: Path) -> None:
+    """index.md and log.md at the top level are catalog files, not
+    user entries — the sweep doesn't churn them."""
+    k = home / "knowledge"
+    (k / "index.md").write_text("---\nid: index\n---\n\n# Index\n")
+    (k / "log.md").write_text("---\nid: log\n---\n\n# Log\n")
+    _write_entry(k / "global" / "real.md", id_="real", title="Real", created="2026-01-01")
+    entries = decay._iter_entries(k)
+    names = {e.name for e in entries}
+    assert "real.md" in names
+    assert "index.md" not in names
+    assert "log.md" not in names
+
+
+def test_read_last_sweep_at_returns_none_for_wrong_field_type(home: Path) -> None:
+    """JSON with last_sweep_at as a non-string should be rejected."""
+    (home / "sweep-state.json").write_text('{"last_sweep_at": 12345}')
+    assert decay.read_last_sweep_at() is None
+
+
+def test_read_last_sweep_at_returns_none_for_unparseable_iso(home: Path) -> None:
+    """A string that isn't ISO format should be rejected."""
+    (home / "sweep-state.json").write_text('{"last_sweep_at": "tuesday"}')
+    assert decay.read_last_sweep_at() is None
+
+
+def test_read_last_sweep_at_returns_none_when_top_level_not_dict(home: Path) -> None:
+    """JSON array at top level is not a sweep-state record."""
+    (home / "sweep-state.json").write_text('["not", "a", "dict"]')
+    assert decay.read_last_sweep_at() is None
+
+
+def test_archive_entry_returns_true_even_when_source_unlink_fails(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the destination write succeeded but source removal failed,
+    the archive is effectively done — return True and log a warning."""
+    k = home / "knowledge"
+    p = k / "global" / "old.md"
+    _write_entry(p, id_="old", title="Old", created="2026-01-01")
+    parsed = decay._read_and_parse_frontmatter(p)
+    assert parsed is not None
+    fm, _raw, body = parsed
+
+    real_unlink = Path.unlink
+
+    def _selective_unlink_failure(self, *args, **kwargs):
+        # Only fail when unlinking the source entry — let temp-file
+        # cleanup work normally.
+        if str(self) == str(p):
+            raise OSError("simulated unlink failure")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", _selective_unlink_failure)
+    ok = decay._archive_entry(p, k, fm, body, today_iso="2026-05-27")
+    # Destination is in place, so the archival did happen.
+    assert ok is True
+    archived = k / "_archive" / "global" / "old.md"
+    assert archived.exists()
+
+
+def test_archive_entry_returns_false_when_destination_resolution_fails(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A path that doesn't resolve under the knowledge dir gets a
+    None destination and skips archival."""
+    k = home / "knowledge"
+    # Create entry OUTSIDE the knowledge dir.
+    outside = home / "loose" / "stray.md"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text("---\nid: stray\ncreated: '2026-01-01'\n---\n\nbody\n")
+    parsed = decay._read_and_parse_frontmatter(outside)
+    assert parsed is not None
+    fm, _raw, body = parsed
+    ok = decay._archive_entry(outside, k, fm, body, today_iso="2026-05-27")
+    assert ok is False
+
+
+def test_archive_entry_returns_false_on_mkdir_failure(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    k = home / "knowledge"
+    p = k / "global" / "old.md"
+    _write_entry(p, id_="old", title="Old", created="2026-01-01")
+    parsed = decay._read_and_parse_frontmatter(p)
+    assert parsed is not None
+    fm, _raw, body = parsed
+    monkeypatch.setattr(Path, "mkdir", _raise_oserror)
+    ok = decay._archive_entry(p, k, fm, body, today_iso="2026-05-27")
+    assert ok is False
