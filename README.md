@@ -271,7 +271,9 @@ Doesn't require architectural change — it's a small addition in `priming.py` b
 
 ### Reflective abstraction (offline integration of leaf episodes)
 
-Ultan curates incoming items well but has no bottom-up pass that synthesises higher-order rules from clusters of leaf entries. The Scholar is *reactive* — it judges incoming proposals — not *reflective*. Without an integration mechanism the library accumulates indefinitely; it doesn't *learn rules* from what it stores. This is arguably the single biggest delta from a mammalian system: hippocampal–neocortical dialogue during offline periods produces transitive inferences and schema abstractions that no single episode contains (Schlichting & Preston 2015; Eichenbaum 2017; Preston & Eichenbaum 2013). The canonical LLM-side analog is the *reflection* mechanism in Park et al.'s Generative Agents (2023) — a periodic synthesis pass that distills clusters of leaf observations into higher-order memories.
+Ultan curates incoming items well but has no bottom-up pass that synthesises higher-order rules from clusters of leaf entries. The Scholar is *reactive* — it judges incoming proposals — not *reflective*. Decay (PR #7) removes unused noise; reflection would consolidate the *used* patterns that would otherwise stay as N parallel leaves. Without it the library has *flat breadth* — every fact stays a leaf forever; nothing graduates to a higher-order rule. This is one of the largest deltas from a mammalian system: hippocampal–neocortical dialogue during offline periods produces transitive inferences and schema abstractions that no single episode contains (Schlichting & Preston 2015; Eichenbaum 2017; Preston & Eichenbaum 2013). The canonical LLM-side analog is the *reflection* mechanism in Park et al.'s Generative Agents (2023) — a periodic synthesis pass that distills clusters of leaf observations into higher-order memories. A-MEM (Xu et al., NeurIPS 2025) — already cited below in the Reconsolidation row — also does hierarchical evolution of entries on use; reflection here would add the *net-new parent abstraction* step that A-MEM doesn't propose.
+
+A design fork worth calling out before implementing: this can be done as **thematic summary** (cluster-then-summarise — Park et al. shape, easy via embedding cosine + one LLM call per cluster) or as **schema inference** (true transitive abstraction — closer to the cited Eichenbaum work, requires reading entry content with "what general rule do these imply?" prompting, harder but produces stronger abstractions). Both are useful as separate passes; pick one — or schedule both — before drafting code.
 
 Concretely: a periodic Scholar job that
 
@@ -279,7 +281,17 @@ Concretely: a periodic Scholar job that
 - proposes a parent abstraction with `[[wikilink]]` backlinks to its children, and
 - writes the parent into the relevant folder while leaving children in place (decayed-not-deleted still applies downstream).
 
-The parent inherits the highest `encoding_strength` of its children (once that field exists — see *Forgetting* below) and earns a `reinforced` bump whenever any child is used. The result is a self-organising hierarchy where rules emerge from instances, instead of every fact living forever at the leaves. Open questions: cadence (post-batch alongside reconciliation? nightly?), minimum cluster size and cohesion threshold before proposing an abstraction, and how the Scholar should phrase a `contradicts` vote against a previously-synthesised parent when new leaves diverge from its claim.
+The parent inherits an `encoding_strength` derived from its children (once that field exists — see *Forgetting* below) and earns a `reinforced` bump whenever any child is used. The result is a self-organising hierarchy where rules emerge from instances, instead of every used pattern staying at the leaves.
+
+Open questions:
+
+- **Cadence** — post-batch alongside Scholar reconciliation? nightly background? on-demand only when cluster density crosses a threshold?
+- **Minimum cluster size and cohesion threshold** before proposing an abstraction (avoid spurious parents for 2-entry "clusters").
+- **Parent's `encoding_strength` derivation** — `max(children)` (under-specified; over-pins generic parents to outlier child extremity), `weighted average by child reinforcement` (parent strength reflects load-bearing patterns), or `own LLM-judged cohesion score` (parent strength reflects how well its statement captures the cluster). Affects how parents compete with leaves in retrieval.
+- **Folder placement** when children span folders (e.g. python-deps + Go-modules abstracted to "pin dependency versions everywhere") — highest common ancestor, dedicated `abstractions/` subtree, or co-locate with densest child contribution?
+- **Composition with decay** — when child entries get archived by the sweep, what happens to the parent? Options: parent stays as standalone abstraction; parent archives when all children archive; parent absorbs children's reinforcement floor and becomes self-sustaining. The first option is probably right (the abstraction has its own load-bearing value separate from the children that seeded it), but pick deliberately.
+- **Recursive reflection** — should reflections-of-reflections happen? The hippocampal-cortical analog supports multi-level schema (instances → concepts → categories). Could be a desired property (deep hierarchy) or an explicit non-goal (stay shallow, exactly one level above leaves).
+- **`contradicts` voting against synthesised parents** — when new leaves diverge from a parent's claim, how does the Scholar phrase the deprecation? Reuse the existing `deprecate_entry` action with the diverging leaves listed as evidence, or invent a `mutate_parent` / `respecialise` flow that keeps the parent live but narrows its claim?
 
 References:
 
