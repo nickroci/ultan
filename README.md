@@ -10,9 +10,9 @@ A personal memory system for coding agents. Built for Claude Code; lives outside
 
 ## Why this exists
 
-Each agent session resets from zero. The memory features that exist today — `CLAUDE.md`, Cursor rules, ChatGPT memory, the various provider built-ins — are *there* but rarely used, and when they do fire they often feel pointless: shallow grep against a static rules file, no judgment about what's worth remembering vs what isn't, no idea what's stale, no composition with the current turn. I was tired of teaching the same agent the same thing on day 17.
+The memory features that exist today — `CLAUDE.md`, Cursor rules, ChatGPT memory, the various provider built-ins — are *there* but I always felt they did not surface the lessons that had been learned well enough. They seem to be rarely useful, bloat the context, get ignored and when they fire they often feel trivial: shallow grep against a static rules file, no judgment about what's worth remembering vs what isn't, no idea what's stale, no composition with the current turn. I was tired of teaching the same agent the same thing over and over and I did not want to have to manually curate an ever changing set of shared knowledge per project and globally.
 
-So I wondered what could be achieved if you stopped optimising for token cost first. Real memory is salience-gated at write time, decays without reinforcement, mutates on retrieval, resists deletion of high-arousal traces, and uses different mechanisms for different latencies (ambient familiarity, deliberate recall, fast suppression). So we took the neurology seriously and built towards it — a curator pair (Sonnet + Opus) gating writes by surprise magnitude; three retrieval tiers each tuned to a different cognitive analog; surfacing-aware decay with optional arousal pinning; an opt-in mutation/reconsolidation pathway; archive-don't-delete so contradictions can resurrect old traces. Tokens cost something, but less than the friction of repeating yourself.
+So I wondered what could be achieved with a much more advanced system. There are obviously many alternatives but none had all the features that I wanted. Real memory is salience-gated at write time, decays without reinforcement, mutates on retrieval, resists deletion of high-importance traces, and uses different mechanisms for different latencies (ambient familiarity, deliberate recall, fast suppression). So we took the neurology seriously and built towards it — a curator pair (currently Sonnet + Opus) gating writes by surprise magnitude; three retrieval tiers each tuned to a different cognitive analog; surfacing-aware decay with optional arousal pinning; an opt-in mutation/reconsolidation pathway; archive-don't-delete so contradictions can resurrect old traces. Tokens cost something, but less than the friction of repeating yourself.
 
 Ultan watches your conversations as you work, learns your preferences and conventions, and surfaces them when they matter. It's the "remember when you told me to always use uv" that you wish Claude already did natively, except organised, deduplicated, validated, and proactively consulted before the agent interrupts you to ask something you've already answered.
 
@@ -107,7 +107,8 @@ cd ../tools/search && uv sync
 #    machine — it listens on ~/.agent-mem/priming.sock and answers Tier-1
 #    priming requests from every hook on every project.
 cd /path/to/ultan/daemon && uv run agent-mem-daemon -v
-#    (nohup, tmux, or a launchd plist if you want it persistent — Phase 4 work.)
+#    (nohup, tmux, or a launchd plist if you want it persistent — auto-supervision
+#     not yet implemented.)
 
 # 5. Open Claude Code in any project (no per-project setup needed once the
 #    hooks are global) and work normally. Entries land under
@@ -126,6 +127,7 @@ Everything Ultan owns lives under **`~/.agent-mem/`** on your local disk — no 
 | `~/.agent-mem/.bm25.idx`, `.embeddings.idx` | Search indexes over the library. Rebuilt automatically when the library changes. |
 | `~/.agent-mem/sweep-state.json` | Last-decay-sweep timestamp (24h cooldown). |
 | `~/.agent-mem/pending-nudges.md` | Scholar writes nudges here; the hook reads and clears them on the next turn. |
+| `~/.agent-mem/cost.json` | Running tally of LLM spend across Librarian / Scholar / Advisor calls. |
 | `~/.agent-mem/runs/` | Per-call audit log (cost, duration, decisions) + full LLM transcripts (7-day TTL). |
 
 See *Storage on disk* below for the full layout including the folders inside `knowledge/`.
@@ -234,7 +236,7 @@ agent-mem/
   README.md             ← this file
   daemon/               ← the long-lived event-ingest daemon
     agent_mem_daemon/   ← package
-    tests/              ← 177 pytest tests
+    tests/              ← pytest suite (see Status below for current count)
     pyproject.toml      ← uv-managed
   src/                  ← Phase-0 hook layer (forked from claude-memory-compiler)
     hooks/              ← UserPromptSubmit, PostToolUse, Stop, ...
@@ -278,7 +280,7 @@ Storage on disk:
 
 - **Librarian (Sonnet)** runs after each session's quiet period (per-session debounce, default 30s). With moderate activity that's ~10-30 invocations per working day per project. Each is a few thousand input tokens (prompt + library snapshot + buffer) plus a few hundred output tokens.
 - **Scholar (Opus)** runs in batches — every 3 Librarian packets or 60s, whichever first. Each batch is one Opus call: prompt + accumulated proposals, ~30s wall time, ~$0.20-0.50 per batch on pay-as-you-go pricing.
-- **Ambient priming (Tier 1)** is daemon-side BM25 + embeddings, **no LLM cost**, but it injects up to 500 chars into every UserPromptSubmit — call it ~150 tokens of prompt overhead per turn.
+- **Ambient priming (Tier 1)** is daemon-side BM25 + embeddings + cross-encoder rerank, **no LLM cost**, but it injects up to 1500 chars into every UserPromptSubmit — call it ~400 tokens of prompt overhead per turn.
 - **Advisor (`/ultan-advisor`)** is one Sonnet call (Librarian step) + one Opus call (Scholar synthesis) per invocation. ~$0.30-0.50 each.
 - **PreToolUse Tier 3** is pure deterministic regex match, **no LLM cost**, sub-100ms.
 
