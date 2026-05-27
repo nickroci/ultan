@@ -451,3 +451,22 @@ def test_normalise_packet_tolerates_missing_keys():
 def test_normalise_packet_accepts_interrupt_candidates_alias():
     out = lp.normalise_packet({"interrupt_candidates": [{"lesson_id": "x"}]})
     assert out["interrupts"] == [{"lesson_id": "x"}]
+
+
+# ── Secrets-redaction guidance ───────────────────────────────────────
+
+
+def test_assemble_prompt_includes_secrets_redaction_rule():
+    """Ground rule 7 must surface in the assembled prompt — covers the
+    common credential patterns so the Librarian can't claim ignorance."""
+    p = lp.assemble_prompt(
+        project_slug="x",
+        rolling_buffer=[],
+        library_snapshot="(empty)",
+        applies_when_table="(none)",
+    )
+    assert "NEVER quote secrets or credentials" in p
+    # Pin a handful of the named patterns so a future prompt edit
+    # can't silently drop them.
+    for pattern in ("API keys", "ghp_", "AKIA", "sk-", "BEGIN ... PRIVATE KEY"):
+        assert pattern in p, f"secrets rule missing pattern: {pattern!r}"

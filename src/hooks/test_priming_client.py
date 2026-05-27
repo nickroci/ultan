@@ -174,10 +174,12 @@ def test_priming_char_budget_trims_bullets(tmp_path: Path):
             keywords=["python"],
             title=f"A long title for entry number {i:02d} to push the budget",
         )
-    out = _priming_client._local_priming("python", k=10, char_budget=400, knowledge_dir=kdir)
+    out = _priming_client._local_priming("python", k=10, char_budget=600, knowledge_dir=kdir)
     # Output should respect the budget (give or take a couple of bytes
-    # of last-bullet slack).
-    assert len(out) <= 500
+    # of last-bullet slack). The ~140-char "entries are living" footer
+    # addition lifted the floor here — production budget is 1500 so
+    # this only affects the trim-stress tests.
+    assert len(out) <= 700
     assert "## Ultan" in out
 
 
@@ -308,9 +310,17 @@ def test_get_priming_non_string_prompt_returns_empty():
 
 def test_send_request_returns_none_when_socket_missing(tmp_path: Path):
     """``_send_request`` swallows transport errors and returns ``None``."""
+    request: _priming_client.PrimingRequest = {
+        "op": "x",
+        "prompt": "anything",
+        "project_slug": None,
+        "session_id": None,
+        "k": 1,
+        "char_budget": 100,
+    }
     out = _priming_client._send_request(
         tmp_path / "nope.sock",
-        {"op": "x"},
+        request,
         total_budget_ms=50,
     )
     assert out is None

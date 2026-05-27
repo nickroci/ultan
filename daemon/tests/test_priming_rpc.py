@@ -908,3 +908,121 @@ def test_sent_cache_promotes_session_on_access(monkeypatch) -> None:
     priming_rpc._sent_record("s4", ["link"])
     assert priming_rpc._sent_get("s1") == {"link"}
     assert priming_rpc._sent_get("s2") == set()
+
+
+# ── _post_render_bookkeeping (decay-stamp + session-record) ──────────
+
+
+def test_post_render_bookkeeping_stamps_last_surfaced(
+    home_with_isolated_paths, monkeypatch
+) -> None:
+    """Each entry in ``newly_sent`` should get its frontmatter
+    ``last_surfaced`` updated."""
+    home = home_with_isolated_paths
+    k = home / "knowledge"
+    entry = k / "global" / "foo.md"
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    entry.write_text(
+        "---\nid: foo\ntitle: Foo\ncreated: '2026-01-01'\nreinforced: 0\n---\n\n# Foo\n\nbody.\n"
+    )
+    # Skip the sweep — separate concern, separately tested.
+    monkeypatch.setattr(
+        priming_rpc.decay,
+        "maybe_run_sweep",
+        lambda *args, **kwargs: None,
+    )
+    priming_rpc._post_render_bookkeeping(k, "test-session", "rendered body", ["global/foo"])
+    text = entry.read_text(encoding="utf-8")
+    assert "last_surfaced" in text
+
+
+def test_post_render_bookkeeping_records_session_cache(
+    home_with_isolated_paths, monkeypatch
+) -> None:
+    """When body is non-empty and session_id is present, the
+    sent-cache should be updated."""
+    home = home_with_isolated_paths
+    k = home / "knowledge"
+    with priming_rpc._sent_cache_lock:
+        priming_rpc._sent_cache.clear()
+    monkeypatch.setattr(
+        priming_rpc.decay,
+        "maybe_run_sweep",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        priming_rpc.decay,
+        "stamp_last_surfaced",
+        lambda *args, **kwargs: True,
+    )
+    priming_rpc._post_render_bookkeeping(
+        k, "test-session", "rendered body", ["global/foo", "global/bar"]
+    )
+    assert priming_rpc._sent_get("test-session") == {"global/foo", "global/bar"}
+
+
+def test_post_render_bookkeeping_no_session_skips_cache_record(
+    home_with_isolated_paths, monkeypatch
+) -> None:
+    """No session_id -> no cache update (decay stamp still runs)."""
+    home = home_with_isolated_paths
+    k = home / "knowledge"
+    with priming_rpc._sent_cache_lock:
+        priming_rpc._sent_cache.clear()
+    monkeypatch.setattr(
+        priming_rpc.decay,
+        "maybe_run_sweep",
+        lambda *args, **kwargs: None,
+    )
+    stamped: list[str] = []
+    monkeypatch.setattr(
+        priming_rpc.decay,
+        "stamp_last_surfaced",
+        lambda path, **kwargs: stamped.append(str(path)) or True,
+    )
+    priming_rpc._post_render_bookkeeping(k, None, "rendered", ["global/foo"])
+    # Cache untouched (empty).
+    with priming_rpc._sent_cache_lock:
+        assert len(priming_rpc._sent_cache) == 0
+    # But stamp still ran.
+    assert len(stamped) == 1
+
+
+def test_post_render_bookkeeping_swallows_stamp_failure(
+    home_with_isolated_paths, monkeypatch, caplog
+) -> None:
+    """A bad stamp call must not break the response — logged, not raised."""
+    home = home_with_isolated_paths
+    k = home / "knowledge"
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(priming_rpc.decay, "stamp_last_surfaced", _boom)
+    monkeypatch.setattr(priming_rpc.decay, "maybe_run_sweep", lambda *args, **kwargs: None)
+    # Should not raise.
+    priming_rpc._post_render_bookkeeping(k, "s", "body", ["global/foo"])
+
+
+def test_post_render_bookkeeping_swallows_sweep_failure(
+    home_with_isolated_paths, monkeypatch
+) -> None:
+    """A bad sweep call must not break the response."""
+    home = home_with_isolated_paths
+    k = home / "knowledge"
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("filesystem error")
+
+    monkeypatch.setattr(priming_rpc.decay, "maybe_run_sweep", _boom)
+    monkeypatch.setattr(priming_rpc.decay, "stamp_last_surfaced", lambda *args, **kwargs: True)
+    priming_rpc._post_render_bookkeeping(k, "s", "body", ["global/foo"])
+
+
+@pytest.fixture
+def home_with_isolated_paths(tmp_path, monkeypatch):
+    """Per-test AGENT_MEM_HOME so the sent-cache and any stray writes
+    don't leak between tests."""
+    monkeypatch.setenv("AGENT_MEM_HOME", str(tmp_path))
+    (tmp_path / "knowledge").mkdir(parents=True)
+    return tmp_path

@@ -199,7 +199,9 @@ _FOOTER = (
     "*Wikilinks resolve to real entries. Use the `ultan-search` skill to read one "
     "(returns content + sibling entries + subfolders + parent README so you can traverse), "
     "or `/ultan-advisor <question>` to have Sonnet + Opus intelligently synthesise "
-    "across multiple entries.*"
+    "across multiple entries.*\n\n"
+    "*Entries are living — the curator updates them on new info. "
+    "You may cite the current text; no need to maintain them yourself.*"
 )
 
 

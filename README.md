@@ -8,9 +8,21 @@ A personal memory system for coding agents. Built for Claude Code; lives outside
 >
 > — Master Ultan, Gene Wolfe
 
+## Why this exists
+
+Each agent session resets from zero. The memory features that exist today — `CLAUDE.md`, Cursor rules, ChatGPT memory, the various provider built-ins — are *there* but rarely used, and when they do fire they often feel pointless: shallow grep against a static rules file, no judgment about what's worth remembering vs what isn't, no idea what's stale, no composition with the current turn. I was tired of teaching the same agent the same thing on day 17.
+
+So I wondered what could be achieved if you stopped optimising for token cost first. Real memory is salience-gated at write time, decays without reinforcement, mutates on retrieval, resists deletion of high-arousal traces, and uses different mechanisms for different latencies (ambient familiarity, deliberate recall, fast suppression). So we took the neurology seriously and built towards it — a curator pair (Sonnet + Opus) gating writes by surprise magnitude; three retrieval tiers each tuned to a different cognitive analog; surfacing-aware decay with optional arousal pinning; an opt-in mutation/reconsolidation pathway; archive-don't-delete so contradictions can resurrect old traces. Tokens cost something, but less than the friction of repeating yourself.
+
 Ultan watches your conversations as you work, learns your preferences and conventions, and surfaces them when they matter. It's the "remember when you told me to always use uv" that you wish Claude already did natively, except organised, deduplicated, validated, and proactively consulted before the agent interrupts you to ask something you've already answered.
 
 It's your library. On your disk. In plain markdown. You can `ls` it, `cat` it, `git` it.
+
+<p align="center">
+  <a href="docs/librarian-scholar.png">
+    <img src="docs/librarian-scholar.png" width="600" alt="A Benedictine-robed monk (the Librarian) reading at a sci-fi library shelf while a scholar at a candlelit wooden desk transcribes notes; a glowing brain-and-circuit-board hologram floats beside her" />
+  </a>
+</p>
 
 ---
 
@@ -102,6 +114,22 @@ cd /path/to/ultan/daemon && uv run agent-mem-daemon -v
 #    ~/.agent-mem/knowledge/ as the Scholar approves them.
 ```
 
+### Where your memories live
+
+Everything Ultan owns lives under **`~/.agent-mem/`** on your local disk — no cloud sync, no hosted database, no telemetry. Override with `AGENT_MEM_HOME=/some/other/path` if you want a different root.
+
+| Path | What's in it |
+|---|---|
+| **`~/.agent-mem/knowledge/`** | **Your library — plain markdown.** This is the data; everything else in this table is derived or transient. `ls`, `cat`, `git init` it. |
+| `~/.agent-mem/events.jsonl` | Append-only stream of hook events. Hooks write, the daemon tails. Truncates on rotation. |
+| `~/.agent-mem/daemon.log` | Rotated daemon log (~5 MiB cap). |
+| `~/.agent-mem/.bm25.idx`, `.embeddings.idx` | Search indexes over the library. Rebuilt automatically when the library changes. |
+| `~/.agent-mem/sweep-state.json` | Last-decay-sweep timestamp (24h cooldown). |
+| `~/.agent-mem/pending-nudges.md` | Scholar writes nudges here; the hook reads and clears them on the next turn. |
+| `~/.agent-mem/runs/` | Per-call audit log (cost, duration, decisions) + full LLM transcripts (7-day TTL). |
+
+See *Storage on disk* below for the full layout including the folders inside `knowledge/`.
+
 ### First-start expectations (model downloads)
 
 The Tier-1 retrieval pipeline uses two open HuggingFace models, downloaded
@@ -184,6 +212,7 @@ Design discipline that survived live testing:
 - **Auto-reconciled READMEs.** Every folder's README has a `<!-- ULTAN:children (auto) -->` marker block. The LLM writes prose above; the daemon keeps the listing in sync after every batch. No drift.
 - **Streaming-mode SDK calls** so `can_use_tool` works, with a final-`{...}`-block JSON extractor that's robust against tool-call markers preceding the response.
 - **Persistent tailer offset** so daemon restarts resume mid-stream instead of seeking to EOF and losing the events that arrived during downtime.
+- **No literal secrets in the library.** Both curator prompts are explicit: the Librarian must not quote credentials in any field of a proposal (API keys, OAuth secrets, GitHub PATs, AWS keys, `sk-*` keys, private-key blocks, connection strings with passwords, JWTs); the Scholar treats the same as a hard-veto invariant. Memory is plain markdown on disk and often git-tracked — defence in depth at both stages.
 
 ---
 
@@ -259,7 +288,7 @@ If that's too rich for your workflow: turn off the daemon entirely and use just 
 
 ## Roadmap
 
-Two known gaps relative to where the bio framing points.
+Three known gaps relative to where the bio framing points.
 
 ### Tier 1 graph signal
 
@@ -269,9 +298,41 @@ Tier 1 priming uses BM25 + embeddings (nomic-embed-text-v1.5) + RRF + cross-enco
 
 Doesn't require architectural change — it's a small addition in `priming.py` before `_rerank_candidates`. The agent-driven Tier 2 traversal stays as-is; this is purely about giving Tier 1 a structural prior on top of the relevance-only signal the cross-encoder already provides.
 
+### Reflective abstraction (offline integration of leaf episodes)
+
+Ultan curates incoming items well but has no bottom-up pass that synthesises higher-order rules from accumulated leaf entries. The Scholar is *reactive* — it judges incoming proposals — not *reflective*. Decay (PR #7) removes unused noise; reflection would consolidate the *used* patterns that would otherwise stay as N parallel leaves. Without it the library has *flat breadth* — every fact stays a leaf forever; nothing graduates to a higher-order rule. This is one of the largest deltas from a mammalian system: hippocampal–neocortical dialogue during offline periods produces transitive inferences and schema abstractions that no single episode contains (Schlichting & Preston 2015; Eichenbaum 2017; Preston & Eichenbaum 2013). The canonical LLM-side analog is the *reflection* mechanism in Park et al.'s Generative Agents (2023). A-MEM (Xu et al., NeurIPS 2025) — already cited below in the Reconsolidation row — also does hierarchical evolution of entries on use; reflection here would add the *net-new parent abstraction* step that A-MEM doesn't propose.
+
+**The Librarian already does most of this shape — extend its action vocabulary, don't add a separate clustering daemon.** The Librarian routinely reads multiple entries and proposes structural changes to the Scholar — `merge_entries`, `split_folder`, `update_readme`, `add_wikilink` are all multi-entry-reading-with-judgment actions today. Adding "synthesise an abstract parent over related leaves" is *one more verb* in that vocabulary, not a periodic offline cluster-and-summarise job. Cosine clustering would force a topical-summary shape (Park et al. 2023's flavour); the agent-driven path gives us the schema-inference flavour the cited Eichenbaum/Schlichting biology actually describes — *"rule A about python + rule B about Go + rule C about Node → abstract rule 'always pin dependency versions across all language ecosystems'"*, not "5 entries about python deps → 1 themed summary." Same pattern as [[projects/agent-mem/conventions/retrieval/no-regex-seed-extraction-use-parallel-search]]: the Librarian is a tool-using agent making judgments, not an algorithm running offline.
+
+Concretely:
+
+- A new Librarian action, e.g. `abstract_entries` or `propose_parent_entry` — takes a list of child paths, a proposed parent title + body capturing the schema, and the target folder. The Librarian identifies candidates while doing its normal scan (using BM25 + embedding-search tools to find related leaves), not via a periodic clustering pass.
+- The Scholar evaluates the proposal like any other action — approves and writes the parent + the `[[wikilink]]` backlinks, or vetoes if the abstraction is premature, too narrow, too generic, or conflicts with an existing parent.
+- Children stay in place; they remain individually retrievable and subject to normal decay. The parent gains its own `reinforced` lifecycle.
+
+The parent's `encoding_strength` derivation (once that field exists — see *Forgetting* below) and whether the parent earns a `reinforced` bump when any child is used are still open below.
+
+Open questions:
+
+- **Triggering** — under the agent-driven framing, "cadence" mostly evaporates: the Librarian considers abstraction during every normal scan. The real question is what *prompts* the Librarian to look. Options: the existing applies-when match against the rolling buffer (cheap, but biased toward whatever the user just touched); a periodic deep-scan mode that ignores the buffer and just sweeps the library for under-abstracted clusters (more thorough; costs Sonnet tokens); or both (deep-scan as a separate Librarian invocation, e.g. weekly).
+- **Restraint heuristics** for the Librarian — what's the minimum number of related leaves before proposing an abstraction is worth the Scholar's attention? What signals "this cluster is cohesive enough to abstract" vs "this is a coincidental keyword overlap"? Probably needs explicit prompt guidance ("only propose when at least N entries clearly imply the same general rule, and the rule isn't already captured by an existing parent").
+- **Parent's `encoding_strength` derivation** — `max(children)` (under-specified; over-pins generic parents to outlier child extremity), `weighted average by child reinforcement` (parent strength reflects load-bearing patterns), or `own LLM-judged cohesion score` from the Librarian's proposal (parent strength reflects how well its statement captures the cluster). Affects how parents compete with leaves in retrieval.
+- **Reinforcement cascade** — should the parent get a `reinforced` bump when any child is retrieved? Pro: parents that summarise actively-used patterns stay durable. Con: parents will out-accrue children and dominate retrieval, which may or may not be the goal.
+- **Folder placement** when children span folders (e.g. python-deps + Go-modules abstracted to "pin dependency versions everywhere") — highest common ancestor, dedicated `abstractions/` subtree, or co-locate with densest child contribution? The Librarian's proposal would name a target; the Scholar judges whether the target is sensible.
+- **Composition with decay** — when child entries get archived by the sweep, what happens to the parent? Options: parent stays as standalone abstraction; parent archives when all children archive; parent absorbs children's reinforcement floor and becomes self-sustaining. The first option is probably right (the abstraction has its own load-bearing value separate from the children that seeded it), but pick deliberately.
+- **Recursive reflection** — should reflections-of-reflections happen? The hippocampal-cortical analog supports multi-level schema (instances → concepts → categories). Could be a desired property (deep hierarchy) or an explicit non-goal (stay shallow, exactly one level above leaves).
+- **`contradicts` voting against synthesised parents** — when new leaves diverge from a parent's claim, how does the Scholar phrase the deprecation? Reuse the existing `deprecate_entry` action with the diverging leaves listed as evidence, or invent a `mutate_parent` / `respecialise` flow that keeps the parent live but narrows its claim?
+
+References:
+
+- Preston, A.R. & Eichenbaum, H. (2013). *Interplay of hippocampus and prefrontal cortex in memory.* Current Biology, 23(17), R764–R773.
+- Schlichting, M.L. & Preston, A.R. (2015). *Memory integration: neural mechanisms and implications for behavior.* Current Opinion in Behavioral Sciences, 1, 1–8.
+- Eichenbaum, H. (2017). *On the integration of space, time, and memory.* Neuron, 95(5), 1007–1018.
+- Park, J.S., O'Brien, J.C., Cai, C.J., Morris, M.R., Liang, P. & Bernstein, M.S. (2023). *Generative agents: Interactive simulacra of human behavior.* UIST '23.
+
 ### Forgetting (LTD) with surprise-calibrated encoding strength
 
-Ultan models LTP (the `reinforced` counter) but not LTD. Memory without decay accumulates noise, and the bio-faithful retention model has two coupled parts the current architecture is missing:
+Slice 1 of LTD shipped in PR #7: a surfacing-aware decay sweep archives entries whose `max(created, updated, last_reinforced, last_surfaced)` is older than 30 days and whose `reinforced` counter is below 2. The sweep is deterministic, opportunistic (24h cooldown, triggered on Scholar batches and priming RPCs — no dedicated thread), and decayed-not-deleted (entries move to `_archive/` with `status: stale`). Two design refinements remain before the bio-faithful retention loop is complete:
 
 **1. Encoding strength is set at write time by surprise magnitude — not a binary write/skip.** Prediction-error doesn't just *gate* encoding; its magnitude scales how strongly the trace is laid down (Rouhani, Norman & Niv 2018; Greve et al. 2017), and initial encoding strength sets the slope of the forgetting curve (Wixted 2004). Highly surprising contradictions and identity-defining preferences deserve a flatter decay than incremental novelty. McGaugh's amygdala-modulated consolidation (2000) is the same idea via the emotional/arousal channel — high arousal at encoding biases what survives consolidation. The von Restorff effect (1933) is the behavioural signature: distinctive items outlast typical ones in the same set.
 
@@ -289,15 +350,16 @@ We don't need to replicate biology exactly. We need the mechanisms to be *presen
 |---|---|---|
 | Surprise-calibrated encoding strength (Greve et al. 2017; Rouhani, Norman & Niv 2018; Wixted 2004) | `encoding_strength` stamped by Scholar at write time, calibrated from the salience-signal mix; sets the entry's initial decay slope | TODO |
 | LTP — reactivation strengthens the trace (Roediger & Karpicke 2006 testing effect; Bjork & Bjork 1992) | `reinforced` counter bumped on reuse | **Done** |
-| LTD — passive decay of unused weak traces (Ebbinghaus 1885; Wixted 2004; Bear & Malenka 1994) | Half-life on each entry as `f(encoding_strength, reinforced_count)`; only effective for low/moderate strength entries | TODO |
+| LTD — passive decay of unused weak traces (Ebbinghaus 1885; Wixted 2004; Bear & Malenka 1994) | Half-life on each entry as `f(encoding_strength, reinforced_count)`; only effective for low/moderate strength entries | Partial — fixed 30-day surfacing-aware sweep + archive shipped (PR #7); the `f(encoding_strength, …)` half-life formula awaits the `encoding_strength` field |
 | **Prefrontal inhibition of retrieval** (Anderson & Green 2001 Nature, Think/No-Think paradigm) | **Agent seeing a surfaced memory and not acting on it is functionally a no-think signal.** Counts as weak negative evidence — accelerates decay for low/moderate-strength entries; for high-strength entries it triggers a reconsolidation/update review (relevance-drift, not irrelevance). Asymmetric: "agent explicitly cited / `ultan-search`-fetched" is *strong positive* evidence; "surfaced but ignored" is *weak negative* evidence, requiring multiple instances. Mirrors the brain's asymmetric weighting of presence-of-use vs absence-of-use. | TODO |
 | **Reconsolidation** — retrieved memories become labile and are re-stored mutated (Nader et al. 2000; Schiller et al. 2010; Lee et al. 2017; Hupbach et al. 2007) | Librarian gets a `drift` salience signal alongside `contradicts`/`novel`/`reinforces`: *"high-strength entry [[X]] keeps surfacing in contexts that don't quite match its current text — propose an `update`."* Scholar evaluates as a partial mutation, not full replacement. Closest published OSS analog: A-MEM's Zettelkasten evolution (Xu et al., NeurIPS 2025). | Partial — `update` action exists; drift-driven proposal pathway does not |
 | Sleep-based selective consolidation (Diekelmann & Born 2010; Stickgold 2005; Wilhelm et al. 2011) | The Scholar's batch reconciliation phase plays this role architecturally — periodic, deliberate, prioritises high-salience entries; no behavioural analog of replay yet | Partial |
+| **Reflective abstraction — offline integration of leaf episodes into higher-order rules** (Preston & Eichenbaum 2013; Schlichting & Preston 2015; Eichenbaum 2017; LLM analog: Park et al. 2023 Generative Agents reflection) | New Librarian action (e.g. `abstract_entries`) that proposes a parent abstraction over related leaves during its normal scan — agent judgment, not cosine clustering. Scholar approves or vetoes; on approve, writes the parent with `[[wikilink]]` backlinks to children. See *Reflective abstraction* above. | TODO |
 | Rational analysis of memory — retention tracks environmental utility (Anderson & Schooler 1991) | The whole loop is enacting this if encoding-strength + decay + use-tracking work together. The Anderson & Schooler framing is the cleanest theoretical anchor for the system as a whole. | Emergent if the rest lands |
 | Arousal modulation of consolidation (McGaugh 2000) | Folded into `encoding_strength` rather than a separate field — keep schema lean | TODO |
 | Active accuracy override (truth beats salience) | `contradicts` from a new entry sharply discounts the target's effective strength regardless of accumulated reinforcement; flashbulb-memory guard | TODO |
 | Distinctiveness effect — isolated/unusual items outlast typical ones (von Restorff 1933) | Subsumed by surprise-calibrated `encoding_strength` | TODO |
-| Decayed-not-deleted (audit trail; resurrectable on later contradiction) | Decayed entries archive to `_archive/` rather than delete | Partial — `_archive/` exists |
+| Decayed-not-deleted (audit trail; resurrectable on later contradiction) | Decayed entries archive to `_archive/` rather than delete | **Done** — sweep (PR #7) actively moves stale entries to `_archive/<orig-path>` with `status: stale` + `archived: <today>` stamped; resurrection-on-contradiction pathway is still a separate TODO |
 
 **Open implementation questions:**
 
@@ -335,7 +397,7 @@ Prior art worth borrowing from: **MemoryBank** (Zhong et al., 2024) applies the 
 
 ## Status
 
-225 tests passing across daemon, hooks, and search. Live-tested end-to-end against real Sonnet + Opus calls including the three retrieval tiers, the curator's salience-signal classification, README reconciler, wikilink validator, and the PreToolUse advisory/block hook. Currently a personal dogfood project — not packaged for `pip install`. Expect to clone, `uv sync`, and tune the prompts to your own preferences.
+516 daemon + 174 search + 68 hooks tests passing (758 total). Live-tested end-to-end against real Sonnet + Opus calls including the three retrieval tiers, the curator's salience-signal classification, README reconciler, wikilink validator, and the PreToolUse advisory/block hook. Currently a personal dogfood project — not packaged for `pip install`. Expect to clone, `uv sync`, and tune the prompts to your own preferences.
 
 ## License
 

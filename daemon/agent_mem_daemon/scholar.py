@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from . import priming, runs, scholar_prompt
+from . import decay, priming, runs, scholar_prompt
 from .llm import SCHOLAR_TIMEOUT_S, LLMTimeout, run_scholar_call
 from .paths import ensure_home, hot_context_path, knowledge_dir
 
@@ -71,6 +71,29 @@ def _refresh_priming_safe(packets: Sequence[Mapping[str, Any]], log_label: str) 
         )
     except Exception:
         log.exception("scholar.review: priming refresh raised (%s)", log_label)
+
+
+def _maybe_run_decay_sweep_safe(log_label: str) -> None:
+    """Opportunistic decay sweep — runs at most once per 24h.
+
+    Calling this on every Scholar batch is fine; ``decay.maybe_run_sweep``
+    self-skips unless the cooldown has elapsed and no other sweep is in
+    flight. Swallows + logs any error: the sweep is a bookkeeping
+    side-effect, not part of the curation contract, so failures must
+    never break the review pipeline.
+    """
+    try:
+        result = decay.maybe_run_sweep(knowledge_dir())
+    except Exception:
+        log.exception("scholar.review: decay sweep raised (%s)", log_label)
+        return
+    if result is not None and (result.archived or result.errored):
+        log.info(
+            "scholar.review: decay sweep done (archived=%d kept=%d errored=%d)",
+            result.archived,
+            result.kept,
+            result.errored,
+        )
 
 
 def _bump_reinforcement_counters(
@@ -200,6 +223,7 @@ def review(packets: Sequence[Mapping[str, Any]]) -> None:
         # when the Librarian had nothing to propose. The agent's session
         # content is signal we want to prime against regardless.
         _refresh_priming_safe(packets, "empty-packet path")
+        _maybe_run_decay_sweep_safe("empty-packet path")
         return
 
     session_id = _batch_session_id(packets)
@@ -253,6 +277,7 @@ def review(packets: Sequence[Mapping[str, Any]]) -> None:
         _reconcile_readmes_safe(record)
         _refresh_priming_safe(packets, "main path")
         _check_invariants_safe(record)
+        _maybe_run_decay_sweep_safe("main path")
 
         duration_ms = int((time.time() - started) * 1000)
         log.info(

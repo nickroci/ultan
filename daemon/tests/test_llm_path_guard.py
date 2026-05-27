@@ -41,7 +41,7 @@ def test_guard_denies_absolute_home_path_when_boundary_is_test_dir(tmp_path: Pat
     # The exact scenario that bit us: cwd=/tmp/ulttest but LLM emits
     # /Users/.../.agent-mem/... — must be denied.
     guard = _make_path_guard(tmp_path, allow_writes=True)
-    fake_real = Path("/Users/nicholasholden/.agent-mem/knowledge/index.md")
+    fake_real = Path("/Users/example/.agent-mem/knowledge/index.md")
     behavior, message = _call(guard, "Read", {"file_path": str(fake_real)})
     assert behavior == "deny"
     assert str(tmp_path) in message

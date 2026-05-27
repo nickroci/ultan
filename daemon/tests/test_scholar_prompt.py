@@ -752,3 +752,16 @@ def test_apply_reinforcement_skips_non_reinforces_signals(tmp_path: Path):
     changes = scholar_prompt.apply_reinforcement_counters(packets, k)
     assert changes == []
     assert "reinforced" not in entry.read_text(encoding="utf-8")
+
+
+# ── Secrets-redaction invariant ──────────────────────────────────────
+
+
+def test_build_prompt_includes_no_literal_secrets_invariant():
+    """Hierarchy invariant #6 must surface in the assembled prompt
+    so the Scholar has explicit veto criteria for credential leaks."""
+    prompt = scholar_prompt.build_prompt([], library_snapshot="(empty)")
+    assert "NO LITERAL SECRETS" in prompt
+    assert "contains-secret" in prompt
+    for pattern in ("API key", "ghp_", "AKIA", "sk-", "BEGIN ... PRIVATE KEY"):
+        assert pattern in prompt, f"secrets invariant missing pattern: {pattern!r}"
