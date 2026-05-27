@@ -8,6 +8,12 @@ A personal memory system for coding agents. Built for Claude Code; lives outside
 >
 > — Master Ultan, Gene Wolfe
 
+## Why this exists
+
+Each agent session resets from zero. The memory features that exist today — `CLAUDE.md`, Cursor rules, ChatGPT memory, the various provider built-ins — are *there* but rarely used, and when they do fire they often feel pointless: shallow grep against a static rules file, no judgment about what's worth remembering vs what isn't, no idea what's stale, no composition with the current turn. I was tired of teaching the same agent the same thing on day 17.
+
+So I wondered what could be achieved if you stopped optimising for token cost first. Real memory is salience-gated at write time, decays without reinforcement, mutates on retrieval, resists deletion of high-arousal traces, and uses different mechanisms for different latencies (ambient familiarity, deliberate recall, fast suppression). So we took the neurology seriously and built towards it — a curator pair (Sonnet + Opus) gating writes by surprise magnitude; three retrieval tiers each tuned to a different cognitive analog; surfacing-aware decay with optional arousal pinning; an opt-in mutation/reconsolidation pathway; archive-don't-delete so contradictions can resurrect old traces. Tokens cost something, but less than the friction of repeating yourself.
+
 Ultan watches your conversations as you work, learns your preferences and conventions, and surfaces them when they matter. It's the "remember when you told me to always use uv" that you wish Claude already did natively, except organised, deduplicated, validated, and proactively consulted before the agent interrupts you to ask something you've already answered.
 
 It's your library. On your disk. In plain markdown. You can `ls` it, `cat` it, `git` it.
@@ -19,12 +25,6 @@ It's your library. On your disk. In plain markdown. You can `ls` it, `cat` it, `
 </p>
 
 ---
-
-## Why this exists
-
-Each agent session resets from zero. The memory features that exist today — `CLAUDE.md`, Cursor rules, ChatGPT memory, the various provider built-ins — are *there* but rarely used, and when they do fire they often feel pointless: shallow grep against a static rules file, no judgment about what's worth remembering vs what isn't, no idea what's stale, no composition with the current turn. I was tired of teaching the same agent the same thing on day 17.
-
-So I wondered what could be achieved if you stopped optimising for token cost first. Most current memory systems are shallow because they're cheap — last-N turns, keyword match, a fixed prompt suffix. None of them looks much like how memory *actually* works. Real memory is salience-gated at write time, decays without reinforcement, mutates on retrieval, resists deletion of high-arousal traces, and uses different mechanisms for different latencies (ambient familiarity, deliberate recall, fast suppression). So we took the neurology seriously and built towards it — a curator pair (Sonnet + Opus) gating writes by surprise magnitude; three retrieval tiers each tuned to a different cognitive analog; surfacing-aware decay with optional arousal pinning; an opt-in mutation/reconsolidation pathway; archive-don't-delete so contradictions can resurrect old traces. Tokens cost something, but less than the friction of repeating yourself.
 
 ## Design, in one paragraph
 
