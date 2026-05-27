@@ -259,7 +259,7 @@ If that's too rich for your workflow: turn off the daemon entirely and use just 
 
 ## Roadmap
 
-Two known gaps relative to where the bio framing points.
+Three known gaps relative to where the bio framing points.
 
 ### Tier 1 graph signal
 
@@ -269,9 +269,28 @@ Tier 1 priming uses BM25 + embeddings (nomic-embed-text-v1.5) + RRF + cross-enco
 
 Doesn't require architectural change — it's a small addition in `priming.py` before `_rerank_candidates`. The agent-driven Tier 2 traversal stays as-is; this is purely about giving Tier 1 a structural prior on top of the relevance-only signal the cross-encoder already provides.
 
+### Reflective abstraction (offline integration of leaf episodes)
+
+Ultan curates incoming items well but has no bottom-up pass that synthesises higher-order rules from clusters of leaf entries. The Scholar is *reactive* — it judges incoming proposals — not *reflective*. Without an integration mechanism the library accumulates indefinitely; it doesn't *learn rules* from what it stores. This is arguably the single biggest delta from a mammalian system: hippocampal–neocortical dialogue during offline periods produces transitive inferences and schema abstractions that no single episode contains (Schlichting & Preston 2015; Eichenbaum 2017; Preston & Eichenbaum 2013). The canonical LLM-side analog is the *reflection* mechanism in Park et al.'s Generative Agents (2023) — a periodic synthesis pass that distills clusters of leaf observations into higher-order memories.
+
+Concretely: a periodic Scholar job that
+
+- clusters semantically-near entries (existing embedding index + agglomerative or HDBSCAN on cosine distance),
+- proposes a parent abstraction with `[[wikilink]]` backlinks to its children, and
+- writes the parent into the relevant folder while leaving children in place (decayed-not-deleted still applies downstream).
+
+The parent inherits the highest `encoding_strength` of its children (once that field exists — see *Forgetting* below) and earns a `reinforced` bump whenever any child is used. The result is a self-organising hierarchy where rules emerge from instances, instead of every fact living forever at the leaves. Open questions: cadence (post-batch alongside reconciliation? nightly?), minimum cluster size and cohesion threshold before proposing an abstraction, and how the Scholar should phrase a `contradicts` vote against a previously-synthesised parent when new leaves diverge from its claim.
+
+References:
+
+- Preston, A.R. & Eichenbaum, H. (2013). *Interplay of hippocampus and prefrontal cortex in memory.* Current Biology, 23(17), R764–R773.
+- Schlichting, M.L. & Preston, A.R. (2015). *Memory integration: neural mechanisms and implications for behavior.* Current Opinion in Behavioral Sciences, 1, 1–8.
+- Eichenbaum, H. (2017). *On the integration of space, time, and memory.* Neuron, 95(5), 1007–1018.
+- Park, J.S., O'Brien, J.C., Cai, C.J., Morris, M.R., Liang, P. & Bernstein, M.S. (2023). *Generative agents: Interactive simulacra of human behavior.* UIST '23.
+
 ### Forgetting (LTD) with surprise-calibrated encoding strength
 
-Ultan models LTP (the `reinforced` counter) but not LTD. Memory without decay accumulates noise, and the bio-faithful retention model has two coupled parts the current architecture is missing:
+Slice 1 of LTD shipped in PR #7: a surfacing-aware decay sweep archives entries whose `max(created, updated, last_reinforced, last_surfaced)` is older than 30 days and whose `reinforced` counter is below 2. The sweep is deterministic, opportunistic (24h cooldown, triggered on Scholar batches and priming RPCs — no dedicated thread), and decayed-not-deleted (entries move to `_archive/` with `status: stale`). Two design refinements remain before the bio-faithful retention loop is complete:
 
 **1. Encoding strength is set at write time by surprise magnitude — not a binary write/skip.** Prediction-error doesn't just *gate* encoding; its magnitude scales how strongly the trace is laid down (Rouhani, Norman & Niv 2018; Greve et al. 2017), and initial encoding strength sets the slope of the forgetting curve (Wixted 2004). Highly surprising contradictions and identity-defining preferences deserve a flatter decay than incremental novelty. McGaugh's amygdala-modulated consolidation (2000) is the same idea via the emotional/arousal channel — high arousal at encoding biases what survives consolidation. The von Restorff effect (1933) is the behavioural signature: distinctive items outlast typical ones in the same set.
 
@@ -289,15 +308,16 @@ We don't need to replicate biology exactly. We need the mechanisms to be *presen
 |---|---|---|
 | Surprise-calibrated encoding strength (Greve et al. 2017; Rouhani, Norman & Niv 2018; Wixted 2004) | `encoding_strength` stamped by Scholar at write time, calibrated from the salience-signal mix; sets the entry's initial decay slope | TODO |
 | LTP — reactivation strengthens the trace (Roediger & Karpicke 2006 testing effect; Bjork & Bjork 1992) | `reinforced` counter bumped on reuse | **Done** |
-| LTD — passive decay of unused weak traces (Ebbinghaus 1885; Wixted 2004; Bear & Malenka 1994) | Half-life on each entry as `f(encoding_strength, reinforced_count)`; only effective for low/moderate strength entries | TODO |
+| LTD — passive decay of unused weak traces (Ebbinghaus 1885; Wixted 2004; Bear & Malenka 1994) | Half-life on each entry as `f(encoding_strength, reinforced_count)`; only effective for low/moderate strength entries | Partial — fixed 30-day surfacing-aware sweep + archive shipped (PR #7); the `f(encoding_strength, …)` half-life formula awaits the `encoding_strength` field |
 | **Prefrontal inhibition of retrieval** (Anderson & Green 2001 Nature, Think/No-Think paradigm) | **Agent seeing a surfaced memory and not acting on it is functionally a no-think signal.** Counts as weak negative evidence — accelerates decay for low/moderate-strength entries; for high-strength entries it triggers a reconsolidation/update review (relevance-drift, not irrelevance). Asymmetric: "agent explicitly cited / `ultan-search`-fetched" is *strong positive* evidence; "surfaced but ignored" is *weak negative* evidence, requiring multiple instances. Mirrors the brain's asymmetric weighting of presence-of-use vs absence-of-use. | TODO |
 | **Reconsolidation** — retrieved memories become labile and are re-stored mutated (Nader et al. 2000; Schiller et al. 2010; Lee et al. 2017; Hupbach et al. 2007) | Librarian gets a `drift` salience signal alongside `contradicts`/`novel`/`reinforces`: *"high-strength entry [[X]] keeps surfacing in contexts that don't quite match its current text — propose an `update`."* Scholar evaluates as a partial mutation, not full replacement. Closest published OSS analog: A-MEM's Zettelkasten evolution (Xu et al., NeurIPS 2025). | Partial — `update` action exists; drift-driven proposal pathway does not |
 | Sleep-based selective consolidation (Diekelmann & Born 2010; Stickgold 2005; Wilhelm et al. 2011) | The Scholar's batch reconciliation phase plays this role architecturally — periodic, deliberate, prioritises high-salience entries; no behavioural analog of replay yet | Partial |
+| **Reflective abstraction — offline integration of leaf episodes into higher-order rules** (Preston & Eichenbaum 2013; Schlichting & Preston 2015; Eichenbaum 2017; LLM analog: Park et al. 2023 Generative Agents reflection) | Periodic Scholar pass clusters semantically-near entries and proposes a parent abstraction with `[[wikilink]]` backlinks to its children; parent inherits max child `encoding_strength`, bumps `reinforced` when any child is used. See *Reflective abstraction* above. | TODO |
 | Rational analysis of memory — retention tracks environmental utility (Anderson & Schooler 1991) | The whole loop is enacting this if encoding-strength + decay + use-tracking work together. The Anderson & Schooler framing is the cleanest theoretical anchor for the system as a whole. | Emergent if the rest lands |
 | Arousal modulation of consolidation (McGaugh 2000) | Folded into `encoding_strength` rather than a separate field — keep schema lean | TODO |
 | Active accuracy override (truth beats salience) | `contradicts` from a new entry sharply discounts the target's effective strength regardless of accumulated reinforcement; flashbulb-memory guard | TODO |
 | Distinctiveness effect — isolated/unusual items outlast typical ones (von Restorff 1933) | Subsumed by surprise-calibrated `encoding_strength` | TODO |
-| Decayed-not-deleted (audit trail; resurrectable on later contradiction) | Decayed entries archive to `_archive/` rather than delete | Partial — `_archive/` exists |
+| Decayed-not-deleted (audit trail; resurrectable on later contradiction) | Decayed entries archive to `_archive/` rather than delete | **Done** — sweep (PR #7) actively moves stale entries to `_archive/<orig-path>` with `status: stale` + `archived: <today>` stamped; resurrection-on-contradiction pathway is still a separate TODO |
 
 **Open implementation questions:**
 
@@ -335,7 +355,7 @@ Prior art worth borrowing from: **MemoryBank** (Zhong et al., 2024) applies the 
 
 ## Status
 
-225 tests passing across daemon, hooks, and search. Live-tested end-to-end against real Sonnet + Opus calls including the three retrieval tiers, the curator's salience-signal classification, README reconciler, wikilink validator, and the PreToolUse advisory/block hook. Currently a personal dogfood project — not packaged for `pip install`. Expect to clone, `uv sync`, and tune the prompts to your own preferences.
+514 daemon + 174 search + 68 hooks tests passing (756 total). Live-tested end-to-end against real Sonnet + Opus calls including the three retrieval tiers, the curator's salience-signal classification, README reconciler, wikilink validator, and the PreToolUse advisory/block hook. Currently a personal dogfood project — not packaged for `pip install`. Expect to clone, `uv sync`, and tune the prompts to your own preferences.
 
 ## License
 
