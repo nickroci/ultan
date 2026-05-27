@@ -66,7 +66,7 @@ from typing import Callable, Mapping, Optional, cast
 
 from bm25 import load_or_build as bm25_load_or_build
 
-from . import priming
+from . import decay, priming
 from .paths import knowledge_dir, priming_socket_path
 
 # Wire-level type aliases. JSON parses into arbitrary nested values, so
@@ -278,14 +278,45 @@ def _handle_priming(req: RpcRequest) -> RpcResponse:
         char_budget=char_budget,
         already_sent=already_sent,
     )
-    # Only record session state when we actually rendered new content
-    # (body non-empty) AND we have a session_id. Empty body == every
-    # candidate was a repeat; no new state to track.
-    if session_id and body and newly_sent:
-        _sent_record(session_id, newly_sent)
+    _post_render_bookkeeping(kdir, session_id, body, newly_sent)
 
     took_ms = int((time.monotonic() - t0) * 1000)
     return {"ok": True, "priming_md": body or "", "took_ms": took_ms, "lane": lane}
+
+
+def _post_render_bookkeeping(
+    kdir: Path,
+    session_id: Optional[str],
+    body: str,
+    newly_sent: list[str],
+) -> None:
+    """Three side-effects after a successful priming render:
+
+    1. Per-session sent-cache update (only when body non-empty and
+       session_id present — otherwise there's no state to track).
+    2. ``last_surfaced`` frontmatter stamp on each newly-shown entry,
+       so the decay sweep treats surfacing as activity. Runs even
+       without ``session_id`` because the agent saw the entries
+       regardless of how the daemon tracks sessions.
+    3. Opportunistic ``maybe_run_sweep`` — self-skips unless the 24h
+       cooldown has elapsed. One ``stat()`` on the sweep-state file
+       on the common path.
+
+    All three are best-effort: failures are logged and swallowed so
+    bookkeeping can never break the priming response.
+    """
+    if session_id and body and newly_sent:
+        _sent_record(session_id, newly_sent)
+    for link in newly_sent or ():
+        entry_path = (kdir / f"{link}.md").resolve()
+        try:
+            decay.stamp_last_surfaced(entry_path)
+        except Exception:
+            log.exception("priming_rpc: last_surfaced stamp raised for %s", link)
+    try:
+        decay.maybe_run_sweep(kdir)
+    except Exception:
+        log.exception("priming_rpc: maybe_run_sweep raised")
 
 
 def _handle_bm25_search(req: RpcRequest) -> RpcResponse:
