@@ -264,11 +264,11 @@ def test_refresh_respects_char_budget(tmp_path):
         ),
         out_path=out,
         top_k=20,  # ask for far more than fits
-        char_budget=500,
+        char_budget=700,
     )
 
     body = out.read_text(encoding="utf-8")
-    assert len(body) <= 500, f"output {len(body)} chars exceeds budget"
+    assert len(body) <= 700, f"output {len(body)} chars exceeds budget"
     # The header MUST still appear — trimming should drop bullets, not
     # the framing.
     assert body.startswith("## Ultan — your library says")
