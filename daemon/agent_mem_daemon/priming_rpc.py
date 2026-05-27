@@ -58,6 +58,7 @@ import socket
 import struct
 import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from enum import StrEnum
 from pathlib import Path
@@ -98,6 +99,58 @@ _MAX_BODY_BYTES = 1 << 20  # 1 MiB; priming markdown is ~500 chars
 # Concurrent in-flight requests. Each handler is short-lived (≤1s by
 # cap) and mostly I/O-bound, so a small pool is plenty.
 _HANDLER_POOL_SIZE = 4
+
+# Per-session sent-wikilink cache so the agent doesn't see the same
+# priming bullets surfaced over and over within one session. Bounded
+# LRU on the (session_id) key; each value is a bounded set of wikilinks
+# already shown. Numbers chosen to be tiny — even at the cap, total
+# memory is well under 1 MB and well within hook-budget lookup cost.
+_SENT_CACHE_MAX_SESSIONS = 64
+_SENT_CACHE_MAX_LINKS_PER_SESSION = 200
+
+_sent_cache_lock = threading.Lock()
+# OrderedDict[session_id, OrderedDict[wikilink, None]]. Inner dict uses
+# OrderedDict-as-ordered-set so we can LRU-evict the oldest links per
+# session without pulling in a separate set + deque. Both layers need
+# explicit type parameters so pyright doesn't widen them to Unknown.
+_sent_cache: "OrderedDict[str, OrderedDict[str, None]]" = OrderedDict()
+
+
+def _sent_get(session_id: str) -> set[str]:
+    """Return the set of wikilinks already shown to ``session_id``.
+
+    Promotes ``session_id`` to MRU position on access. Returns a copy
+    so callers can iterate / pass to ``_assemble_output`` without
+    holding the lock.
+    """
+    with _sent_cache_lock:
+        links: Optional[OrderedDict[str, None]] = _sent_cache.get(session_id)
+        if links is None:
+            return set()
+        _sent_cache.move_to_end(session_id)
+        return set(links.keys())
+
+
+def _sent_record(session_id: str, new_links: list[str]) -> None:
+    """Mark ``new_links`` as sent to ``session_id``; evict old entries
+    when over either cap. Idempotent on repeated links."""
+    if not new_links:
+        return
+    with _sent_cache_lock:
+        bucket: Optional[OrderedDict[str, None]] = _sent_cache.get(session_id)
+        if bucket is None:
+            bucket = OrderedDict()
+            _sent_cache[session_id] = bucket
+        for link in new_links:
+            if link in bucket:
+                bucket.move_to_end(link)
+            else:
+                bucket[link] = None
+                while len(bucket) > _SENT_CACHE_MAX_LINKS_PER_SESSION:
+                    bucket.popitem(last=False)
+        _sent_cache.move_to_end(session_id)
+        while len(_sent_cache) > _SENT_CACHE_MAX_SESSIONS:
+            _sent_cache.popitem(last=False)
 
 
 # ── Wire helpers ─────────────────────────────────────────────────────
@@ -161,7 +214,7 @@ def _handle_priming(req: RpcRequest) -> RpcResponse:
         # treats empty markdown as "nothing to inject" and moves on.
         return {"ok": True, "priming_md": "", "took_ms": 0, "lane": "bm25"}
 
-    raw_k: object = req.get("k", 5)
+    raw_k: object = req.get("k", 3)
     raw_budget: object = req.get("char_budget", 1500)
     if not isinstance(raw_k, (int, float, str)) or not isinstance(raw_budget, (int, float, str)):
         return {"ok": False, "error": "k and char_budget must be ints"}
@@ -177,6 +230,15 @@ def _handle_priming(req: RpcRequest) -> RpcResponse:
     current_project_slug: Optional[str] = (
         raw_slug.strip() if isinstance(raw_slug, str) and raw_slug.strip() else None
     )
+
+    raw_session: object = req.get("session_id")
+    session_id: Optional[str] = (
+        raw_session.strip() if isinstance(raw_session, str) and raw_session.strip() else None
+    )
+    # Dedup is per-session. Without a session_id we can't track state,
+    # so the rendering path runs with an empty already_sent set — the
+    # agent gets full priming as if it were a fresh session.
+    already_sent: set[str] = _sent_get(session_id) if session_id else set()
 
     kdir = knowledge_dir()
     if not kdir.exists():
@@ -209,12 +271,19 @@ def _handle_priming(req: RpcRequest) -> RpcResponse:
         knowledge_dir=kdir,
         current_project_slug=current_project_slug,
     )
-    body = priming._assemble_output(  # pyright: ignore[reportPrivateUsage]
+    body, newly_sent = priming._assemble_output(  # pyright: ignore[reportPrivateUsage]
         ranked,
         kdir,
         top_k=k,
         char_budget=char_budget,
+        already_sent=already_sent,
     )
+    # Only record session state when we actually rendered new content
+    # (body non-empty) AND we have a session_id. Empty body == every
+    # candidate was a repeat; no new state to track.
+    if session_id and body and newly_sent:
+        _sent_record(session_id, newly_sent)
+
     took_ms = int((time.monotonic() - t0) * 1000)
     return {"ok": True, "priming_md": body or "", "took_ms": took_ms, "lane": lane}
 

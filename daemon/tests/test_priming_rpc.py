@@ -788,3 +788,123 @@ def test_socket_path_property_exposed(tmp_path):
     assert thread.socket_path == socket_path
     # No need to start — test just pins the property contract.
     shutil.rmtree(sock_dir, ignore_errors=True)
+
+
+# ── Per-session dedup ────────────────────────────────────────────────
+
+
+def test_dedup_second_call_same_session_returns_empty(tmp_path, rpc_server):
+    """Hitting the same session_id with the same prompt twice should
+    return real bullets the first time and empty markdown the second
+    time — the per-session sent cache filters anything already shown."""
+    _seed_library(tmp_path)
+    _thread, socket_path = rpc_server
+    with priming_rpc._sent_cache_lock:
+        priming_rpc._sent_cache.clear()
+
+    payload = {
+        "op": "priming",
+        "prompt": "python uv package manager dependency install",
+        "session_id": "session-A",
+        "k": 3,
+        "char_budget": 1500,
+    }
+
+    first = _send_request(socket_path, payload, io_timeout=30.0)
+    assert first["ok"] is True
+    assert first["priming_md"], "first call should render priming"
+
+    second = _send_request(socket_path, payload, io_timeout=30.0)
+    assert second["ok"] is True
+    assert second["priming_md"] == "", "second call should dedup to empty"
+
+
+def test_dedup_is_per_session(tmp_path, rpc_server):
+    """A different session_id with the same prompt must get fresh
+    priming — the sent cache is keyed by session, not by prompt."""
+    _seed_library(tmp_path)
+    _thread, socket_path = rpc_server
+    with priming_rpc._sent_cache_lock:
+        priming_rpc._sent_cache.clear()
+
+    payload_a = {
+        "op": "priming",
+        "prompt": "python uv package manager dependency install",
+        "session_id": "session-A",
+        "k": 3,
+        "char_budget": 1500,
+    }
+    first_a = _send_request(socket_path, payload_a, io_timeout=30.0)
+    assert first_a["priming_md"]
+
+    payload_b = dict(payload_a, session_id="session-B")
+    first_b = _send_request(socket_path, payload_b, io_timeout=30.0)
+    assert first_b["priming_md"], "different session should render fresh"
+
+
+def test_dedup_no_session_id_disables_filter(tmp_path, rpc_server):
+    """Without a session_id, the daemon can't track state, so every
+    call renders as if it were the first one for that session."""
+    _seed_library(tmp_path)
+    _thread, socket_path = rpc_server
+    with priming_rpc._sent_cache_lock:
+        priming_rpc._sent_cache.clear()
+
+    payload = {
+        "op": "priming",
+        "prompt": "python uv package manager dependency install",
+        # No session_id field.
+        "k": 3,
+        "char_budget": 1500,
+    }
+    first = _send_request(socket_path, payload, io_timeout=30.0)
+    second = _send_request(socket_path, payload, io_timeout=30.0)
+    assert first["priming_md"]
+    # Both renders are non-empty — dedup disabled without a session id.
+    assert second["priming_md"]
+
+
+# ── Sent-cache LRU mechanics (in-process; no socket I/O) ─────────────
+
+
+def test_sent_cache_records_and_returns_links() -> None:
+    with priming_rpc._sent_cache_lock:
+        priming_rpc._sent_cache.clear()
+    priming_rpc._sent_record("s1", ["global/a", "global/b"])
+    assert priming_rpc._sent_get("s1") == {"global/a", "global/b"}
+
+
+def test_sent_cache_evicts_oldest_session_at_cap(monkeypatch) -> None:
+    with priming_rpc._sent_cache_lock:
+        priming_rpc._sent_cache.clear()
+    monkeypatch.setattr(priming_rpc, "_SENT_CACHE_MAX_SESSIONS", 3)
+    for sid in ("s1", "s2", "s3", "s4"):
+        priming_rpc._sent_record(sid, ["link"])
+    # s1 should have been evicted (oldest); s2-s4 retained.
+    assert priming_rpc._sent_get("s1") == set()
+    assert priming_rpc._sent_get("s4") == {"link"}
+
+
+def test_sent_cache_caps_links_per_session(monkeypatch) -> None:
+    with priming_rpc._sent_cache_lock:
+        priming_rpc._sent_cache.clear()
+    monkeypatch.setattr(priming_rpc, "_SENT_CACHE_MAX_LINKS_PER_SESSION", 2)
+    priming_rpc._sent_record("s1", ["a", "b", "c"])
+    out = priming_rpc._sent_get("s1")
+    # First insertion order: a→b→c, cap=2 → drop a, keep b+c.
+    assert out == {"b", "c"}
+
+
+def test_sent_cache_promotes_session_on_access(monkeypatch) -> None:
+    """Recently-touched sessions should survive eviction longer."""
+    with priming_rpc._sent_cache_lock:
+        priming_rpc._sent_cache.clear()
+    monkeypatch.setattr(priming_rpc, "_SENT_CACHE_MAX_SESSIONS", 3)
+    for sid in ("s1", "s2", "s3"):
+        priming_rpc._sent_record(sid, ["link"])
+    # Touch s1 — should promote to MRU.
+    _ = priming_rpc._sent_get("s1")
+    # New session triggers eviction of LRU; s2 should go, not s1.
+    priming_rpc._sent_record("s4", ["link"])
+    assert priming_rpc._sent_get("s1") == {"link"}
+    assert priming_rpc._sent_get("s2") == set()

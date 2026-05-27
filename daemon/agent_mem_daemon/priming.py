@@ -46,8 +46,9 @@ import logging
 import os
 import re
 import tempfile
+from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, cast
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple, cast
 
 import yaml
 from bm25 import load_or_build as bm25_load_or_build
@@ -455,13 +456,18 @@ def _hybrid_search(
     return _rerank_candidates(query, fused, k=k)
 
 
-# Scope bonuses are calibrated against the RRF top-rank score (~0.016 for
-# rank 1, ~0.033 with both lanes hitting the top). Current-project +0.020
-# is roughly a 4-rank bump; global +0.005 is roughly a 1-rank bump; cross-
-# project entries get no bonus. Designed to break near-ties and gently
-# reorder, not to override a strong topical match. Tune here if needed.
+# Scope bonuses (and one penalty) are calibrated against the RRF top-rank
+# score (~0.016 for rank 1, ~0.033 with both lanes hitting the top).
+# Current-project +0.020 is roughly a 4-rank bump; global +0.005 is roughly
+# a 1-rank bump; cross-project entries get a small negative penalty so
+# they only surface when nothing scoped beats them (the agent's complaint:
+# vol-predictor entries surfacing during agent-mem work is noise). The
+# penalty is gentle — a strong topical match from another project can
+# still overcome it — but it kills the steady drizzle of cross-context
+# bullets that dominated turns.
 _SCOPE_BONUS_CURRENT = 0.020
 _SCOPE_BONUS_GLOBAL = 0.005
+_SCOPE_PENALTY_CROSS_PROJECT = -0.010
 
 
 # Project-scope alias resolution lives in ``tools/search/aliases.py``
@@ -496,20 +502,26 @@ def _scope_bonus(
 
     - Entries under the user's current project: ``+_SCOPE_BONUS_CURRENT``
     - Global entries: ``+_SCOPE_BONUS_GLOBAL``
-    - Other-project entries (and root entries with no bucket): ``0.0``
+    - Other-project entries: ``_SCOPE_PENALTY_CROSS_PROJECT`` (negative)
+    - Root entries with no resolvable bucket: ``0.0``
 
     Matching is done by translating the bucket name to its canonical
     slug (via ``_bucket_canonical_slug``) and comparing against the
     session's slug — buckets not listed in the alias map default to
-    slug == bucket name.
+    slug == bucket name. When ``current_project_slug`` is ``None`` we
+    can't tell current-project from cross-project, so non-global
+    project entries collapse to zero (no penalty without a baseline
+    to compare against).
     """
     if bucket is None:
         return 0.0
     if bucket == "__global__":
         return _SCOPE_BONUS_GLOBAL
-    if current_project_slug and bucket_canonical_slug(bucket, aliases) == current_project_slug:
+    if not current_project_slug:
+        return 0.0
+    if bucket_canonical_slug(bucket, aliases) == current_project_slug:
         return _SCOPE_BONUS_CURRENT
-    return 0.0
+    return _SCOPE_PENALTY_CROSS_PROJECT
 
 
 def _boost_with_reinforcement(
@@ -569,16 +581,142 @@ def _boost_with_reinforcement(
 # ── Rendering ─────────────────────────────────────────────────────────
 
 
+# Body excerpts inline the first ~250 chars of the top entries' bodies so
+# the agent can cite the actual rule rather than guessing from the title.
+# Per agent feedback: title-only priming caused at least one case where
+# the agent reinvented a weaker version of an entry it had been "told" via
+# wikilink. Cap chosen to fit ~3 bullets-with-bodies under the 1500-char
+# total budget. See ``_extract_body_excerpt``.
+_BODY_EXCERPT_MAX_CHARS = 250
+
+# Freshness marker: entries with frontmatter ``updated`` (or ``created``
+# as a fallback) within this many days get a star prefix so the agent can
+# prioritise recent thinking. 7d is the user's working-week window.
+_FRESHNESS_WINDOW_DAYS = 7
+_FRESHNESS_MARKER = "★"
+
+
+def _extract_body_excerpt(text: str, *, max_chars: int = _BODY_EXCERPT_MAX_CHARS) -> str:
+    """Pull the first paragraph of body content as a short excerpt.
+
+    Skips the YAML frontmatter and the entry's leading ``# Title``
+    heading (the title is already rendered above the excerpt from
+    frontmatter, so repeating it wastes the budget). Takes everything
+    up to the next blank line, collapses whitespace, and truncates at
+    ``max_chars`` on a word boundary with a trailing ellipsis if needed.
+
+    Returns "" if the body is empty or unreadable.
+    """
+    # Strip frontmatter if present.
+    fm_match = _FRONTMATTER_RE.match(text)
+    body = text[fm_match.end() :] if fm_match else text
+
+    # Walk lines, skipping blanks and any leading "# Heading" lines.
+    lines = body.splitlines()
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if not stripped or stripped.startswith("#"):
+            i += 1
+            continue
+        break
+    if i >= len(lines):
+        return ""
+
+    # Collect until the next blank line — first paragraph only.
+    paragraph: List[str] = []
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if not stripped:
+            break
+        paragraph.append(stripped)
+        i += 1
+    if not paragraph:
+        return ""
+
+    text_one_line = " ".join(paragraph)
+    text_one_line = " ".join(text_one_line.split())  # collapse internal whitespace
+    if len(text_one_line) <= max_chars:
+        return text_one_line
+
+    # Truncate on a word boundary.
+    cut = text_one_line[: max_chars - 1]
+    last_space = cut.rfind(" ")
+    if last_space > 0:
+        cut = cut[:last_space]
+    return cut.rstrip() + "…"
+
+
+def _parse_iso_date(value: object) -> Optional[date]:
+    """Best-effort parse of an ISO date (YYYY-MM-DD) from frontmatter."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s).date()
+    except ValueError:
+        return None
+
+
+def _is_fresh(fm: Dict[str, Any], *, today: Optional[date] = None) -> bool:
+    """True if frontmatter ``updated`` (or ``created``) is within the
+    freshness window. Today is overridable for deterministic tests."""
+    when = _parse_iso_date(fm.get("updated")) or _parse_iso_date(fm.get("created"))
+    if when is None:
+        return False
+    now = today or date.today()
+    return (now - when) <= timedelta(days=_FRESHNESS_WINDOW_DAYS)
+
+
+# Path-derived kind classification. We don't have a ``kind:`` frontmatter
+# field yet, so this is best-effort heuristic from the directory layout
+# the Scholar tends to use. Falls back to "" (no marker) when nothing
+# obviously matches — better silent than wrongly classified.
+_KIND_SEGMENTS: Tuple[Tuple[str, str], ...] = (
+    ("conventions", "C"),  # convention — must follow
+    ("preferences", "P"),  # preference — style/taste
+    ("user/", "P"),  # user/* tends to be preferences
+    ("findings", "F"),  # finding — informational
+    ("research", "F"),  # research/* same
+)
+
+
+def _kind_marker(path: Path, knowledge_dir: Path, fm: Dict[str, Any]) -> str:
+    """One-char kind marker (C/P/F/W) derived from path + frontmatter.
+
+    Order matters — ``severity: block`` in frontmatter wins over a path
+    classification because a warn is the most actionable category.
+    """
+    if str(fm.get("severity", "")).strip() == "block":
+        return "W"
+    try:
+        rel = path.resolve().relative_to(knowledge_dir.resolve())
+    except ValueError:
+        return ""
+    rel_str = str(rel).replace(os.sep, "/").lower()
+    for segment, marker in _KIND_SEGMENTS:
+        if segment in rel_str:
+            return marker
+    return ""
+
+
 def _render_bullet(
     path: Path,
     reinforced: int,
     knowledge_dir: Path,
     *,
     title_only: bool = False,
+    include_body: bool = False,
+    today: Optional[date] = None,
 ) -> str:
     """Render one bullet line. ``title_only`` drops the applies-when
-    hook (used as a fallback when the budget is tight) while keeping
-    the title so the agent always has something semantic to anchor on.
+    hook and any body excerpt (used as a fallback when the budget is
+    tight) while keeping the title so the agent always has something
+    semantic to anchor on. ``include_body`` inlines a short body
+    excerpt under the bullet — used for top entries that haven't been
+    surfaced this session yet.
     """
     try:
         text = path.read_text(encoding="utf-8")
@@ -586,20 +724,78 @@ def _render_bullet(
         return ""
     fm = _parse_frontmatter(text)
     link = _wikilink_path(path, knowledge_dir)
+
     count_suffix = f" (×{reinforced})" if reinforced > 0 else ""
+    fresh_marker = f" {_FRESHNESS_MARKER}" if _is_fresh(fm, today=today) else ""
+    kind = _kind_marker(path, knowledge_dir, fm)
+    kind_marker = f" [{kind}]" if kind else ""
+    markers = f"{count_suffix}{fresh_marker}{kind_marker}"
     title = _entry_title(fm, path)
+
     if title_only:
         if not title:
-            return f"- [[{link}]]{count_suffix}"
-        return f"- [[{link}]]{count_suffix} — {title}"
+            return f"- [[{link}]]{markers}"
+        return f"- [[{link}]]{markers} — {title}"
     hook = _entry_applies_when(fm)
     if title and hook:
-        return f"- [[{link}]]{count_suffix} — {title} — {_shorten(hook, max_chars=70)}"
-    if title:
-        return f"- [[{link}]]{count_suffix} — {title}"
-    if hook:
-        return f"- [[{link}]]{count_suffix} — {_shorten(hook)}"
-    return f"- [[{link}]]{count_suffix}"
+        bullet = f"- [[{link}]]{markers} — {title} — {_shorten(hook, max_chars=70)}"
+    elif title:
+        bullet = f"- [[{link}]]{markers} — {title}"
+    elif hook:
+        bullet = f"- [[{link}]]{markers} — {_shorten(hook)}"
+    else:
+        bullet = f"- [[{link}]]{markers}"
+
+    if include_body:
+        excerpt = _extract_body_excerpt(text)
+        if excerpt:
+            bullet += f"\n  > {excerpt}"
+    return bullet
+
+
+def _filter_already_sent(
+    ranked: List[Tuple[Path, float, int]],
+    knowledge_dir: Path,
+    already_sent: Set[str],
+) -> List[Tuple[Path, float, int]]:
+    """Drop entries already surfaced to this session. Preserves rank order."""
+    out: List[Tuple[Path, float, int]] = []
+    for path, score, reinforced in ranked:
+        if _wikilink_path(path, knowledge_dir) in already_sent:
+            continue
+        out.append((path, score, reinforced))
+    return out
+
+
+def _render_at_verbosity(
+    sliced: List[Tuple[Path, float, int]],
+    knowledge_dir: Path,
+    *,
+    include_body: bool,
+    title_only: bool,
+    today: Optional[date],
+) -> List[str]:
+    """Render the chosen entries at the given verbosity. Drops empty bullets."""
+    return [
+        b
+        for b in (
+            _render_bullet(
+                p,
+                r,
+                knowledge_dir,
+                include_body=include_body,
+                title_only=title_only,
+                today=today,
+            )
+            for p, _score, r in sliced
+        )
+        if b
+    ]
+
+
+def _wrap_bullets(bullets: List[str]) -> str:
+    """Standard header + bullets + footer envelope."""
+    return f"{_HEADER}\n\n" + "\n".join(bullets) + f"\n\n{_FOOTER}\n"
 
 
 def _assemble_output(
@@ -608,51 +804,84 @@ def _assemble_output(
     *,
     top_k: int,
     char_budget: int,
-) -> str:
+    already_sent: Optional[Set[str]] = None,
+    today: Optional[date] = None,
+) -> Tuple[str, List[str]]:
     """Compose the hot-context body, respecting the char budget.
 
-    Strategy:
-      - Reserve room for header + footer + the two blank-line separators.
-      - Try full bullets first; if we blow the budget, fall back to
-        title-only bullets; if still over, drop trailing bullets until
-        we fit.
+    Args:
+      ranked: scored candidates from the rerank+boost pipeline.
+      knowledge_dir: library root (for wikilink rendering).
+      top_k: max entries to render (3 in production — the agent
+        explicitly asked for fewer-and-richer over more-and-shallower).
+      char_budget: hard upper bound on output length.
+      already_sent: wikilink paths the daemon has surfaced to this
+        session before. Filtered out so the agent doesn't see the same
+        priming over and over. Pass an empty set to disable dedup.
+      today: override for the freshness-marker date check; tests pin it.
+
+    Returns:
+      ``(rendered_markdown, newly_sent_wikilinks)``. The markdown is
+      "" when every candidate was already-sent (no new content to
+      surface — the caller treats this as "nothing to inject"). The
+      second element is the list of wikilinks the caller should add
+      to the session's seen-set after this turn.
+
+    Strategy: pick a verbosity level that fits the char budget, in
+    decreasing order — full (with body excerpts) → hooked (titles +
+    applies-when) → terse (titles only) → terse-truncated. Each
+    verbosity is rendered by ``_render_at_verbosity``; the first one
+    that fits wins.
     """
     if not ranked:
-        return ""
+        return "", []
 
-    sliced = ranked[:top_k]
+    filtered = _filter_already_sent(ranked, knowledge_dir, already_sent or set())
+    if not filtered:
+        # Every top candidate was already shown to this session.
+        return "", []
 
-    def _join(bullets: List[str]) -> str:
-        return f"{_HEADER}\n\n" + "\n".join(bullets) + f"\n\n{_FOOTER}\n"
+    sliced = filtered[:top_k]
+    newly_sent: List[str] = [_wikilink_path(p, knowledge_dir) for p, _score, _r in sliced]
 
-    # Attempt 1: full bullets, all top_k.
-    bullets = [b for b in (_render_bullet(p, r, knowledge_dir) for p, _score, r in sliced) if b]
-    if not bullets:
-        return ""
-    full = _join(bullets)
-    if len(full) <= char_budget:
-        return full
-
-    # Attempt 2: title-only bullets.
-    bullets_terse = [
-        b
-        for b in (_render_bullet(p, r, knowledge_dir, title_only=True) for p, _score, r in sliced)
-        if b
-    ]
-    terse = _join(bullets_terse)
-    if len(terse) <= char_budget:
-        return terse
-
-    # Attempt 3: drop trailing bullets until we fit. Always keep at
-    # least one — an empty list defeats the purpose.
-    while len(bullets_terse) > 1:
-        bullets_terse.pop()
-        candidate = _join(bullets_terse)
+    # Render at each verbosity in decreasing richness; return the first
+    # that fits the char budget.
+    verbosity_attempts = (
+        (True, False),  # full bodies — the new richer shape
+        (False, False),  # drop bodies, keep applies-when hooks
+        (False, True),  # title-only
+    )
+    last_bullets: List[str] = []
+    for include_body, title_only in verbosity_attempts:
+        bullets = _render_at_verbosity(
+            sliced,
+            knowledge_dir,
+            include_body=include_body,
+            title_only=title_only,
+            today=today,
+        )
+        if not bullets:
+            continue
+        last_bullets = bullets
+        candidate = _wrap_bullets(bullets)
         if len(candidate) <= char_budget:
-            return candidate
+            return candidate, newly_sent
+
+    if not last_bullets:
+        return "", []
+
+    # Last resort: drop trailing bullets from the terse render until we
+    # fit. Keep at least one — an empty list defeats the purpose.
+    truncated_sent = list(newly_sent)
+    while len(last_bullets) > 1:
+        last_bullets.pop()
+        truncated_sent.pop()
+        candidate = _wrap_bullets(last_bullets)
+        if len(candidate) <= char_budget:
+            return candidate, truncated_sent
 
     # Final fallback: the single best bullet only, even if over budget.
-    return _join(bullets_terse)
+    return _wrap_bullets(last_bullets), truncated_sent
 
 
 # ── Public API ────────────────────────────────────────────────────────
@@ -663,9 +892,10 @@ def refresh_hot_context(
     rolling_buffer_text: str,
     out_path: Path,
     *,
-    top_k: int = 5,
+    top_k: int = 3,
     char_budget: int = 1500,
     current_project_slug: Optional[str] = None,
+    already_sent: Optional[Set[str]] = None,
 ) -> Optional[Path]:
     """Recompute the hot-context file from the recent buffer.
 
@@ -675,8 +905,12 @@ def refresh_hot_context(
             Empty string is OK — the function clears the hot-context
             file in that case (no stale priming).
         out_path: where to write the new hot-context body.
-        top_k: how many entries to include before budget trimming.
+        top_k: how many entries to include before budget trimming
+            (default 3 — fewer-and-richer, with body excerpts).
         char_budget: hard upper bound on output length.
+        already_sent: wikilinks already surfaced to this session. Used
+            for dedup so the agent doesn't see the same priming over
+            and over. Pass ``None`` or an empty set to disable.
 
     Returns:
         The path written, or ``None`` if nothing was written (empty
@@ -684,6 +918,14 @@ def refresh_hot_context(
 
     Never raises. All failures are logged at WARN/EXCEPTION and the
     function returns; the daemon must not crash because BM25 hiccupped.
+
+    Note: this function discards the ``newly_sent`` list from
+    ``_assemble_output`` — it predates the dedup feature and has no
+    session context. The RPC handler (``priming_rpc._handle_priming``)
+    is the path that actually maintains session state. Keep this
+    function in sync with the RPC's call shape so the file-write
+    fallback (when the daemon isn't fronting an RPC call) produces
+    the same content the RPC would.
     """
     try:
         # Empty buffer: clear the file if it exists so we don't leave
@@ -715,11 +957,12 @@ def refresh_hot_context(
             knowledge_dir=knowledge_dir,
             current_project_slug=current_project_slug,
         )
-        body = _assemble_output(
+        body, _newly_sent = _assemble_output(
             ranked,
             knowledge_dir,
             top_k=top_k,
             char_budget=char_budget,
+            already_sent=already_sent,
         )
         if not body:
             return None
