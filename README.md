@@ -114,6 +114,22 @@ cd /path/to/ultan/daemon && uv run agent-mem-daemon -v
 #    ~/.agent-mem/knowledge/ as the Scholar approves them.
 ```
 
+### Where your memories live
+
+Everything Ultan owns lives under **`~/.agent-mem/`** on your local disk — no cloud sync, no hosted database, no telemetry. Override with `AGENT_MEM_HOME=/some/other/path` if you want a different root.
+
+| Path | What's in it |
+|---|---|
+| **`~/.agent-mem/knowledge/`** | **Your library — plain markdown.** This is the data; everything else in this table is derived or transient. `ls`, `cat`, `git init` it. |
+| `~/.agent-mem/events.jsonl` | Append-only stream of hook events. Hooks write, the daemon tails. Truncates on rotation. |
+| `~/.agent-mem/daemon.log` | Rotated daemon log (~5 MiB cap). |
+| `~/.agent-mem/.bm25.idx`, `.embeddings.idx` | Search indexes over the library. Rebuilt automatically when the library changes. |
+| `~/.agent-mem/sweep-state.json` | Last-decay-sweep timestamp (24h cooldown). |
+| `~/.agent-mem/pending-nudges.md` | Scholar writes nudges here; the hook reads and clears them on the next turn. |
+| `~/.agent-mem/runs/` | Per-call audit log (cost, duration, decisions) + full LLM transcripts (7-day TTL). |
+
+See *Storage on disk* below for the full layout including the folders inside `knowledge/`.
+
 ### First-start expectations (model downloads)
 
 The Tier-1 retrieval pipeline uses two open HuggingFace models, downloaded

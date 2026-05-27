@@ -13,3 +13,10 @@ prior-art/
 .claude/
 local/
 .coverage
+
+# Derived search indexes (BM25 + sentence-transformer embeddings) —
+# rebuilt on demand from the markdown corpus they index. The daemon
+# writes the production indexes to ~/.agent-mem/.bm25.idx /
+# .embeddings.idx; test fixtures regenerate theirs in tmpdirs.
+.bm25.idx
+.embeddings.idx

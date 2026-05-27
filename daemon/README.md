@@ -1,17 +1,15 @@
 # agent-mem-daemon
 
-The long-running event-ingest daemon for **agent-mem** (see
-`/Users/nicholasholden/agent-mem/PLAN.md`). This package is the
-**skeleton phase**: it nails the plumbing — JSONL tail, rolling buffer,
-turn aggregation, Librarian/Scholar scheduling, backpressure, PID/log
-lifecycle — but the Librarian and Scholar themselves are stubs that log
-"would have done X". The real LLM-driven Librarian/Scholar are a
-separate deliverable.
+The long-running event-ingest daemon for **agent-mem**. See the
+repo-root `README.md` for the project-level overview and design; this
+file documents the daemon's frozen contracts (event-log schema,
+scheduler invariants) and how to dogfood the plumbing without the
+LLM curator running.
 
 ## Install / run
 
 ```bash
-cd /Users/nicholasholden/agent-mem/daemon
+cd <repo>/daemon
 uv sync --group dev
 uv run pytest                 # unit tests
 uv run agent-mem-daemon -v    # foreground; logs to ~/.agent-mem/daemon.log + stderr
@@ -155,7 +153,7 @@ Terminal 1 (the daemon, foreground, verbose):
 ```bash
 mkdir -p /tmp/agent-mem-test
 AGENT_MEM_HOME=/tmp/agent-mem-test \
-  uv run --project /Users/nicholasholden/agent-mem/daemon \
+  uv run --project <repo>/daemon \
   agent-mem-daemon -v \
     --scholar-every-k 2 \
     --scholar-every-m-secs 30
