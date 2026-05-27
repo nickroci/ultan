@@ -12,7 +12,19 @@ Ultan watches your conversations as you work, learns your preferences and conven
 
 It's your library. On your disk. In plain markdown. You can `ls` it, `cat` it, `git` it.
 
+<p align="center">
+  <a href="docs/librarian-scholar.png">
+    <img src="docs/librarian-scholar.png" width="600" alt="A Benedictine-robed monk (the Librarian) reading at a sci-fi library shelf while a scholar at a candlelit wooden desk transcribes notes; a glowing brain-and-circuit-board hologram floats beside her" />
+  </a>
+</p>
+
 ---
+
+## Why this exists
+
+Each agent session resets from zero. The memory features that exist today — `CLAUDE.md`, Cursor rules, ChatGPT memory, the various provider built-ins — are *there* but rarely used, and when they do fire they often feel pointless: shallow grep against a static rules file, no judgment about what's worth remembering vs what isn't, no idea what's stale, no composition with the current turn. I was tired of teaching the same agent the same thing on day 17.
+
+So I wondered what could be achieved if you stopped optimising for token cost first. Most current memory systems are shallow because they're cheap — last-N turns, keyword match, a fixed prompt suffix. None of them looks much like how memory *actually* works. Real memory is salience-gated at write time, decays without reinforcement, mutates on retrieval, resists deletion of high-arousal traces, and uses different mechanisms for different latencies (ambient familiarity, deliberate recall, fast suppression). So we took the neurology seriously and built towards it — a curator pair (Sonnet + Opus) gating writes by surprise magnitude; three retrieval tiers each tuned to a different cognitive analog; surfacing-aware decay with optional arousal pinning; an opt-in mutation/reconsolidation pathway; archive-don't-delete so contradictions can resurrect old traces. Tokens cost something, but less than the friction of repeating yourself.
 
 ## Design, in one paragraph
 
