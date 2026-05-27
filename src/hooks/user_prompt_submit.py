@@ -95,18 +95,20 @@ def _parse_stdin() -> Optional[HookPayload]:
     return cast("HookPayload", parsed)
 
 
-def _priming_part(prompt: str) -> str:
+def _priming_part(prompt: str, session_id: Optional[str]) -> str:
     """Half 2a: ambient priming. Returns rendered markdown or empty string.
 
-    Sub-200 ms in the daemon-served path (Unix socket round trip);
-    sub-100 ms in the BM25-only fallback. Runs even when session_id is
-    missing — priming is session-agnostic and ``get_priming`` enforces
-    its own char budget.
+    Sub-2 s in the daemon-served path (Unix socket round trip);
+    sub-100 ms in the BM25-only fallback. The session_id, when present,
+    lets the daemon dedup against entries it has already surfaced to
+    this session — without it, dedup is disabled and the agent sees
+    full priming as if every turn were a fresh session. The hook
+    payload usually carries one; ``get_priming`` tolerates ``None``.
     """
     if not prompt.strip():
         return ""
     try:
-        priming_md = get_priming(prompt)
+        priming_md = get_priming(prompt, session_id=session_id)
     except Exception:
         # Belt and braces: ``get_priming`` is documented as never-raising,
         # but the hook MUST keep running even if something weird happens
@@ -180,7 +182,9 @@ def main() -> None:
     # Half 2: collect injection parts. Both halves are optional; either,
     # both, or neither may contribute. We assemble first, emit once.
     parts: list[str] = []
-    priming_md = _priming_part(prompt)
+    raw_session = hook_input.get("session_id")
+    session_id_str: Optional[str] = raw_session if isinstance(raw_session, str) else None
+    priming_md = _priming_part(prompt, session_id_str)
     if priming_md:
         parts.append(priming_md)
 

@@ -368,3 +368,181 @@ def test_collect_strings_skips_non_strings() -> None:
     """Ints, floats, bools, None are explicitly excluded."""
     out = priming._collect_strings({"a": 42, "b": 3.14, "c": True, "d": None})
     assert out == []
+
+
+# ── Body excerpt extraction ──────────────────────────────────────────
+
+
+def test_extract_body_excerpt_skips_frontmatter_and_heading() -> None:
+    text = (
+        "---\nid: x\ntitle: T\n---\n\n"
+        "# Title heading\n\n"
+        "This is the first body paragraph that the agent should see.\n\n"
+        "Second paragraph should not appear.\n"
+    )
+    assert priming._extract_body_excerpt(text) == (
+        "This is the first body paragraph that the agent should see."
+    )
+
+
+def test_extract_body_excerpt_returns_empty_for_empty_body() -> None:
+    assert priming._extract_body_excerpt("---\nid: x\n---\n\n# Heading only\n") == ""
+
+
+def test_extract_body_excerpt_truncates_with_ellipsis_on_word_boundary() -> None:
+    long_para = "lorem ipsum " * 60  # ~720 chars
+    text = f"---\nid: x\n---\n\n{long_para}\n"
+    out = priming._extract_body_excerpt(text, max_chars=80)
+    assert len(out) <= 80
+    assert out.endswith("…")
+    # Word boundary: no trailing partial token.
+    head = out[:-1].rstrip()
+    assert head.endswith("lorem") or head.endswith("ipsum")
+
+
+def test_extract_body_excerpt_handles_text_without_frontmatter() -> None:
+    text = "Plain body text with no frontmatter at all here.\n"
+    assert priming._extract_body_excerpt(text).startswith("Plain body text")
+
+
+# ── Freshness marker ─────────────────────────────────────────────────
+
+
+def test_is_fresh_within_window_returns_true() -> None:
+    from datetime import date as _date
+
+    today = _date(2026, 5, 27)
+    assert priming._is_fresh({"updated": "2026-05-25"}, today=today) is True
+
+
+def test_is_fresh_outside_window_returns_false() -> None:
+    from datetime import date as _date
+
+    today = _date(2026, 5, 27)
+    assert priming._is_fresh({"updated": "2026-05-01"}, today=today) is False
+
+
+def test_is_fresh_falls_back_to_created() -> None:
+    from datetime import date as _date
+
+    today = _date(2026, 5, 27)
+    assert priming._is_fresh({"created": "2026-05-26"}, today=today) is True
+
+
+def test_is_fresh_returns_false_for_no_dates() -> None:
+    assert priming._is_fresh({}) is False
+
+
+# ── Kind marker (path-derived) ───────────────────────────────────────
+
+
+def test_kind_marker_conventions_path() -> None:
+    kdir = Path("/k")
+    p = kdir / "global" / "conventions" / "code-quality" / "use-uv.md"
+    assert priming._kind_marker(p, kdir, {}) == "C"
+
+
+def test_kind_marker_findings_path() -> None:
+    kdir = Path("/k")
+    p = kdir / "projects" / "vol" / "research" / "findings" / "vol-normalization.md"
+    assert priming._kind_marker(p, kdir, {}) == "F"
+
+
+def test_kind_marker_warning_severity_wins_over_path() -> None:
+    kdir = Path("/k")
+    p = kdir / "global" / "conventions" / "rm-rf-warning.md"
+    assert priming._kind_marker(p, kdir, {"severity": "block"}) == "W"
+
+
+def test_kind_marker_returns_empty_for_unclassified() -> None:
+    kdir = Path("/k")
+    p = kdir / "projects" / "vol" / "concepts" / "natural-hold.md"
+    assert priming._kind_marker(p, kdir, {}) == ""
+
+
+# ── Scope penalty (cross-project) ────────────────────────────────────
+
+
+def test_scope_bonus_cross_project_returns_penalty() -> None:
+    aliases: dict[str, str] = {}
+    # Bucket != current project, not __global__, current_project_slug
+    # is present → penalty fires.
+    assert priming._scope_bonus("vol-predictor", "agent-mem", aliases) == (
+        priming._SCOPE_PENALTY_CROSS_PROJECT
+    )
+
+
+def test_scope_bonus_no_current_slug_collapses_to_zero() -> None:
+    """Without a baseline, cross-project can't be distinguished from
+    current-project — collapse to zero rather than penalise blindly."""
+    assert priming._scope_bonus("vol-predictor", None, {}) == 0.0
+
+
+def test_scope_bonus_global_unchanged() -> None:
+    assert priming._scope_bonus("__global__", "agent-mem", {}) == priming._SCOPE_BONUS_GLOBAL
+
+
+# ── Dedup in _assemble_output ────────────────────────────────────────
+
+
+@pytest.fixture
+def _seed_two_entries(tmp_path: Path) -> tuple[Path, Path, Path]:
+    k = tmp_path / "knowledge"
+    a = k / "global" / "a.md"
+    b = k / "global" / "b.md"
+    for p, slug, body in (
+        (a, "a", "Entry A body — first rule about handling X carefully."),
+        (b, "b", "Entry B body — separate rule about handling Y instead."),
+    ):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            f"---\nid: {slug}\ntitle: Entry {slug.upper()}\napplies-when: when {slug} matters\n---\n\n"
+            f"# Heading\n\n{body}\n"
+        )
+    return k, a, b
+
+
+def test_assemble_dedup_filters_already_sent_entries(_seed_two_entries) -> None:
+    k, a, b = _seed_two_entries
+    ranked = [(a, 1.0, 0), (b, 0.5, 0)]
+    # Pretend "a" was already sent to this session.
+    rendered, newly_sent = priming._assemble_output(
+        ranked,
+        k,
+        top_k=3,
+        char_budget=2000,
+        already_sent={"global/a"},
+    )
+    assert rendered, "expected at least the b entry to render"
+    assert "[[global/a]]" not in rendered
+    assert "[[global/b]]" in rendered
+    assert newly_sent == ["global/b"]
+
+
+def test_assemble_dedup_returns_empty_when_all_sent(_seed_two_entries) -> None:
+    k, a, b = _seed_two_entries
+    ranked = [(a, 1.0, 0), (b, 0.5, 0)]
+    rendered, newly_sent = priming._assemble_output(
+        ranked,
+        k,
+        top_k=3,
+        char_budget=2000,
+        already_sent={"global/a", "global/b"},
+    )
+    assert rendered == ""
+    assert newly_sent == []
+
+
+def test_assemble_emits_body_excerpts_when_budget_allows(_seed_two_entries) -> None:
+    k, a, b = _seed_two_entries
+    ranked = [(a, 1.0, 0), (b, 0.5, 0)]
+    rendered, _ = priming._assemble_output(
+        ranked,
+        k,
+        top_k=3,
+        char_budget=2000,
+        already_sent=set(),
+    )
+    # Body excerpts appear under bullets prefixed with "  > ".
+    assert "  > Entry A body" in rendered
+    assert "  > Entry B body" in rendered

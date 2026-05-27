@@ -53,6 +53,7 @@ class PrimingRequest(TypedDict):
     op: str
     prompt: str
     project_slug: Optional[str]
+    session_id: Optional[str]
     k: int
     char_budget: int
 
@@ -450,7 +451,8 @@ def get_priming(
     prompt: str,
     *,
     project_slug: Optional[str] = None,
-    k: int = 5,
+    session_id: Optional[str] = None,
+    k: int = 3,
     char_budget: int = 1500,
     total_budget_ms: int = _TOTAL_BUDGET_MS,
 ) -> str:
@@ -482,6 +484,7 @@ def get_priming(
             "op": "priming",
             "prompt": prompt,
             "project_slug": project_slug,
+            "session_id": session_id,
             "k": k,
             "char_budget": char_budget,
         }
