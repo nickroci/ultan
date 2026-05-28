@@ -64,6 +64,23 @@ log = logging.getLogger("agent_mem_daemon.librarian_prompt")
 LIBRARY_SNAPSHOT_MAX_CHARS = 3 * 1024
 
 
+# Hard ceiling on the rolling-buffer block — the single largest, most
+# variable part of the Librarian prompt. Feeding the WHOLE session every
+# pass blew prompts up to 259K chars (median 71K), driving cost (~$100 /
+# 2 days) and OOM-killing the spawned SDK subprocess ("Fatal error in
+# message reader: exit code -N"). Re-scanning the whole session is also
+# pointless: anything already learned is persisted in the library, so the
+# Librarian only needs the most RECENT activity to catch NEW lessons.
+#
+# Budget is expressed in tokens and converted to a char proxy at ~4
+# chars/token. We keep the most-recent turns and drop the OLDEST when
+# over budget, always retaining at least the single most recent turn.
+# Tune ROLLING_BUFFER_BUDGET_TOKENS to trade recall depth against cost.
+ROLLING_BUFFER_BUDGET_TOKENS = 30_000
+_CHARS_PER_TOKEN = 4
+ROLLING_BUFFER_MAX_CHARS = ROLLING_BUFFER_BUDGET_TOKENS * _CHARS_PER_TOKEN
+
+
 # ── Shape definitions ─────────────────────────────────────────────────
 #
 # Buffer snapshots come from ``buffer.BufferStore.snapshot()`` as plain
@@ -168,6 +185,64 @@ def flatten_buffer(snapshot: Mapping[str, Any]) -> List[Tuple[int, str, str, boo
     return out
 
 
+def _render_turn_line(tid: int, role: str, text: str, user_asserted: bool) -> str:
+    """Render one (turn_id, role, text, user_asserted) tuple as the single
+    ``[id] [role] [USER-ASSERTED?] <squashed text>`` line the Librarian
+    sees. Shared by the formatter and the recency-cap char accounting so
+    the cap is measured against the EXACT bytes that land in the prompt."""
+    squashed = " ".join(text.split())
+    prefix = "[USER-ASSERTED] " if user_asserted else ""
+    return f"[{tid}] [{role}] {prefix}{squashed}"
+
+
+def cap_buffer_to_recent(
+    flat: Sequence[Tuple[int, str, str, bool]],
+    *,
+    max_chars: int = ROLLING_BUFFER_MAX_CHARS,
+) -> List[Tuple[int, str, str, bool]]:
+    """Trim ``flat`` to the most-recent turns that fit within ``max_chars``.
+
+    The rendered ``<rolling_buffer>`` block is the dominant, unbounded
+    part of the Librarian prompt; feeding an entire session here is what
+    pushed prompts to 259K chars and OOM-killed the SDK subprocess. We
+    walk the turns NEWEST-first, accumulating their rendered line length
+    (the exact bytes ``format_rolling_buffer`` will emit, newline
+    included), and stop once the next-oldest turn would blow the budget.
+    Always keeps at least the single most-recent turn even if that one
+    line alone exceeds ``max_chars`` — dropping everything would defeat
+    the Librarian entirely.
+
+    Returns the kept turns in their original (oldest-first) order so the
+    caller can format them unchanged.
+    """
+    if not flat:
+        return []
+    kept_rev: List[Tuple[int, str, str, bool]] = []
+    used = 0
+    for tid, role, text, user_asserted in reversed(flat):
+        line_len = len(_render_turn_line(tid, role, text, user_asserted))
+        # +1 for the newline join cost between lines (the very first kept
+        # line has no separator, but over-counting by one is harmless and
+        # keeps the accounting a strict upper bound on the joined output).
+        cost = line_len + 1
+        if kept_rev and used + cost > max_chars:
+            break
+        kept_rev.append((tid, role, text, user_asserted))
+        used += cost
+    kept_rev.reverse()
+    dropped = len(flat) - len(kept_rev)
+    if dropped:
+        log.info(
+            "librarian buffer truncated to recency budget: kept %d of %d turns "
+            "(dropped %d oldest, budget=%d chars)",
+            len(kept_rev),
+            len(flat),
+            dropped,
+            max_chars,
+        )
+    return kept_rev
+
+
 def format_rolling_buffer(flat: Sequence[Tuple[int, str, str, bool]]) -> str:
     """Render the (turn_id, role, text, user_asserted) list as the
     ``<rolling_buffer>`` body.
@@ -178,11 +253,9 @@ def format_rolling_buffer(flat: Sequence[Tuple[int, str, str, bool]]) -> str:
     """
     if not flat:
         return "(empty — no turns with quotable text)"
-    lines: List[str] = []
-    for tid, role, text, user_asserted in flat:
-        squashed = " ".join(text.split())
-        prefix = "[USER-ASSERTED] " if user_asserted else ""
-        lines.append(f"[{tid}] [{role}] {prefix}{squashed}")
+    lines = [
+        _render_turn_line(tid, role, text, user_asserted) for tid, role, text, user_asserted in flat
+    ]
     return "\n".join(lines)
 
 
@@ -989,10 +1062,19 @@ def normalise_packet(parsed: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
 
 def buffer_to_prompt_text(
     snapshot: Mapping[str, Any],
+    *,
+    max_chars: int = ROLLING_BUFFER_MAX_CHARS,
 ) -> Tuple[str, List[Tuple[int, str, str, bool]]]:
     """Flatten a snapshot and return both the formatted block and the
-    raw 4-tuples (turn_id, role, text, user_asserted)."""
-    flat = flatten_buffer(snapshot)
+    raw 4-tuples (turn_id, role, text, user_asserted).
+
+    The flattened turns are capped to the most-recent ones that fit
+    within ``max_chars`` (see :func:`cap_buffer_to_recent`) before
+    formatting, so the rolling-buffer block — and therefore the
+    Librarian prompt — stays bounded. The returned tuple list is the
+    SAME capped window, so downstream consumers (seed text, turn count)
+    agree with what the model actually saw."""
+    flat = cap_buffer_to_recent(flatten_buffer(snapshot), max_chars=max_chars)
     return format_rolling_buffer(flat), flat
 
 
