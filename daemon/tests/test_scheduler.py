@@ -1020,3 +1020,99 @@ def test_tailer_thread_swallows_exception_and_continues():
     finally:
         stop_event.set()
         thread.join(timeout=2.0)
+
+
+# ── Integrity-repair fingerprint release on backpressure drop ─────────
+
+
+def test_release_repair_fingerprints_clears_markers():
+    """The scheduler helper releases the in-flight markers a dropped packet
+    was carrying, so a still-broken issue can re-escalate next detection."""
+    from agent_mem_daemon import repair_queue
+    from agent_mem_daemon.scheduler import _release_repair_fingerprints
+
+    repair_queue.reset_queue()
+    try:
+        q = repair_queue.get_queue()
+        q.enqueue(
+            repair_queue.RepairTask(kind="broken_wikilink", file="f.md", target="t", context="c")
+        )
+        q.drain_pending()  # in-flight, attached to a packet
+        assert q.inflight_count() == 1
+
+        # A dropped packet carrying the fingerprint (list shape, as the
+        # scheduler sees it at runtime).
+        packet = {"session_id": "s1", "repair_fingerprints": [["broken_wikilink", "f.md", "t"]]}
+        _release_repair_fingerprints(packet, "s1")
+        assert q.inflight_count() == 0
+    finally:
+        repair_queue.reset_queue()
+
+
+def test_release_repair_fingerprints_noop_without_key():
+    from agent_mem_daemon import repair_queue
+    from agent_mem_daemon.scheduler import _release_repair_fingerprints
+
+    repair_queue.reset_queue()
+    try:
+        # No repair_fingerprints key → no-op, no crash.
+        _release_repair_fingerprints({"session_id": "s1"}, "s1")
+        assert repair_queue.get_queue().inflight_count() == 0
+    finally:
+        repair_queue.reset_queue()
+
+
+def test_backpressure_drop_releases_repair_markers(caplog):
+    """End-to-end: when a Librarian packet carrying repair fingerprints is
+    dropped on a full scholar queue, the scheduler releases its in-flight
+    markers (so the escalation doesn't leak and can re-fire)."""
+    from agent_mem_daemon import repair_queue
+
+    repair_queue.reset_queue()
+    cfg = SchedulerConfig(
+        librarian_concurrency=1,
+        librarian_debounce_secs=0.02,
+        session_end_debounce_secs=0.02,
+        scholar_every_k=100,  # never drain
+        scholar_every_m_secs=999.0,
+        scholar_max_batch=10,
+        queue_ceiling=1,  # tiny — second packet drops
+        sweep_interval_secs=999.0,
+    )
+    buf = RollingBuffer()
+
+    def _lib(snap):
+        # Each packet carries a DISTINCT fingerprint, and we pre-mark it
+        # in-flight as the real drain path would.
+        sid = snap["session_id"]
+        fp = ("broken_wikilink", f"{sid}.md", "t")
+        repair_queue.get_queue().enqueue(
+            repair_queue.RepairTask(kind=fp[0], file=fp[1], target=fp[2], context="c")
+        )
+        repair_queue.get_queue().drain_pending()
+        pkt = _proposal_packet(snap)
+        pkt["repair_fingerprints"] = [list(fp)]
+        return pkt
+
+    def _sch(batch):
+        pass
+
+    sched = Scheduler(buffer=buf, config=cfg, librarian=_lib, scholar=_sch)
+    sched.start()
+    caplog.set_level(logging.WARNING)
+    try:
+        for i in range(4):
+            sched.on_event(_ev(float(i), f"sess{i}", "Stop"))
+        _wait_for(lambda: sched.stats.scholar_skipped_backpressure >= 1, timeout=3.0)
+        # Markers for dropped packets were released. The queued (not-dropped)
+        # packet(s) keep their markers until the Scholar concludes — but at
+        # least the dropped ones' markers must be gone, so the in-flight
+        # count is strictly less than the number of librarian runs.
+        _wait_for(
+            lambda: repair_queue.get_queue().inflight_count() < sched.stats.librarian_runs,
+            timeout=3.0,
+        )
+        assert any("released their in-flight markers" in r.message for r in caplog.records)
+    finally:
+        sched.stop()
+        repair_queue.reset_queue()

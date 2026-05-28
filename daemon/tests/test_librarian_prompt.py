@@ -395,6 +395,71 @@ def test_assemble_prompt_substitutes_all_placeholders():
     assert "factory | global | designing or building any new API" in p
 
 
+# ── format_repair_tasks / repair-task prompt block ────────────────────
+
+
+def test_format_repair_tasks_empty_returns_sentinel():
+    out = lp.format_repair_tasks([])
+    assert out == lp._NO_REPAIR_TASKS
+    assert "none" in out.lower()
+
+
+def test_format_repair_tasks_renders_each_field():
+    from agent_mem_daemon import repair_queue
+
+    tasks = [
+        repair_queue.RepairTask(
+            kind=repair_queue.KIND_BROKEN_WIKILINK,
+            file="global/python/foo.md",
+            target="global/ghost/bar",
+            context="…see [[global/ghost/bar]] for details…",
+        )
+    ]
+    out = lp.format_repair_tasks(tasks)
+    assert "kind: broken_wikilink" in out
+    assert "file: global/python/foo.md" in out
+    assert "target: global/ghost/bar" in out
+    assert "context: …see [[global/ghost/bar]] for details…" in out
+
+
+def test_assemble_prompt_renders_repair_tasks_block():
+    from agent_mem_daemon import repair_queue
+
+    tasks = [
+        repair_queue.RepairTask(
+            kind=repair_queue.KIND_BROKEN_WIKILINK,
+            file="global/python/foo.md",
+            target="global/ghost/bar",
+            context="ctx",
+        )
+    ]
+    p = lp.assemble_prompt(
+        project_slug="x",
+        rolling_buffer="(empty)",
+        library_snapshot="(empty)",
+        applies_when_table="(empty)",
+        repair_tasks=lp.format_repair_tasks(tasks),
+    )
+    # The dedicated highest-priority section and the rendered task land in
+    # the prompt, and the Librarian is told to fix it with an EXISTING action.
+    assert "INTEGRITY-REPAIR TASKS" in p
+    assert "target: global/ghost/bar" in p
+    assert "update_entry" in p  # one of the prescribed repair actions
+    assert "{{" not in p
+
+
+def test_assemble_prompt_repair_tasks_defaults_to_sentinel():
+    # Callers that don't escalate anything need not pass repair_tasks.
+    p = lp.assemble_prompt(
+        project_slug="x",
+        rolling_buffer="(empty)",
+        library_snapshot="(empty)",
+        applies_when_table="(empty)",
+    )
+    assert lp._NO_REPAIR_TASKS in p
+    assert "{{" not in p
+
+
 # ── parse_librarian_json / normalise_packet ───────────────────────────
 
 

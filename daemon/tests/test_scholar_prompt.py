@@ -961,3 +961,69 @@ def test_repair_index_row_prefix_does_not_delete_valid_longer_row(tmp_path: Path
     # Only the genuinely broken prefix row is removed.
     assert "[[global/python/use]]" not in index_after
     assert not any("broken wikilink" in v for v in scholar_prompt.check_invariants(k))
+
+
+# ── escalation hook: on_unresolved leaves the link broken ─────────────
+
+
+def test_unresolvable_link_escalated_is_left_broken(tmp_path: Path):
+    # When an on_unresolved escalator takes ownership of a link the
+    # deterministic pass can't resolve, the link must be LEFT BROKEN on
+    # disk (not neutralised) so the next pass can re-detect and re-escalate.
+    k = _seed_repair_tree(tmp_path)
+    entry = k / "global" / "python" / "narr.md"
+    entry.write_text(
+        _valid_frontmatter(id_="narr")
+        + "\nThis references [[global/ghost/never-existed]] in a sentence.\n",
+        encoding="utf-8",
+    )
+    seen: list[tuple[str, str, str]] = []
+
+    def _escalator(rel_file: str, target: str, context: str) -> bool:
+        seen.append((rel_file, target, context))
+        return True  # owned by escalation
+
+    changes = scholar_prompt.repair_broken_wikilinks(k, on_unresolved=_escalator)
+
+    # The callback fired with the file, broken target, and a context snippet.
+    assert seen == [("global/python/narr.md", "global/ghost/never-existed", seen[0][2])]
+    assert "[[global/ghost/never-existed]]" in seen[0][2]  # context captured
+    # The link is still on disk (detectable next pass), NOT neutralised.
+    body = entry.read_text(encoding="utf-8")
+    assert "[[global/ghost/never-existed]]" in body
+    assert any("escalated" in c for c in changes)
+    # And the invariant still fires — that's the intended "keep detecting".
+    assert any("broken wikilink" in v for v in scholar_prompt.check_invariants(k))
+
+
+def test_escalator_declining_falls_back_to_neutralise(tmp_path: Path):
+    # If the escalator returns False (declines ownership), the historical
+    # neutralise-as-stopgap behaviour still applies.
+    k = _seed_repair_tree(tmp_path)
+    entry = k / "global" / "python" / "narr.md"
+    entry.write_text(
+        _valid_frontmatter(id_="narr") + "\nSee [[global/ghost/gone]] now.\n",
+        encoding="utf-8",
+    )
+
+    changes = scholar_prompt.repair_broken_wikilinks(k, on_unresolved=lambda *_: False)
+    body = entry.read_text(encoding="utf-8")
+    assert "[[global/ghost/gone]]" not in body  # neutralised
+    assert any("neutralised" in c for c in changes)
+
+
+def test_resolvable_link_never_escalates(tmp_path: Path):
+    # A link the deterministic pass CAN resolve (unique leaf match) is
+    # rewritten and never offered to the escalator.
+    k = _seed_repair_tree(tmp_path)
+    entry = k / "global" / "python" / "linked.md"
+    entry.write_text(
+        _valid_frontmatter(id_="linked") + "\nSee [[global/wrongdir/use-uv]] now.\n",
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+    scholar_prompt.repair_broken_wikilinks(
+        k, on_unresolved=lambda _f, t, _c: calls.append(t) or True
+    )
+    assert calls == []  # resolvable → no escalation
+    assert "[[global/python/use-uv]]" in entry.read_text(encoding="utf-8")

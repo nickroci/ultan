@@ -47,7 +47,7 @@ from typing import (
 import yaml
 from aliases import session_bucket  # type: ignore[import-not-found]
 
-from . import _response_parser
+from . import _response_parser, repair_queue
 from ._schemas import (
     LibrarianProposal,
     describe_action_types_markdown,
@@ -823,6 +823,56 @@ above. Use Glob (e.g. `Glob("**/*.md")`) to find anything you suspect \
 exists but don't see in the snapshot.
 
 ═══════════════════════════════════════════════════════════════════
+INTEGRITY-REPAIR TASKS (HIGHEST PRIORITY — fix these first)
+═══════════════════════════════════════════════════════════════════
+
+<repair_tasks>
+{{REPAIR_TASKS}}
+</repair_tasks>
+
+If the block above is not empty, the daemon's deterministic post-write \
+pass found library invariants it could NOT fix on its own and is handing \
+them to you. These are NOT discretionary — propose an action to repair \
+each one. They take priority over salience-driven proposals.
+
+Each task names a ``file`` (relative to ``knowledge/``), a broken ``target`` \
+(the wikilink that does not resolve), and a ``context`` snippet showing \
+where it appears. For EACH broken-wikilink task, do this:
+
+  1. **Research the intended target.** The broken target usually got the \
+PATH wrong, not the concept. Run ``mcp__agent_mem_library__bm25_search`` \
+AND ``mcp__agent_mem_library__embedding_search`` IN PARALLEL on the \
+target's leaf name and the surrounding context, and ``Glob("**/<leaf>.md")`` \
+for the filename. Read the top hits to confirm which existing entry the \
+link was meant to point at.
+
+  2. **Then propose exactly ONE of these EXISTING actions** (no new action \
+type — the Scholar executes it as a normal proposal):
+     - **Link points at the wrong path but the right entry EXISTS** → \
+``update_entry`` on ``file`` whose ``new_body`` is the file's full body \
+with the broken ``[[target]]`` rewritten to the correct \
+``[[full/path/from/knowledge/root]]`` (no ``.md``; trailing ``/`` for a \
+folder link). Read ``file`` first so you reproduce its body faithfully and \
+change only the link.
+     - **The intended target genuinely does NOT exist yet but SHOULD** \
+(the link describes a real lesson worth having) → ``write_entry`` creating \
+the missing entry at the path the link points to, with proper frontmatter \
+and body. The link then resolves.
+     - **The link is bogus / the concept isn't worth an entry** → \
+``update_entry`` on ``file`` that removes the broken ``[[target]]`` (drop \
+the link or replace it with plain descriptive text), preserving the rest \
+of the prose. Explain in ``reasoning`` why no target should exist.
+
+  3. In ``reasoning``, quote the task's ``file`` and ``target`` and state \
+which of the three fixes you chose and why (cite the entry you found, or \
+state that no entry exists). Set ``salience_signal: null`` for repair \
+proposals — they are integrity fixes, not salience judgments.
+
+Do the link research with the SAME parallel-search discipline as for \
+dedup. A repair proposal that guesses the path without searching will \
+likely be vetoed.
+
+═══════════════════════════════════════════════════════════════════
 HIERARCHY INVARIANTS (the Scholar will veto violations)
 ═══════════════════════════════════════════════════════════════════
 
@@ -980,24 +1030,50 @@ def load_prompt_template() -> str:
     return _PROMPT_TEMPLATE
 
 
+_NO_REPAIR_TASKS = "(none — no integrity-repair tasks this run)"
+
+
+def format_repair_tasks(tasks: Sequence[repair_queue.RepairTask]) -> str:
+    """Render drained integrity-repair tasks as the ``<repair_tasks>`` body.
+
+    One numbered block per task, listing kind/file/target/context so the
+    Librarian can research and repair each one. Returns a sentinel when
+    there are no tasks so the prompt block is never blank."""
+    if not tasks:
+        return _NO_REPAIR_TASKS
+    lines: List[str] = []
+    for i, t in enumerate(tasks, start=1):
+        lines.append(f"{i}. kind: {t.kind}")
+        lines.append(f"   file: {t.file}")
+        lines.append(f"   target: {t.target}")
+        if t.context:
+            lines.append(f"   context: {t.context}")
+    return "\n".join(lines)
+
+
 def assemble_prompt(
     *,
     project_slug: str,
     rolling_buffer: str,
     library_snapshot: str,
     applies_when_table: str,
+    repair_tasks: str = _NO_REPAIR_TASKS,
 ) -> str:
     """Substitute placeholders into the prompt template.
 
     ACTION_TYPES and RESPONSE_SHAPE are generated from ``_schemas.py``
     at call time so the prompt instructions can never drift from the
-    Pydantic models the parser actually validates against.
+    Pydantic models the parser actually validates against. ``repair_tasks``
+    is the pre-rendered ``<repair_tasks>`` body (see
+    :func:`format_repair_tasks`); it defaults to the empty sentinel so
+    callers that don't escalate anything need not pass it.
     """
     out = load_prompt_template()
     for needle, value in (
         ("{{PROJECT_SLUG}}", project_slug or "unknown"),
         ("{{ROLLING_BUFFER}}", rolling_buffer or "(empty)"),
         ("{{LIBRARY_SNAPSHOT}}", library_snapshot or "(empty)"),
+        ("{{REPAIR_TASKS}}", repair_tasks or _NO_REPAIR_TASKS),
         ("{{APPLIES_WHEN_TABLE}}", applies_when_table or "(empty)"),
         ("{{ACTION_TYPES}}", describe_action_types_markdown()),
         ("{{RESPONSE_SHAPE}}", describe_librarian_response_shape()),
