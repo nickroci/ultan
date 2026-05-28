@@ -249,40 +249,70 @@ def test_embedding_search_filters_noise_floor(tmp_path: Path, monkeypatch) -> No
     assert "good.md" in str(out[0][0])
 
 
-# ── _rrf_merge ───────────────────────────────────────────────────────
+# ── _is_readme ───────────────────────────────────────────────────────
 
 
-def test_rrf_merge_handles_empty_inputs() -> None:
-    assert priming._rrf_merge([], k_top=3) == []
-    assert priming._rrf_merge([[]], k_top=3) == []
-    # Lone non-empty list — same items come back, ordered.
-    rankings = [[(Path("a.md"), 1.0), (Path("b.md"), 0.5)]]
-    result = priming._rrf_merge(rankings, k_top=2)
-    assert len(result) == 2
-    assert result[0][0] == Path("a.md")
+def test_is_readme_matches_readme_files_case_insensitively() -> None:
+    assert priming._is_readme(Path("README.md"))
+    assert priming._is_readme(Path("projects/x/README.md"))
+    assert priming._is_readme(Path("docs/Readme.md"))
+    # Not READMEs.
+    assert not priming._is_readme(Path("projects/x/concepts/foo.md"))
+    assert not priming._is_readme(Path("global/readme-notes.md"))
 
 
-def test_rrf_merge_combines_two_rankings() -> None:
-    """A path that ranks 2nd in one list and 1st in another should beat
-    a path that's only top in one list."""
+# ── _weighted_merge ──────────────────────────────────────────────────
+
+
+def test_weighted_merge_handles_empty_inputs() -> None:
+    assert priming._weighted_merge([], [], k_top=3) == []
+
+
+def test_weighted_merge_single_lane_orders_by_that_lane() -> None:
+    """Empty embedding lane → pure BM25 order. This is the rare-token
+    degrade path: no semantic match, lexical carries the result."""
     a, b, c = Path("a.md"), Path("b.md"), Path("c.md")
-    rankings = [
-        [(a, 1.0), (b, 0.5), (c, 0.1)],
-        [(b, 1.0), (a, 0.5)],  # b is 1st here
-    ]
-    result = priming._rrf_merge(rankings, k_top=3)
-    paths = [p for p, _ in result]
-    # a and b both score: a = 1/(60+1)+1/(60+2); b = 1/(60+2)+1/(60+1) → tie
-    # Tie-break is stable on path string → a sorts before b.
-    assert set(paths[:2]) == {a, b}
+    result = priming._weighted_merge([(a, 12.0), (b, 6.0), (c, 3.0)], [], k_top=3)
+    assert [p for p, _ in result] == [a, b, c]
 
 
-# ── _hybrid_search lane fallbacks ────────────────────────────────────
+def test_weighted_merge_leans_lexical() -> None:
+    """A strong BM25-only hit beats a doc the (flat) embedding lane likes,
+    because lexical is weighted higher and BM25 magnitude is preserved."""
+    strong_bm25, emb_fav = Path("strong.md"), Path("emb.md")
+    # strong_bm25: 0.6 * (18/18) = 0.60 ; emb_fav: 0.4 * (0.70-0.5)/0.5 = 0.16
+    result = priming._weighted_merge([(strong_bm25, 18.0)], [(emb_fav, 0.70)], k_top=2)
+    assert result[0][0] == strong_bm25
+
+
+def test_weighted_merge_combines_both_lanes() -> None:
+    """A doc present in both lanes can beat one strong in only one lane."""
+    both, bm_only = Path("both.md"), Path("bm.md")
+    # both: 0.6*(8/10) + 0.4*1.0 = 0.88 ; bm_only: 0.6*1.0 = 0.60
+    result = priming._weighted_merge([(bm_only, 10.0), (both, 8.0)], [(both, 1.0)], k_top=2)
+    assert result[0][0] == both
+
+
+# ── _hybrid_search lane fallbacks + README exclusion ─────────────────
 
 
 def test_hybrid_search_returns_empty_when_both_lanes_empty(tmp_path: Path) -> None:
     """No library / no hits in either lane → []."""
     assert priming._hybrid_search(tmp_path / "missing", "anything", k=5) == []
+
+
+def test_hybrid_search_excludes_readmes(tmp_path: Path, monkeypatch) -> None:
+    """READMEs from either lane are dropped before fusion/rerank — they're
+    navigation, and dominate the embedding lane on vague queries."""
+    readme = tmp_path / "knowledge" / "global" / "README.md"
+    real = tmp_path / "knowledge" / "global" / "x" / "use-uv.md"
+    monkeypatch.setattr(priming, "_bm25_search", lambda *a, **k: [(readme, 10.0), (real, 8.0)])
+    monkeypatch.setattr(priming, "_embedding_search", lambda *a, **k: [(readme, 0.9)])
+    # Pass-through rerank so we observe the fused candidate set directly.
+    monkeypatch.setattr(priming, "_rerank_candidates", lambda q, cands, k: cands[:k])
+    paths = [p for p, _ in priming._hybrid_search(tmp_path, "anything", k=5)]
+    assert readme not in paths
+    assert real in paths
 
 
 # ── _render_bullet edge cases ────────────────────────────────────────

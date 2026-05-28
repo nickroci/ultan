@@ -251,7 +251,30 @@ def _collect_strings(obj: object) -> List[str]:
     return out
 
 
-# ── Hybrid retrieval (BM25 + semantic embeddings via RRF) ────────────
+# ── Hybrid retrieval (BM25 + semantic embeddings, weighted fusion) ───
+
+# Minimum cosine for an embedding hit to count as a real semantic match.
+# Calibrated for nomic-embed-text-v1.5 — its cosine distribution sits
+# noticeably higher than older models (unrelated ~0.40-0.50, genuine
+# paraphrase matches ~0.65+). A floor at 0.50 separates the populations:
+# nonsense queries against unrelated entries fall under it (so gibberish
+# in == gibberish-free out, the "no real match clears stale priming"
+# semantic), while real paraphrase matches comfortably clear it. Re-tune
+# if the embedder swaps again — see test_search_returns_empty_for_unrelated_query
+# in tools/search for the empirical handle.
+EMBEDDING_NOISE_FLOOR = 0.50
+
+
+def _is_readme(path: Path) -> bool:
+    """True for folder-overview README files.
+
+    READMEs are navigation/overview text, not stored lessons. They're
+    generic enough to act as "universal donors" in the embedding lane — a
+    vague or proper-noun query matches their overview text more strongly
+    than any specific entry — so they crowd real lessons out of priming.
+    Excluded from retrieval candidates entirely (see ``_hybrid_search``).
+    """
+    return path.name.lower() == "readme.md"
 
 
 def _bm25_search(
@@ -321,44 +344,67 @@ def _embedding_search(
         log.exception("priming: embedding search raised")
         return []
 
-    # Filter out very weak semantic matches before they reach RRF.
-    # Calibrated for nomic-embed-text-v1.5 — its cosine distribution
-    # sits noticeably higher than older models (unrelated ~0.40-0.50,
-    # genuine paraphrase matches ~0.65+). A floor at 0.50 separates the
-    # populations: nonsense queries against unrelated entries fall under
-    # it (so gibberish in == gibberish-free out, the "no real match
-    # clears stale priming" semantic), while real paraphrase matches
-    # comfortably clear it. Re-tune if the embedder swaps again — see
-    # test_search_returns_empty_for_unrelated_query in tools/search for
-    # the empirical handle.
-    EMBEDDING_NOISE_FLOOR = 0.50
+    # Filter out very weak semantic matches (see EMBEDDING_NOISE_FLOOR).
     return [(Path(h.path), float(h.score)) for h in hits if float(h.score) >= EMBEDDING_NOISE_FLOOR]
 
 
-def _rrf_merge(
-    rankings: List[List[Tuple[Path, float]]],
+# Fusion weights. Lexical-leaning on purpose: BM25 carries rare-token /
+# proper-noun matches (high-IDF terms the embedder has no representation
+# for — e.g. a coined project name), while the embedding lane adds
+# paraphrase recall. 0.6 / 0.4 favours lexical without silencing
+# semantics. Rationale + measurements: a contentless or proper-noun query
+# leaves the embedding lane near-flat (cosines clustered in a narrow band,
+# no discrimination), so a rank-only fusion let that flat lane out-vote a
+# strong, specific BM25 hit. Weighting by normalised magnitude lets the
+# confident lane win.
+_FUSION_W_BM25 = 0.6
+_FUSION_W_EMB = 0.4
+
+
+def _weighted_merge(
+    bm25_hits: List[Tuple[Path, float]],
+    emb_hits: List[Tuple[Path, float]],
     *,
     k_top: int,
-    rrf_k: int = 60,
+    w_bm25: float = _FUSION_W_BM25,
+    w_emb: float = _FUSION_W_EMB,
 ) -> List[Tuple[Path, float]]:
-    """Reciprocal Rank Fusion across multiple ranked lists.
+    """Convex score fusion of the BM25 and embedding lanes, leaning lexical.
 
-    For each path appearing in any input ranking, score = sum over
-    rankings of ``1 / (rrf_k + rank_in_that_ranking)``. The constant
-    ``rrf_k`` dampens the contribution from low ranks; 60 is the value
-    from the original RRF paper (Cormack et al. '09).
+    Replaces rank-only RRF. RRF discards score *magnitude*, so a strong
+    high-IDF BM25 hit (a rare token the embedder can't place) was flattened
+    to "just rank N" and out-voted by a flat embedding lane. Here each lane
+    is normalised to ``[0, 1]`` and combined ``w_bm25 / w_emb``.
 
-    The RRF score is rank-based, not magnitude-based, so it's robust
-    against BM25 and cosine-similarity living in different score ranges.
-    Returns the top ``k_top`` paths with their RRF scores.
+    Normalisation is fixed-reference, NOT per-query min-max — min-max
+    amplifies a flat lane into full-range noise, and the embedding lane's
+    cosines cluster in a narrow band on this corpus:
+
+    - BM25: divided by the batch max (BM25 has no fixed ceiling).
+    - Embeddings: ``(cos - floor) / (1 - floor)`` against
+      :data:`EMBEDDING_NOISE_FLOOR` — hits are already floored there, so
+      this maps ``[floor, 1] -> [0, 1]``.
+
+    When a lane is empty its term drops out, so a query with no semantic
+    matches above the floor degrades to pure lexical order — exactly what
+    we want for rare-token / proper-noun queries. Returns the top
+    ``k_top`` ``(path, fused_score)`` pairs, descending, stable on tie.
     """
-    rrf_scores: Dict[Path, float] = {}
-    for ranking in rankings:
-        if not ranking:
-            continue
-        for rank, (path, _score) in enumerate(ranking):
-            rrf_scores[path] = rrf_scores.get(path, 0.0) + 1.0 / (rrf_k + rank + 1)
-    ordered = sorted(rrf_scores.items(), key=lambda kv: (-kv[1], str(kv[0])))
+    bm25_norm: Dict[Path, float] = {}
+    if bm25_hits:
+        max_bm25 = max(s for _, s in bm25_hits)
+        if max_bm25 > 0:
+            bm25_norm = {p: s / max_bm25 for p, s in bm25_hits}
+
+    span = 1.0 - EMBEDDING_NOISE_FLOOR
+    emb_norm: Dict[Path, float] = {}
+    if emb_hits and span > 0:
+        emb_norm = {p: max(0.0, min(1.0, (s - EMBEDDING_NOISE_FLOOR) / span)) for p, s in emb_hits}
+
+    fused: Dict[Path, float] = {}
+    for path in set(bm25_norm) | set(emb_norm):
+        fused[path] = w_bm25 * bm25_norm.get(path, 0.0) + w_emb * emb_norm.get(path, 0.0)
+    ordered = sorted(fused.items(), key=lambda kv: (-kv[1], str(kv[0])))
     return ordered[:k_top]
 
 
@@ -418,23 +464,25 @@ def _hybrid_search(
     *,
     k: int,
 ) -> List[Tuple[Path, float]]:
-    """Run BM25 + embedding search, fuse with RRF, then cross-encoder rerank.
+    """Run BM25 + embedding search, fuse by weighted score, then rerank.
 
     Three-stage retrieval, low precision → high precision:
 
-    1. **Recall**: BM25 and embedding lanes each pull ``k * 4`` candidates.
-       BM25 catches exact-token matches; embeddings catch paraphrase.
-    2. **Fusion**: RRF merges the two ranked lists into ``k * 4``
-       topically-relevant candidates (rank-based, robust to score scale
-       differences between BM25 and cosine).
+    1. **Recall**: BM25 and embedding lanes each pull ``2 * k`` candidates.
+       BM25 catches exact-token / rare-term matches; embeddings catch
+       paraphrase. README files are dropped here (see :func:`_is_readme`):
+       they're navigation, and their generic overview text dominates the
+       embedding lane for vague queries.
+    2. **Fusion**: :func:`_weighted_merge` combines the lanes by normalised
+       score, leaning lexical, so a confident BM25 hit on a rare token
+       isn't out-voted by a flat embedding lane (rank-only RRF was).
     3. **Rerank**: a cross-encoder co-attends over each ``(query, body)``
        pair and scores actual applicability — orthogonal signal to the
        overlap-based lanes upstream. Returns the top ``k`` reranked.
 
-    Graceful degradation: if the embedding lane is unavailable, we
-    fall back to BM25-only feed into the reranker. If the reranker is
-    unavailable, we fall back to the RRF order verbatim. The hot path
-    must keep working when any single component breaks.
+    Graceful degradation: an empty lane simply drops out of the weighted
+    merge. If the reranker is unavailable, we fall back to the fused order
+    verbatim. The hot path must keep working when any component breaks.
     """
     # Pull 2× k from each lane. Wider over-fetch (e.g. 4×) would give
     # the reranker more variety, but cross-encoder predict on MPS scales
@@ -443,30 +491,30 @@ def _hybrid_search(
     # the rerank stage alone overruns the 200ms hook budget. Stick to 2×
     # so end-to-end fits.
     per_lane_k = max(k * 2, k + 5)
-    bm25_hits = _bm25_search(knowledge_dir, query, k=per_lane_k)
-    emb_hits = _embedding_search(knowledge_dir, query, k=per_lane_k)
+    bm25_hits = [
+        h for h in _bm25_search(knowledge_dir, query, k=per_lane_k) if not _is_readme(h[0])
+    ]
+    emb_hits = [
+        h for h in _embedding_search(knowledge_dir, query, k=per_lane_k) if not _is_readme(h[0])
+    ]
     if not bm25_hits and not emb_hits:
         return []
 
-    if not emb_hits:
-        fused = bm25_hits
-    elif not bm25_hits:
-        fused = emb_hits
-    else:
-        fused = _rrf_merge([bm25_hits, emb_hits], k_top=per_lane_k)
-
+    fused = _weighted_merge(bm25_hits, emb_hits, k_top=per_lane_k)
     return _rerank_candidates(query, fused, k=k)
 
 
-# Scope bonuses (and one penalty) are calibrated against the RRF top-rank
-# score (~0.016 for rank 1, ~0.033 with both lanes hitting the top).
-# Current-project +0.020 is roughly a 4-rank bump; global +0.005 is roughly
-# a 1-rank bump; cross-project entries get a small negative penalty so
-# they only surface when nothing scoped beats them (the agent's complaint:
-# vol-predictor entries surfacing during agent-mem work is noise). The
-# penalty is gentle — a strong topical match from another project can
-# still overcome it — but it kills the steady drizzle of cross-context
-# bullets that dominated turns.
+# Scope bonuses (and one penalty) nudge the ranked score in
+# ``_boost_with_reinforcement``: prefer the current project, then global,
+# and gently penalise other projects so cross-context entries only surface
+# when nothing scoped beats them (the agent's complaint: vol-predictor
+# entries surfacing during agent-mem work is noise).
+#
+# NOTE: these magnitudes (±0.01-0.02) are small relative to the rerank
+# logits (~ -3..+10) and the reinforcement term (reinforced * 0.5) they're
+# added to, so on the post-rerank scale the scope penalty is close to a
+# no-op. Re-calibrating the boost formula's three terms onto a common
+# scale is tracked separately — out of scope for the fusion change.
 _SCOPE_BONUS_CURRENT = 0.020
 _SCOPE_BONUS_GLOBAL = 0.005
 _SCOPE_PENALTY_CROSS_PROJECT = -0.010
