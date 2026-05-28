@@ -1177,3 +1177,162 @@ def reconcile_readmes(knowledge_dir: Path) -> List[str]:
                 log.warning("could not write %s: %s", readme, e)
 
     return changes
+
+
+# ── Deterministic broken-wikilink repair (post-write safety net) ──────
+#
+# ``check_invariants`` only WARNS about broken wikilinks. A hallucinated
+# phantom index.md row (an entry the Scholar referenced but never wrote)
+# would re-trip that warning on every single run forever — observed 47×
+# for one phantom ``projects/some-fake-project/...`` row.
+#
+# The pre-write guard in ``llm._make_path_guard`` (check_wikilinks=True)
+# only inspects the Scholar's PROSPECTIVE Write/Edit content; it never
+# touches links already sitting on disk that the Scholar doesn't happen
+# to rewrite this pass — which is exactly the phantom-row case. This pass
+# closes that gap: after the Scholar finishes, walk the tree and repair
+# broken links in place. Integrity-first — we'd rather remove a known-
+# bogus phantom than leave the graph broken.
+
+
+def _resolve_broken_link_leaf(link: str, knowledge_dir_path: Path) -> str | None:
+    """If ``link``'s final path segment matches exactly one existing entry
+    in the tree, return that entry's canonical knowledge-root-relative
+    wikilink target (no ``.md``). Returns ``None`` when there are zero or
+    multiple matches (ambiguous — don't guess) or the leaf already equals
+    the link (no move to make)."""
+    leaf = link.rsplit("/", 1)[-1]
+    if leaf.endswith(".md"):
+        leaf = leaf[:-3]
+    if not leaf:
+        return None
+    matches = [m for m in knowledge_dir_path.rglob(f"{leaf}.md") if "_archive" not in m.parts]
+    if len(matches) != 1:
+        return None
+    canonical = matches[0].relative_to(knowledge_dir_path).with_suffix("").as_posix()
+    return canonical if canonical != link else None
+
+
+def _neutralise_wikilink(text: str, raw: str, display: str) -> str:
+    """Replace the literal ``raw`` ``[[…]]`` token with ``display`` plain
+    text wherever it appears in ``text``. Surrounding content is left
+    untouched — we strip only the broken navigation edge, never the
+    sentence around it."""
+    return text.replace(raw, display)
+
+
+def _repair_index_rows(text: str, broken_targets: set[str]) -> tuple[str, int]:
+    """Drop every line of an index.md whose only role is to catalog a
+    now-broken entry. A catalog row is a markdown table row (starts with
+    ``|``) that contains a broken wikilink. Returns ``(new_text, removed)``.
+
+    Non-row occurrences (e.g. prose in the index header) are left for the
+    body-link path so we never delete narrative lines wholesale."""
+    if not broken_targets:
+        return text, 0
+    kept: List[str] = []
+    removed = 0
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if stripped.startswith("|") and any(f"[[{t}" in line for t in broken_targets):
+            removed += 1
+            continue
+        kept.append(line)
+    return ("".join(kept), removed) if removed else (text, 0)
+
+
+def _broken_links_in(
+    text: str, md: Path, knowledge_dir_path: Path
+) -> List[markdown_utils.WikilinkHit]:
+    """Return the prose wikilinks in ``text`` that fail to resolve."""
+    out: List[markdown_utils.WikilinkHit] = []
+    for hit in markdown_utils.extract_wikilinks(text):
+        if hit.target and not _wikilink_resolves(hit.target, md, knowledge_dir_path):
+            out.append(hit)
+    return out
+
+
+def _repair_body_links(
+    text: str,
+    broken: Sequence["markdown_utils.WikilinkHit"],
+    knowledge_dir_path: Path,
+) -> tuple[str, List[str]]:
+    """Best-effort repair of broken wikilinks in an entry/README body.
+
+    Each broken link is either resolved to a unique existing entry (the
+    link is rewritten, alias preserved) or — when unresolvable —
+    neutralised to plain text so the broken edge is removed without
+    destroying the surrounding prose. Returns ``(new_text, notes)``."""
+    notes: List[str] = []
+    for hit in broken:
+        resolved = _resolve_broken_link_leaf(hit.target, knowledge_dir_path)
+        if resolved is not None:
+            alias = f"|{hit.alias}" if hit.alias else ""
+            text = text.replace(hit.raw, f"[[{resolved}{alias}]]")
+            notes.append(f"rewrote [[{hit.target}]] → [[{resolved}]]")
+        else:
+            display = hit.alias if hit.alias else hit.target.rsplit("/", 1)[-1]
+            text = _neutralise_wikilink(text, hit.raw, display)
+            notes.append(f"neutralised broken [[{hit.target}]] → {display!r}")
+    return text, notes
+
+
+def _repair_one_file(md: Path, text: str, knowledge_dir_path: Path) -> tuple[str, List[str]]:
+    """Repair broken wikilinks in a single file's ``text``. Returns
+    ``(new_text, change_notes)``; ``new_text == text`` when nothing was
+    broken. Splits index-row removal from body-link repair."""
+    broken = _broken_links_in(text, md, knowledge_dir_path)
+    if not broken:
+        return text, []
+    rel = md.relative_to(knowledge_dir_path)
+    changes: List[str] = []
+    new_text = text
+    if md.name == "index.md":
+        new_text, removed = _repair_index_rows(new_text, {h.target for h in broken})
+        if removed:
+            changes.append(f"removed {removed} phantom row(s) from {rel}")
+        # Re-scan: links that weren't catalog rows still need body repair.
+        broken = _broken_links_in(new_text, md, knowledge_dir_path)
+    if broken:
+        new_text, notes = _repair_body_links(new_text, broken, knowledge_dir_path)
+        changes.extend(f"{rel}: {n}" for n in notes)
+    return new_text, changes
+
+
+def repair_broken_wikilinks(knowledge_dir_path: Path) -> List[str]:
+    """Best-effort, in-place repair of broken wikilinks across the tree.
+
+    Two cases, integrity-first:
+      - An ``index.md`` catalog row pointing at a non-existent entry → the
+        whole phantom row is removed (the entry never existed; the row is
+        pure noise that re-trips the broken-wikilink invariant forever).
+      - A broken wikilink in any other body → resolve to a unique existing
+        entry by leaf-name match and rewrite (alias preserved); if
+        unresolvable, neutralise the link to plain text without touching
+        the surrounding content.
+
+    Skips ``log.md`` (audit trail; quoted paths are not navigation) and
+    ``_archive`` subtrees. Returns a list of human-readable change
+    messages; empty when the graph was already intact. Idempotent.
+    """
+    if not knowledge_dir_path.exists():
+        return []
+    changes: List[str] = []
+    _, all_md_files = _collect_md_files(knowledge_dir_path)
+    for md in all_md_files:
+        if md.name == "log.md":
+            continue
+        try:
+            text = md.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        new_text, file_changes = _repair_one_file(md, text, knowledge_dir_path)
+        if new_text == text:
+            continue
+        try:
+            md.write_text(new_text, encoding="utf-8")
+        except OSError as e:
+            log.warning("could not write repaired %s: %s", md, e)
+            continue
+        changes.extend(file_changes)
+    return changes

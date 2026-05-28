@@ -765,3 +765,178 @@ def test_build_prompt_includes_no_literal_secrets_invariant():
     assert "contains-secret" in prompt
     for pattern in ("API key", "ghp_", "AKIA", "sk-", "BEGIN ... PRIVATE KEY"):
         assert pattern in prompt, f"secrets invariant missing pattern: {pattern!r}"
+
+
+# ── repair_broken_wikilinks (post-write self-healing) ─────────────────
+
+
+_INDEX_HEADER = (
+    "# Knowledge Index\n\n"
+    "| Article | Scope | Status | Conf | Summary | Applies-when | From | Updated |\n"
+    "|---|---|---|---|---|---|---|---|\n"
+)
+
+
+def _seed_repair_tree(tmp_path: Path) -> Path:
+    """A minimal, invariant-clean tree with one real entry, ready for the
+    repair tests to dirty with phantom/broken links."""
+    k = tmp_path / "knowledge"
+    (k / "global" / "python").mkdir(parents=True)
+    (k / "README.md").write_text("# Knowledge\n", encoding="utf-8")
+    (k / "global" / "README.md").write_text("# Global\n", encoding="utf-8")
+    (k / "global" / "python" / "README.md").write_text("# Python\n", encoding="utf-8")
+    (k / "global" / "python" / "use-uv.md").write_text(
+        _valid_frontmatter(id_="use-uv"),
+        encoding="utf-8",
+    )
+    return k
+
+
+def test_repair_removes_phantom_index_row(tmp_path: Path):
+    # Reproduces the live `some-fake-project` phantom: a catalog row in
+    # index.md that points at an entry which was never written.
+    k = _seed_repair_tree(tmp_path)
+    phantom = (
+        "| [[projects/some-fake-project/security/no-secrets-in-env-example]] "
+        "| project:some-fake-project | provisional | 0.85 "
+        "| Never put real secrets in env.example | editing env.example files "
+        "| session:hooktest-6AB94685 | 2026-05-19 |\n"
+    )
+    real_row = "| [[global/python/use-uv]] | global | provisional | 0.7 | uv | x | y | z |\n"
+    (k / "index.md").write_text(_INDEX_HEADER + real_row + phantom, encoding="utf-8")
+
+    # Pre-condition: the invariant fires on the phantom.
+    pre = scholar_prompt.check_invariants(k)
+    assert any("some-fake-project" in v for v in pre)
+
+    changes = scholar_prompt.repair_broken_wikilinks(k)
+    assert any("phantom row" in c for c in changes)
+
+    index_after = (k / "index.md").read_text(encoding="utf-8")
+    assert "some-fake-project" not in index_after  # phantom row gone
+    assert "[[global/python/use-uv]]" in index_after  # real row preserved
+    assert _INDEX_HEADER.splitlines()[0] in index_after  # header preserved
+
+    # Post-condition: broken-wikilink violations drop to zero.
+    post = scholar_prompt.check_invariants(k)
+    assert not any("broken wikilink" in v for v in post)
+
+
+def test_repair_resolves_body_link_by_unique_leaf(tmp_path: Path):
+    # A broken wikilink in an entry body whose leaf matches exactly one
+    # existing entry is rewritten to that entry's canonical path.
+    k = _seed_repair_tree(tmp_path)
+    entry = k / "global" / "python" / "linked.md"
+    entry.write_text(
+        _valid_frontmatter(id_="linked") + "\nSee [[global/wrongdir/use-uv]] for details.\n",
+        encoding="utf-8",
+    )
+    changes = scholar_prompt.repair_broken_wikilinks(k)
+    assert any("rewrote" in c and "use-uv" in c for c in changes)
+    body = entry.read_text(encoding="utf-8")
+    assert "[[global/python/use-uv]]" in body
+    assert "[[global/wrongdir/use-uv]]" not in body
+    assert not any("broken wikilink" in v for v in scholar_prompt.check_invariants(k))
+
+
+def test_repair_neutralises_unresolvable_body_link(tmp_path: Path):
+    # A broken body link with no unique leaf match is neutralised to plain
+    # text — the broken edge goes away but surrounding prose survives.
+    k = _seed_repair_tree(tmp_path)
+    entry = k / "global" / "python" / "narr.md"
+    entry.write_text(
+        _valid_frontmatter(id_="narr")
+        + "\nThis references [[global/ghost/never-existed]] in a sentence.\n",
+        encoding="utf-8",
+    )
+    changes = scholar_prompt.repair_broken_wikilinks(k)
+    assert any("neutralised" in c for c in changes)
+    body = entry.read_text(encoding="utf-8")
+    assert "[[global/ghost/never-existed]]" not in body
+    # Surrounding prose preserved; leaf name kept as readable text.
+    assert "in a sentence." in body
+    assert "never-existed" in body
+    assert not any("broken wikilink" in v for v in scholar_prompt.check_invariants(k))
+
+
+def test_repair_neutralise_preserves_alias_text(tmp_path: Path):
+    k = _seed_repair_tree(tmp_path)
+    entry = k / "global" / "python" / "alias.md"
+    entry.write_text(
+        _valid_frontmatter(id_="alias") + "\nSee [[global/ghost/gone|the old guide]] now.\n",
+        encoding="utf-8",
+    )
+    scholar_prompt.repair_broken_wikilinks(k)
+    body = entry.read_text(encoding="utf-8")
+    assert "the old guide" in body
+    assert "[[" not in body.split("# title", 1)[-1]
+
+
+def test_repair_is_idempotent_and_noop_when_clean(tmp_path: Path):
+    k = _seed_repair_tree(tmp_path)
+    real_row = "| [[global/python/use-uv]] | global | provisional | 0.7 | uv | x | y | z |\n"
+    (k / "index.md").write_text(_INDEX_HEADER + real_row, encoding="utf-8")
+    # Clean tree → no changes.
+    assert scholar_prompt.repair_broken_wikilinks(k) == []
+    # Add a phantom, repair once, then a second pass is a no-op.
+    phantom = "| [[projects/x/y/ghost]] | project:x | provisional | 0.5 | g | a | b | c |\n"
+    (k / "index.md").write_text(_INDEX_HEADER + real_row + phantom, encoding="utf-8")
+    first = scholar_prompt.repair_broken_wikilinks(k)
+    assert first
+    assert scholar_prompt.repair_broken_wikilinks(k) == []
+
+
+def test_repair_missing_dir_returns_empty(tmp_path: Path):
+    assert scholar_prompt.repair_broken_wikilinks(tmp_path / "nope") == []
+
+
+def test_repair_index_prose_link_neutralised_not_row_deleted(tmp_path: Path):
+    # A broken link in index.md PROSE (not a table row) must be neutralised
+    # by the body path, never trigger whole-line deletion of narrative.
+    k = _seed_repair_tree(tmp_path)
+    (k / "index.md").write_text(
+        "# Knowledge Index\n\nSee also [[global/ghost/missing]] for context.\n\n"
+        "| Article | Scope |\n|---|---|\n"
+        "| [[global/python/use-uv]] | global |\n",
+        encoding="utf-8",
+    )
+    changes = scholar_prompt.repair_broken_wikilinks(k)
+    assert any("neutralised" in c for c in changes)
+    index_after = (k / "index.md").read_text(encoding="utf-8")
+    assert "See also" in index_after  # prose line survived
+    assert "[[global/ghost/missing]]" not in index_after
+    assert "[[global/python/use-uv]]" in index_after  # real row intact
+    assert not any("broken wikilink" in v for v in scholar_prompt.check_invariants(k))
+
+
+def test_repair_leaf_resolver_ambiguous_returns_none(tmp_path: Path):
+    # Two entries share the same leaf — the resolver must NOT guess, so the
+    # broken link is neutralised rather than mis-rewritten.
+    k = _seed_repair_tree(tmp_path)
+    (k / "global" / "git").mkdir(parents=True)
+    (k / "global" / "git" / "README.md").write_text("# Git\n", encoding="utf-8")
+    (k / "global" / "git" / "use-uv.md").write_text(
+        _valid_frontmatter(id_="use-uv"), encoding="utf-8"
+    )
+    entry = k / "global" / "python" / "amb.md"
+    entry.write_text(
+        _valid_frontmatter(id_="amb") + "\nLink to [[global/nowhere/use-uv]].\n",
+        encoding="utf-8",
+    )
+    changes = scholar_prompt.repair_broken_wikilinks(k)
+    # Ambiguous leaf → neutralised, not rewritten.
+    assert any("neutralised" in c and "amb.md" in c for c in changes)
+    body = entry.read_text(encoding="utf-8")
+    assert "[[global/nowhere/use-uv]]" not in body
+
+
+def test_repair_skips_archive_and_log(tmp_path: Path):
+    k = _seed_repair_tree(tmp_path)
+    # log.md may legitimately quote dead paths — must not be rewritten.
+    (k / "log.md").write_text("see [[global/ghost/dead]] (archived action)\n", encoding="utf-8")
+    # _archive links are intentional and resolve as valid.
+    (k / "_archive").mkdir()
+    (k / "_archive" / "old.md").write_text("[[global/ghost/dead]]\n", encoding="utf-8")
+    changes = scholar_prompt.repair_broken_wikilinks(k)
+    assert changes == []
+    assert "[[global/ghost/dead]]" in (k / "log.md").read_text(encoding="utf-8")

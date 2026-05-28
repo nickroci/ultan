@@ -182,9 +182,28 @@ def _reconcile_readmes_safe(record: runs.InvocationRecord) -> None:
         log.exception("scholar.review: README reconciliation raised")
 
 
+def _repair_wikilinks_safe(record: runs.InvocationRecord) -> None:
+    """Deterministic broken-wikilink repair. Removes phantom index.md rows
+    and resolves/neutralises broken body links the Scholar left behind.
+
+    Runs BEFORE the invariants check so the safety net can confirm the
+    repair actually drove broken-wikilink violations down. Integrity-first
+    and idempotent (see scholar_prompt.repair_broken_wikilinks); swallows
+    + logs any error so it can never break the review pipeline."""
+    try:
+        repaired = scholar_prompt.repair_broken_wikilinks(knowledge_dir())
+        if repaired:
+            record.decisions["wikilinks_repaired"] = len(repaired)
+            for c in repaired:
+                log.info("scholar.review: wikilink repair: %s", c)
+    except Exception:
+        log.exception("scholar.review: wikilink repair raised")
+
+
 def _check_invariants_safe(record: runs.InvocationRecord) -> None:
     """Deterministic post-write invariants check. Safety net for anything
-    that survived both the Scholar's judgement and the reconciler."""
+    that survived the Scholar's judgement, the reconciler, and the
+    wikilink repair pass."""
     try:
         violations = scholar_prompt.check_invariants(knowledge_dir())
         if violations:
@@ -275,6 +294,7 @@ def review(packets: Sequence[Mapping[str, Any]]) -> None:
             _apply_parsed_response(parsed, record)
 
         _reconcile_readmes_safe(record)
+        _repair_wikilinks_safe(record)
         _refresh_priming_safe(packets, "main path")
         _check_invariants_safe(record)
         _maybe_run_decay_sweep_safe("main path")

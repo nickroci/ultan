@@ -302,6 +302,62 @@ def test_review_runs_invariants_check_after_sdk(monkeypatch, tmp_path):
     assert records[0].decisions.get("invariant_violations", 0) >= 1
 
 
+def test_review_repairs_phantom_index_row(monkeypatch, tmp_path):
+    """End-to-end: the review pipeline self-heals a phantom index.md row
+    (the live `some-fake-project` case) so no broken-wikilink violation
+    survives into the post-write invariants check."""
+    k = tmp_path / "knowledge"
+    (k / "global" / "python").mkdir(parents=True)
+    (k / "README.md").write_text("# Knowledge\n", encoding="utf-8")
+    (k / "global" / "README.md").write_text("# Global\n", encoding="utf-8")
+    (k / "global" / "python" / "README.md").write_text("# Python\n", encoding="utf-8")
+    (k / "global" / "python" / "use-uv.md").write_text(
+        "---\nid: use-uv\ntype: lesson\nscope: global\nstatus: provisional\n"
+        "confidence: 0.7\napplies-when: |\n  x\nkeywords: [a, b, c]\n"
+        'title: "use-uv"\ncreated: 2026-05-19\nupdated: 2026-05-19\n'
+        "fired: 0\nfired-helpful: 0\nsources:\n  - manual\n---\n\n# uv\n\nUse uv always for python.\n",
+        encoding="utf-8",
+    )
+    phantom = (
+        "| [[projects/some-fake-project/security/no-secrets-in-env-example]] "
+        "| project:some-fake-project | provisional | 0.85 | s | env.example | "
+        "session:hooktest-6AB94685 | 2026-05-19 |\n"
+    )
+    (k / "index.md").write_text(
+        "# Knowledge Index\n\n| Article | Scope |\n|---|---|\n"
+        "| [[global/python/use-uv]] | global |\n" + phantom,
+        encoding="utf-8",
+    )
+
+    canned = {"decisions": [], "interrupts_processed": []}
+    monkeypatch.setattr(
+        scholar,
+        "run_scholar_call",
+        _make_canned(json.dumps(canned), cost=0.01),
+    )
+
+    records: List[InvocationRecord] = []
+    orig = scholar.runs.InvocationRecord.finalise
+
+    def _spy(self):
+        records.append(self)
+        orig(self)
+
+    monkeypatch.setattr(scholar.runs.InvocationRecord, "finalise", _spy)
+
+    scholar.review(
+        [_packet("s1", proposals=[{"action": "archive_entry", "path": "x.md", "reasoning": "r"}])]
+    )
+
+    index_after = (k / "index.md").read_text(encoding="utf-8")
+    assert "some-fake-project" not in index_after  # phantom self-healed
+    assert "[[global/python/use-uv]]" in index_after  # real row survived
+    assert records[0].decisions.get("wikilinks_repaired", 0) >= 1
+    # The repair ran BEFORE the invariants check, so no broken-wikilink
+    # violation should remain on the audit row.
+    assert "invariant_violations" not in records[0].decisions
+
+
 def test_review_invariants_clean_does_not_log_violation(monkeypatch, tmp_path):
     """No violations → no ``invariant_violations`` key on the audit row."""
     k = tmp_path / "knowledge"
