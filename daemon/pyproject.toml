@@ -6,25 +6,30 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Nicholas Holden", email = "nicholas.holden@banqora.com" }]
-# Runtime deps: Claude Agent SDK for Librarian/Scholar calls, rank-bm25 for
-# dedup pre-computation (matches tools/search/bm25.py), pyyaml for parsing
-# entry frontmatter when extracting the applies-when table.
+# Runtime deps: Pydantic AI powers both curator agents; rank-bm25 for dedup
+# pre-computation (matches tools/search/bm25.py); pyyaml for parsing entry
+# frontmatter when extracting the applies-when table.
 #
 # We intentionally depend on agent-mem-search (the tools/search package) as
 # a path source so the daemon and CLI share one BM25 implementation. See
 # the [tool.uv.sources] block below.
 dependencies = [
-  "claude-agent-sdk>=0.1.29",
   "rank-bm25>=0.2.2",
   "pyyaml>=6.0",
   "pydantic>=2.6",
-  "json-repair>=0.25",
   "agent-mem-search",
   "opentelemetry-api>=1.42.0",
   # Markdown AST parsing for wikilink validation (skip code spans / code
-  # fences natively). Don't rely on the transitive copy that ships with
-  # claude-agent-sdk via rich — pin our own.
+  # fences natively).
   "markdown-it-py>=4.0",
+  # Pydantic AI powers both curator agents (Librarian + Scholar): typed
+  # structured output (LibrarianProposal / ScholarDecisions), output
+  # validators, and ModelRetry-driven self-correction. The [anthropic]
+  # extra wires the Anthropic provider (anthropic:claude-*). 1.99+ is
+  # required for compatibility with anthropic>=0.97 (the
+  # UserLocation→BetaUserLocationParam rename); older pydantic-ai pins
+  # import a symbol that no longer exists.
+  "pydantic-ai-slim[anthropic]>=1.99",
 ]
 
 [project.scripts]

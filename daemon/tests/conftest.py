@@ -191,6 +191,31 @@ def build_library(
     return k
 
 
+def scholar_entry_body(id_: str, *, scope: str = "global", extra: str = "") -> str:
+    """A minimal valid entry body (frontmatter + short prose) for the
+    Scholar agent/executor tests. Shared here so the per-module test files
+    don't each copy the 13-line frontmatter template (duplicate-code gate)."""
+    return render_entry(
+        id_=id_,
+        title=id_,
+        applies_when="doing things",
+        keywords=["a", "b", "c"],
+        scope=scope,
+        body=f"A real body sentence.{extra}",
+    )
+
+
+def seed_scholar_tree(tmp_path: Path) -> Path:
+    """Build a minimal, invariant-clean tree (READMEs + one entry) under
+    ``tmp_path/knowledge`` for Scholar agent/executor tests."""
+    k = tmp_path / "knowledge"
+    write_entry(k / "README.md", "# Knowledge\n")
+    write_entry(k / "global" / "README.md", "# Global\n")
+    write_entry(k / "global" / "python" / "README.md", "# Python\n")
+    write_entry(k / "global" / "python" / "use-uv.md", scholar_entry_body("use-uv"))
+    return k
+
+
 @pytest.fixture
 def library_entry():
     """Factory fixture so tests can ask for entries on demand without

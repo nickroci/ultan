@@ -111,20 +111,6 @@ def configure(
         "transformers",
         "filelock",
         "markdown_it",
-        # claude-agent-sdk internals — at -v these emit a stream of
-        # "Waiting for first result", "Using bundled CLI", and per-message
-        # transport debug lines for every Librarian/Scholar call. The
-        # signal we actually care about (call started, finished, cost,
-        # parsed_ok) is logged separately by ``agent_mem_daemon.*``.
-        "claude_agent_sdk",
-        "claude_agent_sdk._internal",
-        "claude_agent_sdk._internal.query",
-        "claude_agent_sdk._internal.transport",
-        "claude_agent_sdk._internal.transport.subprocess_cli",
-        "mcp",
-        "mcp.server",
-        "mcp.server.lowlevel",
-        "mcp.server.lowlevel.server",
         "asyncio",
     )
     for name in _NOISY_LOGGERS:
