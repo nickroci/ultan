@@ -20,13 +20,14 @@ import logging
 import os
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 
 import yaml
 
-from . import _response_parser, markdown_utils
+from . import _response_parser, markdown_utils, repair_queue
 from ._schemas import ScholarReview
 from .paths import knowledge_dir, pending_nudges_path
 
@@ -105,6 +106,45 @@ uv", "managing python dependencies"]``). Optional but strongly preferred \
 phrase where paraphrasing would be redundant.
 
 Anything more substantial is a VETO. The lesson will recur in a future session.
+
+═══════════════════════════════════════════════════════════════════
+INTEGRITY-REPAIR PROPOSALS — VERIFY-AND-EXECUTE, do NOT judge for novelty
+═══════════════════════════════════════════════════════════════════
+
+A packet whose top-level ``repair_fingerprints`` field is present (a \
+non-empty list of ``[kind, file, target]`` triples) is an \
+**integrity-repair packet**: the daemon's deterministic post-write pass \
+found a library invariant it could not fix on its own (an unresolvable \
+wikilink, an over-cap directory, or an entry with bad/unparseable \
+frontmatter) and asked the Librarian to research and propose the fix. The \
+Librarian marks these proposals ``salience_signal: null`` and quotes the \
+repair task's ``file``/``target`` in its ``reasoning``.
+
+These proposals are **structural integrity fixes, NOT lessons**, so the \
+novelty / dedupe / "would I produce this unprompted" framing DOES NOT \
+APPLY to them. Your job for a repair proposal is to VERIFY-AND-EXECUTE:
+
+  - **Do NOT veto a repair proposal as "in-baseline knowledge", "not \
+novel", "duplicate", or "reinforces an existing entry."** Those reasons \
+are for session-derived lessons. A repair exists because the library is \
+already broken; declining it leaves the invariant violated and it will \
+just re-escalate on the next pass.
+  - **The SALIENCE DELIBERATION below is for lessons only — SKIP it \
+entirely for repair proposals.**
+  - **The SAME-PATH DEDUPE rule still applies** (two proposals must not \
+race on one path), but only against OTHER proposals in the batch — a \
+repair targeting a path is not a "duplicate" of itself.
+  - **Verify the fix is CORRECT, then execute it** via the normal recipe \
+for its action type (``update_entry`` / ``write_entry`` / ``split_folder`` \
+/ ``move_entry``). Confirm the fix actually resolves the named violation: \
+the rewritten wikilink resolves; the split leaves no destination over 5 \
+entries; the re-serialised frontmatter has every required field and a \
+scope that matches the path. VETO ONLY if the proposed fix is itself \
+wrong or would introduce a NEW invariant violation (e.g. a split that \
+still leaves a folder over-cap, frontmatter whose scope contradicts the \
+path) — then state the concrete defect, and the daemon re-escalates a \
+fresh attempt next pass. "Not novel" / "duplicate" are NEVER valid veto \
+reasons for a repair proposal.
 
 ═══════════════════════════════════════════════════════════════════
 HIERARCHY INVARIANTS — VETO any action that would violate these
@@ -205,7 +245,13 @@ pointing at it must keep resolving.
 SALIENCE DELIBERATION — apply BEFORE invariant checks
 ═══════════════════════════════════════════════════════════════════
 
-Each proposal carries a ``salience_signal`` from the Librarian. The \
+**This section is for session-derived LESSON proposals only. SKIP it \
+entirely for integrity-repair proposals** (those in a packet with a \
+non-empty ``repair_fingerprints`` field — see the INTEGRITY-REPAIR \
+PROPOSALS section above); a repair fix is verified-and-executed, never \
+judged for novelty.
+
+Each lesson proposal carries a ``salience_signal`` from the Librarian. The \
 Librarian is Sonnet-tier with a low bar; you are Opus-tier and must apply \
 a stricter check. For each proposal, ask the central question:
 
@@ -257,12 +303,15 @@ framing.
 increments the existing's confidence/reinforcement counter separately; you \
 don't need to write anything.
 
-  ``salience_signal: null`` (Librarian was unsure)
+  ``salience_signal: null`` (Librarian was unsure — and NOT a repair \
+proposal; repair proposals are also ``null`` but are handled above, not \
+here)
     Apply the central self-test directly. If you'd produce the advice \
 unprompted → veto. Otherwise → approve.
 
-This is the PRIMARY filter. Run it FIRST before invariant checks; \
-invariants are the safety net for proposals that passed the salience test.
+This is the PRIMARY filter for lessons. Run it FIRST before invariant \
+checks; invariants are the safety net for proposals that passed the \
+salience test. (Repair proposals bypass this filter entirely.)
 
 All paths are relative to ``knowledge/`` and resolved from your CURRENT \
 WORKING DIRECTORY. Never construct absolute paths — never type \
@@ -706,6 +755,41 @@ _REQUIRED_FRONTMATTER_FIELDS = (
 MAX_FLAT_DIR_ENTRIES = 5
 
 
+@dataclass(frozen=True)
+class InvariantViolation:
+    """One invariant violation, structured for both display and escalation.
+
+    ``message`` is the historic one-line human-readable string (what
+    :func:`check_invariants` returns and the audit/WARN log shows). The
+    optional ``repair_kind`` / ``file`` / ``target`` / ``context`` fields are
+    set only for violations the daemon escalates into the Librarian→Scholar
+    pipeline (over-cap dirs, bad frontmatter). When ``repair_kind`` is
+    ``None`` the violation is display-only — it's handled by another
+    deterministic pass (READMEs by the reconciler, wikilinks by
+    ``repair_broken_wikilinks``) or is not independently actionable
+    (scope/path, empty body — both ride along with their entry's
+    frontmatter task), so escalating it here would be redundant.
+    """
+
+    message: str
+    repair_kind: Optional[str] = None
+    file: str = ""
+    target: str = ""
+    context: str = ""
+
+    def to_repair_task(self) -> Optional[repair_queue.RepairTask]:
+        """Build the :class:`RepairTask` for this violation, or ``None`` when
+        it is display-only (``repair_kind is None``)."""
+        if self.repair_kind is None:
+            return None
+        return repair_queue.RepairTask(
+            kind=self.repair_kind,
+            file=self.file,
+            target=self.target,
+            context=self.context,
+        )
+
+
 def _collect_md_files(knowledge_dir_path: Path) -> tuple[List[Path], List[Path]]:
     """Walk the tree once and return ``(entry_files, all_md_files)``.
     Entries exclude README.md / index.md / log.md; ``all_md_files``
@@ -725,9 +809,12 @@ def _collect_md_files(knowledge_dir_path: Path) -> tuple[List[Path], List[Path]]
 def _check_readme_coverage(
     entry_files: List[Path],
     knowledge_dir_path: Path,
-) -> List[str]:
-    """Every directory that contains an entry must have a README.md."""
-    out: List[str] = []
+) -> List[InvariantViolation]:
+    """Every directory that contains an entry must have a README.md.
+
+    Display-only: the post-action reconciler creates missing READMEs
+    automatically, so there is no separate repair task to escalate."""
+    out: List[InvariantViolation] = []
     dirs_to_check: set[Path] = set()
     for md in entry_files:
         d = md.parent
@@ -741,24 +828,43 @@ def _check_readme_coverage(
             continue
         if not (d / "README.md").exists():
             rel = d.relative_to(knowledge_dir_path) if d != knowledge_dir_path else Path(".")
-            out.append(f"missing README.md in {rel}/")
+            out.append(InvariantViolation(message=f"missing README.md in {rel}/"))
     return out
 
 
 def _check_flat_dir_caps(
     entry_files: List[Path],
     knowledge_dir_path: Path,
-) -> List[str]:
-    """Per-directory entry count must be at or below MAX_FLAT_DIR_ENTRIES."""
-    out: List[str] = []
+) -> List[InvariantViolation]:
+    """Per-directory entry count must be at or below MAX_FLAT_DIR_ENTRIES.
+
+    Over-cap dirs ESCALATE (``overcap_dir``): the fingerprint targets the
+    directory, and the context lists the entries so the Librarian can
+    propose a ``split_folder`` / ``move_entry`` rebalance without re-walking
+    the tree."""
+    out: List[InvariantViolation] = []
     by_dir: Dict[Path, List[Path]] = {}
     for md in entry_files:
         by_dir.setdefault(md.parent, []).append(md)
     for d, mds in by_dir.items():
         if len(mds) > MAX_FLAT_DIR_ENTRIES:
             rel = d.relative_to(knowledge_dir_path) if d != knowledge_dir_path else Path(".")
+            rel_posix = rel.as_posix()
+            entry_rels = sorted(m.relative_to(knowledge_dir_path).as_posix() for m in mds)
             out.append(
-                f"directory {rel}/ has {len(mds)} entry .md files (max is {MAX_FLAT_DIR_ENTRIES})"
+                InvariantViolation(
+                    message=(
+                        f"directory {rel}/ has {len(mds)} entry .md files "
+                        f"(max is {MAX_FLAT_DIR_ENTRIES})"
+                    ),
+                    repair_kind=repair_queue.KIND_OVERCAP_DIR,
+                    file=rel_posix,
+                    target=rel_posix,
+                    context=(
+                        f"{len(mds)} entries in {rel_posix}/ (cap {MAX_FLAT_DIR_ENTRIES}): "
+                        + ", ".join(entry_rels)
+                    ),
+                )
             )
     return out
 
@@ -786,12 +892,18 @@ def _wikilink_resolves(link: str, md: Path, knowledge_dir_path: Path) -> bool:
 def _check_wikilinks(
     all_md_files: List[Path],
     knowledge_dir_path: Path,
-) -> List[str]:
+) -> List[InvariantViolation]:
     """Every wikilink resolves. We parse each file as markdown so that
     links inside code spans / fenced code blocks / YAML frontmatter are
     excluded — those were the source of historic false positives. Skip
-    log.md outright (audit trail; quoted paths are not navigation)."""
-    out: List[str] = []
+    log.md outright (audit trail; quoted paths are not navigation).
+
+    Display-only here: broken wikilinks escalate through the dedicated
+    deterministic pass (``repair_broken_wikilinks`` →
+    ``_escalate_unresolved_wikilink``), which runs BEFORE this check and
+    owns the link's in-flight marker. Escalating again here would
+    double-fingerprint the same issue."""
+    out: List[InvariantViolation] = []
     for md in all_md_files:
         if md.name == "log.md":
             continue
@@ -806,7 +918,7 @@ def _check_wikilinks(
             if _wikilink_resolves(link, md, knowledge_dir_path):
                 continue
             rel = md.relative_to(knowledge_dir_path)
-            out.append(f"broken wikilink in {rel}: [[{link}]]")
+            out.append(InvariantViolation(message=f"broken wikilink in {rel}: [[{link}]]"))
     return out
 
 
@@ -829,36 +941,94 @@ def _check_scope_path_agreement(rel: Path, scope: str) -> str | None:
     return None
 
 
+def _bad_frontmatter_violation(rel_posix: str, message: str) -> InvariantViolation:
+    """Build an escalating ``bad_frontmatter`` violation for an entry whose
+    frontmatter is missing, unparseable, or short the required fields. The
+    fingerprint targets the entry path so a single in-flight attempt covers
+    every frontmatter defect in that file at once."""
+    return InvariantViolation(
+        message=message,
+        repair_kind=repair_queue.KIND_BAD_FRONTMATTER,
+        file=rel_posix,
+        target=rel_posix,
+        context=message,
+    )
+
+
 def _check_entry_frontmatter(
     entry_files: List[Path],
     knowledge_dir_path: Path,
-) -> List[str]:
+) -> List[InvariantViolation]:
     """Each entry must have a parseable frontmatter block with the
     required fields, a non-trivial body, and a scope that matches its
-    path."""
-    out: List[str] = []
+    path.
+
+    A missing/unparseable/incomplete frontmatter block ESCALATES
+    (``bad_frontmatter``) so the Librarian can re-serialise valid
+    frontmatter. The scope/path and empty-body checks stay display-only —
+    re-serialising frontmatter wouldn't relocate a misfiled entry or invent
+    a body, and the entry's frontmatter task (if any) already carries the
+    in-flight marker for that file."""
+    out: List[InvariantViolation] = []
     for md in entry_files:
         try:
             text = md.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
         rel = md.relative_to(knowledge_dir_path)
+        rel_posix = rel.as_posix()
         fm = _parse_frontmatter(text)
         if not fm:
-            out.append(f"missing or unparseable frontmatter in {rel}")
+            out.append(
+                _bad_frontmatter_violation(
+                    rel_posix, f"missing or unparseable frontmatter in {rel}"
+                )
+            )
             continue
         missing = [f for f in _REQUIRED_FRONTMATTER_FIELDS if f not in fm]
         if missing:
-            out.append(f"missing frontmatter fields in {rel}: {', '.join(missing)}")
+            out.append(
+                _bad_frontmatter_violation(
+                    rel_posix,
+                    f"missing frontmatter fields in {rel}: {', '.join(missing)}",
+                )
+            )
 
         body = _strip_frontmatter(text).strip()
         if len(body) < 20:
-            out.append(f"entry body is empty or trivial in {rel}")
+            out.append(InvariantViolation(message=f"entry body is empty or trivial in {rel}"))
 
         scope = str(fm.get("scope", "")).strip()
         scope_violation = _check_scope_path_agreement(rel, scope)
         if scope_violation is not None:
-            out.append(scope_violation)
+            out.append(InvariantViolation(message=scope_violation))
+    return out
+
+
+def check_invariants_detailed(knowledge_dir_path: Path) -> List[InvariantViolation]:
+    """Walk the knowledge tree and return structured invariant violations.
+
+    Each :class:`InvariantViolation` carries the human-readable ``message``
+    plus — for the escalating kinds (over-cap dirs, bad frontmatter) — the
+    fields needed to build a :class:`repair_queue.RepairTask`. The Scholar's
+    escalation pass consumes this; :func:`check_invariants` projects it down
+    to the legacy ``List[str]`` for logging/tests.
+
+    Checks:
+      1. Every directory has a README.md (display-only — reconciler fixes).
+      2. No directory has >MAX_FLAT_DIR_ENTRIES entry .md files (escalates).
+      3. Every wikilink resolves (display-only — repair pass escalates).
+      4. Every entry's frontmatter has the required fields (escalates).
+    """
+    if not knowledge_dir_path.exists():
+        return []
+
+    entry_files, all_md_files = _collect_md_files(knowledge_dir_path)
+    out: List[InvariantViolation] = []
+    out.extend(_check_readme_coverage(entry_files, knowledge_dir_path))
+    out.extend(_check_flat_dir_caps(entry_files, knowledge_dir_path))
+    out.extend(_check_wikilinks(all_md_files, knowledge_dir_path))
+    out.extend(_check_entry_frontmatter(entry_files, knowledge_dir_path))
     return out
 
 
@@ -870,22 +1040,11 @@ def check_invariants(knowledge_dir_path: Path) -> List[str]:
     approved actions and logs WARN on each violation; this is the safety
     net for "the Scholar should have caught it" cases.
 
-    Checks:
-      1. Every directory has a README.md.
-      2. No directory has >MAX_FLAT_DIR_ENTRIES entry .md files.
-      3. Every wikilink resolves.
-      4. Every entry's frontmatter has the required fields.
+    Thin projection over :func:`check_invariants_detailed` — kept as the
+    stable string-list contract that the audit log and the test-suite
+    assert against.
     """
-    if not knowledge_dir_path.exists():
-        return []
-
-    entry_files, all_md_files = _collect_md_files(knowledge_dir_path)
-    out: List[str] = []
-    out.extend(_check_readme_coverage(entry_files, knowledge_dir_path))
-    out.extend(_check_flat_dir_caps(entry_files, knowledge_dir_path))
-    out.extend(_check_wikilinks(all_md_files, knowledge_dir_path))
-    out.extend(_check_entry_frontmatter(entry_files, knowledge_dir_path))
-    return out
+    return [v.message for v in check_invariants_detailed(knowledge_dir_path)]
 
 
 def _strip_frontmatter(text: str) -> str:

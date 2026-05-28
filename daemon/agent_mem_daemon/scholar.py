@@ -244,16 +244,55 @@ def _repair_wikilinks_safe(record: runs.InvocationRecord) -> None:
         log.exception("scholar.review: wikilink repair raised")
 
 
+def _escalate_invariant_violation(violation: scholar_prompt.InvariantViolation) -> None:
+    """Enqueue a repair task for one escalating invariant violation.
+
+    The SAME mechanism as ``_escalate_unresolved_wikilink``: build the
+    violation's :class:`repair_queue.RepairTask` and ``enqueue`` it. The
+    in-flight guard inside the queue collapses repeated detections of the
+    same fingerprint onto one attempt; there is no max-attempts cap, so a
+    still-unfixed violation re-escalates on the next pass once its marker is
+    released. Display-only violations (``repair_kind is None``) yield no
+    task and are skipped."""
+    task = violation.to_repair_task()
+    if task is None:
+        return
+    enqueued = repair_queue.get_queue().enqueue(task)
+    if enqueued:
+        log.info(
+            "scholar.review: escalated %s to Librarian (file=%s target=%s)",
+            task.kind,
+            task.file,
+            task.target,
+        )
+    else:
+        log.debug(
+            "scholar.review: %s already in-flight; skipping duplicate escalation "
+            "(file=%s target=%s)",
+            task.kind,
+            task.file,
+            task.target,
+        )
+
+
 def _check_invariants_safe(record: runs.InvocationRecord) -> None:
-    """Deterministic post-write invariants check. Safety net for anything
-    that survived the Scholar's judgement, the reconciler, and the
-    wikilink repair pass."""
+    """Deterministic post-write invariants check + escalation. Safety net
+    for anything that survived the Scholar's judgement, the reconciler, and
+    the wikilink repair pass.
+
+    Over-cap directories and bad/unparseable frontmatter are not
+    deterministically fixable, so each such violation is ESCALATED into the
+    Librarian→Scholar pipeline via the same repair queue + in-flight guard
+    that broken wikilinks use (``_escalate_invariant_violation``). The
+    violation is left in place on disk, so the next pass re-detects and
+    re-escalates it until the Scholar actually fixes it."""
     try:
-        violations = scholar_prompt.check_invariants(knowledge_dir())
+        violations = scholar_prompt.check_invariants_detailed(knowledge_dir())
         if violations:
             record.decisions["invariant_violations"] = len(violations)
             for v in violations:
-                log.warning("scholar.review: post-write violation: %s", v)
+                log.warning("scholar.review: post-write violation: %s", v.message)
+                _escalate_invariant_violation(v)
         else:
             log.debug("scholar.review: invariants clean")
     except Exception:

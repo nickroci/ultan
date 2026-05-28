@@ -460,6 +460,68 @@ def test_assemble_prompt_repair_tasks_defaults_to_sentinel():
     assert "{{" not in p
 
 
+def test_format_repair_tasks_renders_overcap_and_bad_frontmatter():
+    from agent_mem_daemon import repair_queue
+
+    tasks = [
+        repair_queue.RepairTask(
+            kind=repair_queue.KIND_OVERCAP_DIR,
+            file="global/python",
+            target="global/python",
+            context="6 entries in global/python/ (cap 5): a, b, c, d, e, f",
+        ),
+        repair_queue.RepairTask(
+            kind=repair_queue.KIND_BAD_FRONTMATTER,
+            file="global/python/x.md",
+            target="global/python/x.md",
+            context="missing frontmatter fields in global/python/x.md: keywords",
+        ),
+    ]
+    out = lp.format_repair_tasks(tasks)
+    assert "kind: overcap_dir" in out
+    assert "kind: bad_frontmatter" in out
+    assert "file: global/python" in out
+
+
+def test_prompt_template_dispatches_on_repair_kind():
+    # The INTEGRITY-REPAIR section must teach the Librarian all three kinds
+    # and the EXISTING action it should propose for each.
+    tmpl = lp.load_prompt_template()
+    assert "kind: broken_wikilink" in tmpl
+    assert "kind: overcap_dir" in tmpl
+    assert "kind: bad_frontmatter" in tmpl
+    # Over-cap → split_folder / move_entry rebalance.
+    assert "split_folder" in tmpl
+    assert "move_entry" in tmpl
+    # Bad frontmatter → update_entry that re-serialises valid frontmatter.
+    assert "re-serialises valid YAML" in tmpl
+    # Repairs are integrity fixes, not salience judgments.
+    assert "salience_signal: null" in tmpl
+
+
+def test_assemble_prompt_renders_overcap_task_block():
+    from agent_mem_daemon import repair_queue
+
+    tasks = [
+        repair_queue.RepairTask(
+            kind=repair_queue.KIND_OVERCAP_DIR,
+            file="global/python",
+            target="global/python",
+            context="6 entries in global/python/ (cap 5): a, b, c, d, e, f",
+        )
+    ]
+    p = lp.assemble_prompt(
+        project_slug="x",
+        rolling_buffer="(empty)",
+        library_snapshot="(empty)",
+        applies_when_table="(empty)",
+        repair_tasks=lp.format_repair_tasks(tasks),
+    )
+    assert "kind: overcap_dir" in p
+    assert "split_folder" in p
+    assert "{{" not in p
+
+
 # ── parse_librarian_json / normalise_packet ───────────────────────────
 
 
