@@ -24,13 +24,15 @@ Persistence:
 
 Threading:
   - Reads (``search``) are safe to call concurrently.
-  - Builds and saves are single-threaded; do not call ``build_index`` /
-    ``save_index`` from multiple threads against the same path.
+  - ``save_index`` is concurrency-safe (see ``bm25.save_pickled``): racing
+    saves to the same path each write a unique temp file then atomically
+    replace, so they never interleave into a corrupt file. Last writer wins.
+    ``build_index`` has no shared state, so parallel rebuilds are wasteful
+    (duplicated encode work) but correct.
 """
 
 from __future__ import annotations
 
-import pickle
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,7 +48,7 @@ from sentence_transformers import SentenceTransformer
 from _device import select_device
 from bm25 import build_snippet as _build_snippet
 from bm25 import frontmatter_search_text as _frontmatter_search_text
-from bm25 import is_stale, load_pickled
+from bm25 import is_stale, load_pickled, save_pickled
 from bm25 import iter_markdown as _iter_markdown
 from bm25 import strip_and_extract_frontmatter as _strip_and_extract_frontmatter
 
@@ -324,17 +326,14 @@ def build_index(
 
 
 def save_index(index: EmbeddingIndex, path: Path | None = None) -> Path:
-    """Pickle the index. Returns the path written.
+    """Pickle the index atomically. Returns the path written.
 
-    Atomic-ish: write to a temp sibling then rename.
+    Delegates to ``bm25.save_pickled`` for a concurrency-safe write (unique
+    temp file per writer + atomic ``os.replace``), so racing rebuilds from the
+    daemon's parallel Librarian threads can't interleave into a corrupt index.
     """
     target = path or _default_index_path(index.knowledge_dir)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_suffix(target.suffix + ".tmp")
-    with tmp.open("wb") as f:
-        pickle.dump(index, f, protocol=pickle.HIGHEST_PROTOCOL)
-    tmp.replace(target)
-    return target
+    return save_pickled(index, target)
 
 
 def load_or_build(
