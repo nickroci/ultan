@@ -65,26 +65,16 @@ class LLMTimeout(RuntimeError):
 
 
 def _resolve_wikilink(link: str, knowledge_root: Path, file_being_written: Path) -> bool:
-    """Same resolution rules as scholar_prompt.check_invariants. Returns
-    True if the link resolves to an existing file under knowledge_root.
-    """
-    if link.startswith("_archive/") or "/_archive/" in link:
-        return True
-    if link.startswith("daily/"):
-        return True
-    if link.endswith("/"):
-        target = knowledge_root / link / "README.md"
-    else:
-        target = knowledge_root / (link if link.endswith(".md") else f"{link}.md")
-    if target.exists():
-        return True
-    # Sibling fallback — link is relative to the file's own dir.
+    """Same resolution rules as ``scholar_prompt.check_invariants``. Returns
+    True if the link resolves to an existing file under ``knowledge_root``.
+
+    Thin wrapper over the shared ``_validation.wikilink_resolves`` so the
+    Scholar-write guard and the post-write checker stay byte-for-byte in
+    agreement (and so the resolution logic lives in exactly one place)."""
+    from . import _validation  # noqa: PLC0415  (lazy: keeps llm.py import-light)
+
     parent = file_being_written.parent if file_being_written.parent.exists() else knowledge_root
-    if link.endswith("/"):
-        sibling = parent / link / "README.md"
-    else:
-        sibling = parent / (link if link.endswith(".md") else f"{link}.md")
-    return sibling.exists()
+    return _validation.wikilink_resolves(link, parent, knowledge_root)
 
 
 def _find_unique_leaf(leaf: str, knowledge_root: Path) -> str | None:

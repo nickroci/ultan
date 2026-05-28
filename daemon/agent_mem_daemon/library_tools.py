@@ -63,6 +63,20 @@ def _text_response(text: str) -> Dict[str, Any]:
     return {"content": [{"type": "text", "text": text}]}
 
 
+def unwrap_text_response(response: Dict[str, Any]) -> str:
+    """Pull the plain text payload out of an MCP-shaped tool response
+    (``{"content": [{"type": "text", "text": ...}]}``). Returns ``""`` when
+    the shape is unexpected. Shared by the in-process callers (Scholar agent
+    tools, executor) so the unwrap logic lives in one place."""
+    content = response.get("content")
+    if isinstance(content, list) and content:
+        first = cast(object, content[0])
+        if isinstance(first, dict):
+            first_dict = cast(Dict[str, Any], first)
+            return str(first_dict.get("text", ""))
+    return ""
+
+
 def _format_hit_lines(
     hits: Sequence[Tuple[Path, float, str]], root: Path, *, query: str
 ) -> Dict[str, Any]:
@@ -84,6 +98,25 @@ def _parse_search_args(args: Dict[str, Any]) -> Tuple[str, int]:
     except (TypeError, ValueError):
         k = 5
     return query, max(1, min(20, k))
+
+
+def run_bm25_search(args: Dict[str, Any], root: Path) -> Dict[str, Any]:
+    """Public entry point for the BM25 search runner — same MCP-shaped
+    response the in-process tool returns. Used directly (no subprocess) by
+    the Scholar agent's ``bm25_search`` tool."""
+    return _run_bm25_search(args, root)
+
+
+def run_embedding_search(args: Dict[str, Any], root: Path) -> Dict[str, Any]:
+    """Public entry point for the embedding search runner. Used directly by
+    the Scholar agent's ``embedding_search`` tool."""
+    return _run_embedding_search(args, root)
+
+
+def move_entries(root: Path, args: Dict[str, Any]) -> Dict[str, Any]:
+    """Public entry point for the atomic move + inbound-wikilink rewrite.
+    Used directly by the Scholar executor (``move_entry`` action)."""
+    return _move_entries_impl(root, args)
 
 
 def _run_bm25_search(args: Dict[str, Any], root: Path) -> Dict[str, Any]:
