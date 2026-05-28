@@ -835,9 +835,18 @@ pass found library invariants it could NOT fix on its own and is handing \
 them to you. These are NOT discretionary — propose an action to repair \
 each one. They take priority over salience-driven proposals.
 
-Each task names a ``file`` (relative to ``knowledge/``), a broken ``target`` \
-(the wikilink that does not resolve), and a ``context`` snippet showing \
-where it appears. For EACH broken-wikilink task, do this:
+Each task names a ``kind`` (the invariant type), a ``file`` (relative to \
+``knowledge/`` — for an over-cap dir this is the directory), a ``target`` \
+(the offending value, interpreted per kind), and a ``context`` snippet. \
+ALWAYS set ``salience_signal: null`` on a repair proposal — these are \
+integrity fixes, not salience judgments, and the Scholar will \
+verify-and-execute them rather than judge them for novelty. In \
+``reasoning``, quote the task's ``file`` and ``target`` and state which fix \
+you chose and why. Dispatch on ``kind``:
+
+──────────────────────────────────────────────────────────────────
+kind: broken_wikilink  (``target`` = the wikilink that does not resolve)
+──────────────────────────────────────────────────────────────────
 
   1. **Research the intended target.** The broken target usually got the \
 PATH wrong, not the concept. Run ``mcp__agent_mem_library__bm25_search`` \
@@ -863,14 +872,60 @@ and body. The link then resolves.
 the link or replace it with plain descriptive text), preserving the rest \
 of the prose. Explain in ``reasoning`` why no target should exist.
 
-  3. In ``reasoning``, quote the task's ``file`` and ``target`` and state \
-which of the three fixes you chose and why (cite the entry you found, or \
-state that no entry exists). Set ``salience_signal: null`` for repair \
-proposals — they are integrity fixes, not salience judgments.
-
 Do the link research with the SAME parallel-search discipline as for \
 dedup. A repair proposal that guesses the path without searching will \
 likely be vetoed.
+
+──────────────────────────────────────────────────────────────────
+kind: overcap_dir  (``file``/``target`` = the over-capacity directory)
+──────────────────────────────────────────────────────────────────
+
+The directory holds more than 5 entry .md files and must be rebalanced. \
+The ``context`` lists every entry currently in it.
+
+  1. **Read the entries** (or their frontmatter ``title``/``keywords`` from \
+the snapshot) to find the natural thematic groupings. Use the existing \
+sub-structure of sibling folders as a guide for sensible subfolder names.
+
+  2. **Propose exactly ONE rebalancing action:**
+     - **The entries split into 2+ coherent themes** → ``split_folder`` on \
+``folder_path`` = the over-cap dir, with ``into`` mapping each new \
+subfolder NAME → the list of entry paths (relative to ``knowledge/``) that \
+move there. Leave no destination subfolder over 5; entries you don't list \
+stay put (so the remainder must also be ≤5). The Scholar's \
+``move_entries`` call rewrites all inbound wikilinks atomically.
+     - **A few entries clearly belong in an EXISTING sibling folder** → one \
+``move_entry`` per such entry (``from_path`` → ``to_path``) until the dir \
+is back at or below 5. Prefer this when only one or two entries are \
+outliers and the rest are cohesive.
+
+  3. Choose subfolder names that read well as a path \
+(``global/python/testing/`` not ``global/python/misc-2/``). Do NOT propose \
+a split that just shards the dir into ``part-1``/``part-2`` — the grouping \
+must be meaningful.
+
+──────────────────────────────────────────────────────────────────
+kind: bad_frontmatter  (``file``/``target`` = the entry with bad frontmatter)
+──────────────────────────────────────────────────────────────────
+
+The entry's YAML frontmatter is missing, unparseable, or short the \
+required fields (``context`` names the exact defect). The body content is \
+fine — only the frontmatter block needs repair.
+
+  1. **Read ``file``** to recover its current frontmatter (whatever is \
+salvageable) and its full body.
+
+  2. **Propose an ``update_entry``** on ``file`` whose ``new_body`` is the \
+entry's UNCHANGED body preceded by a corrected frontmatter block that \
+re-serialises valid YAML with EVERY required field present: ``id`` \
+(kebab-case matching the filename), ``type``, ``scope`` (consistent with \
+the path — ``global`` under ``global/``, ``project:<slug>`` under \
+``projects/<slug>/``), ``status``, ``confidence``, ``applies-when``, \
+``keywords``, ``title``, ``created``, ``updated``, ``fired``, \
+``fired-helpful``, ``sources``. Preserve any existing valid values; fill \
+missing fields from the body's content and sensible defaults (e.g. \
+``status: provisional``, ``confidence: 0.6``, ``fired: 0``, \
+``fired-helpful: 0``). Do NOT rewrite the body prose.
 
 ═══════════════════════════════════════════════════════════════════
 HIERARCHY INVARIANTS (the Scholar will veto violations)

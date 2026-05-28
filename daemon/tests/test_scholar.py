@@ -663,7 +663,7 @@ def test_review_invariants_exception_swallowed(monkeypatch, caplog):
     def _boom(kdir):
         raise RuntimeError("simulated invariants failure")
 
-    monkeypatch.setattr(scholar_prompt, "check_invariants", _boom)
+    monkeypatch.setattr(scholar_prompt, "check_invariants_detailed", _boom)
     caplog.set_level(logging.WARNING)
     scholar.review(
         [_packet("s1", proposals=[{"action": "archive_entry", "path": "x.md", "reasoning": "r"}])]
@@ -921,3 +921,153 @@ def test_marker_released_even_when_review_short_circuits_empty(monkeypatch, tmp_
     scholar.review([empty])
 
     assert q.inflight_count() == 0  # released despite the empty early-return
+
+
+# ── Generalised escalation: over-cap dirs and bad frontmatter ─────────
+
+
+def _entry_frontmatter(id_: str) -> str:
+    return (
+        f"---\nid: {id_}\ntype: lesson\nscope: global\nstatus: provisional\n"
+        "confidence: 0.7\napplies-when: |\n  x\nkeywords: [a, b, c]\n"
+        f'title: "{id_}"\ncreated: 2026-05-19\nupdated: 2026-05-19\n'
+        "fired: 0\nfired-helpful: 0\nsources:\n  - manual\n---\n\n"
+        f"# {id_}\n\nA real body sentence that is clearly long enough.\n"
+    )
+
+
+def _seed_overcap_dir(k: Path) -> None:
+    """A flat dir with 6 well-formed entries — over the 5-entry cap. The
+    only invariant tripped is the over-cap one (so the escalation queue
+    holds exactly one task)."""
+    (k / "global" / "python").mkdir(parents=True)
+    (k / "README.md").write_text("# Knowledge\n", encoding="utf-8")
+    (k / "global" / "README.md").write_text("# Global\n", encoding="utf-8")
+    (k / "global" / "python" / "README.md").write_text("# Python\n", encoding="utf-8")
+    for i in range(6):
+        (k / "global" / "python" / f"e{i}.md").write_text(
+            _entry_frontmatter(f"e{i}"), encoding="utf-8"
+        )
+
+
+def _seed_bad_frontmatter(k: Path) -> None:
+    """A tree clean except for one entry whose frontmatter is missing
+    required fields."""
+    (k / "global" / "python").mkdir(parents=True)
+    (k / "README.md").write_text("# Knowledge\n", encoding="utf-8")
+    (k / "global" / "README.md").write_text("# Global\n", encoding="utf-8")
+    (k / "global" / "python" / "README.md").write_text("# Python\n", encoding="utf-8")
+    (k / "global" / "python" / "broken.md").write_text(
+        "---\nid: broken\nscope: global\n---\n\n# broken\n\nA real body sentence here.\n",
+        encoding="utf-8",
+    )
+
+
+def _archive_packet() -> dict:
+    return _packet("s1", proposals=[{"action": "archive_entry", "path": "x.md", "reasoning": "r"}])
+
+
+def test_review_escalates_overcap_dir(monkeypatch, tmp_path):
+    """An over-cap directory the Scholar didn't rebalance is enqueued as an
+    ``overcap_dir`` repair task (in-flight), targeting the directory."""
+    from agent_mem_daemon import repair_queue
+
+    k = tmp_path / "knowledge"
+    _seed_overcap_dir(k)
+    _canned_review(monkeypatch)
+
+    scholar.review([_archive_packet()])
+
+    q = repair_queue.get_queue()
+    assert q.pending_count() == 1
+    assert q.inflight_count() == 1
+    drained = q.drain_pending()
+    assert [t.fingerprint for t in drained] == [
+        (repair_queue.KIND_OVERCAP_DIR, "global/python", "global/python")
+    ]
+
+
+def test_review_escalates_bad_frontmatter(monkeypatch, tmp_path):
+    """An entry with bad frontmatter is enqueued as a ``bad_frontmatter``
+    repair task (in-flight), targeting the entry path."""
+    from agent_mem_daemon import repair_queue
+
+    k = tmp_path / "knowledge"
+    _seed_bad_frontmatter(k)
+    _canned_review(monkeypatch)
+
+    scholar.review([_archive_packet()])
+
+    q = repair_queue.get_queue()
+    assert q.pending_count() == 1
+    assert q.inflight_count() == 1
+    drained = q.drain_pending()
+    fp = drained[0].fingerprint
+    assert fp == (
+        repair_queue.KIND_BAD_FRONTMATTER,
+        "global/python/broken.md",
+        "global/python/broken.md",
+    )
+
+
+def test_inflight_guard_blocks_overcap_duplicate(monkeypatch, tmp_path):
+    """Two consecutive reviews both detecting the same over-cap dir escalate
+    it exactly once — the in-flight marker blocks the duplicate (no
+    max-attempts cap, the SAME guard wikilinks use)."""
+    from agent_mem_daemon import repair_queue
+
+    k = tmp_path / "knowledge"
+    _seed_overcap_dir(k)
+    _canned_review(monkeypatch)
+
+    scholar.review([_archive_packet()])  # first detection: enqueues
+    scholar.review([_archive_packet()])  # second: marker in-flight → skip
+
+    q = repair_queue.get_queue()
+    assert q.inflight_count() == 1
+    assert q.pending_count() == 1  # NOT 2
+
+
+def test_inflight_guard_blocks_bad_frontmatter_duplicate(monkeypatch, tmp_path):
+    """Same in-flight discipline for bad frontmatter."""
+    from agent_mem_daemon import repair_queue
+
+    k = tmp_path / "knowledge"
+    _seed_bad_frontmatter(k)
+    _canned_review(monkeypatch)
+
+    scholar.review([_archive_packet()])
+    scholar.review([_archive_packet()])
+
+    q = repair_queue.get_queue()
+    assert q.inflight_count() == 1
+    assert q.pending_count() == 1
+
+
+def test_overcap_marker_released_then_reescalates(monkeypatch, tmp_path):
+    """A review carrying the over-cap fingerprint releases it on conclusion;
+    the next detection re-escalates (never give up)."""
+    from agent_mem_daemon import repair_queue
+
+    k = tmp_path / "knowledge"
+    _seed_overcap_dir(k)
+    _canned_review(monkeypatch)
+
+    fp = (repair_queue.KIND_OVERCAP_DIR, "global/python", "global/python")
+    q = repair_queue.get_queue()
+    q.enqueue(repair_queue.RepairTask(kind=fp[0], file=fp[1], target=fp[2], context="c"))
+    q.drain_pending()  # Librarian took it; marker stays in-flight
+    assert q.inflight_count() == 1
+
+    # Scholar reviews the packet carrying the fingerprint. Re-detection is
+    # suppressed while the marker is in-flight; the finally then releases it.
+    packet = _archive_packet()
+    packet["repair_fingerprints"] = [list(fp)]
+    scholar.review([packet])
+    assert q.inflight_count() == 0
+    assert q.pending_count() == 0
+
+    # Next detection re-fires.
+    scholar.review([_archive_packet()])
+    assert q.inflight_count() == 1
+    assert q.pending_count() == 1

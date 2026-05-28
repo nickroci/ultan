@@ -515,6 +515,96 @@ def test_check_invariants_scope_path_mismatch(tmp_path: Path):
     assert any("scope/path mismatch" in v and "misfiled" in v for v in out), out
 
 
+# ── check_invariants_detailed: structured violations for escalation ───
+
+
+def test_check_invariants_detailed_projects_to_string_list(tmp_path: Path):
+    # The string-list contract is exactly the .message of each detailed
+    # violation (same order).
+    from agent_mem_daemon import scholar_prompt as sp
+
+    k = tmp_path / "knowledge"
+    (k / "global" / "tooling").mkdir(parents=True)
+    (k / "global" / "tooling" / "uv-basics.md").write_text(
+        _valid_frontmatter(id_="uv-basics"), encoding="utf-8"
+    )
+    detailed = sp.check_invariants_detailed(k)
+    assert [v.message for v in detailed] == sp.check_invariants(k)
+
+
+def test_check_invariants_detailed_overcap_is_escalatable(tmp_path: Path):
+    from agent_mem_daemon import repair_queue
+    from agent_mem_daemon import scholar_prompt as sp
+
+    k = tmp_path / "knowledge"
+    (k / "global" / "tooling").mkdir(parents=True)
+    (k / "README.md").write_text("# k\n", encoding="utf-8")
+    (k / "global" / "README.md").write_text("# g\n", encoding="utf-8")
+    (k / "global" / "tooling" / "README.md").write_text("# t\n", encoding="utf-8")
+    for i in range(6):
+        (k / "global" / "tooling" / f"e{i}.md").write_text(
+            _valid_frontmatter(id_=f"e{i}"), encoding="utf-8"
+        )
+    overcap = [
+        v for v in sp.check_invariants_detailed(k) if v.repair_kind == repair_queue.KIND_OVERCAP_DIR
+    ]
+    assert len(overcap) == 1
+    v = overcap[0]
+    assert v.file == "global/tooling"
+    assert v.target == "global/tooling"
+    # The context lists the entries so the Librarian needn't re-walk the tree.
+    assert "e0.md" in v.context and "e5.md" in v.context
+    task = v.to_repair_task()
+    assert task is not None
+    assert task.kind == repair_queue.KIND_OVERCAP_DIR
+
+
+def test_check_invariants_detailed_bad_frontmatter_is_escalatable(tmp_path: Path):
+    from agent_mem_daemon import repair_queue
+    from agent_mem_daemon import scholar_prompt as sp
+
+    k = tmp_path / "knowledge"
+    (k / "global" / "tooling").mkdir(parents=True)
+    (k / "README.md").write_text("# k\n", encoding="utf-8")
+    (k / "global" / "README.md").write_text("# g\n", encoding="utf-8")
+    (k / "global" / "tooling" / "README.md").write_text("# t\n", encoding="utf-8")
+    (k / "global" / "tooling" / "incomplete.md").write_text(
+        "---\nid: incomplete\nscope: global\n---\n# x\n", encoding="utf-8"
+    )
+    bad = [
+        v
+        for v in sp.check_invariants_detailed(k)
+        if v.repair_kind == repair_queue.KIND_BAD_FRONTMATTER
+    ]
+    assert len(bad) == 1
+    v = bad[0]
+    assert v.file == "global/tooling/incomplete.md"
+    assert v.target == "global/tooling/incomplete.md"
+    assert v.to_repair_task() is not None
+
+
+def test_check_invariants_detailed_display_only_kinds_have_no_task(tmp_path: Path):
+    # README/wikilink/scope/empty-body violations are display-only: no
+    # repair task (handled by reconciler / wikilink-repair / not
+    # independently actionable).
+    from agent_mem_daemon import scholar_prompt as sp
+
+    k = tmp_path / "knowledge"
+    (k / "global" / "tooling").mkdir(parents=True)
+    # No READMEs anywhere AND a broken wikilink — both display-only.
+    (k / "global" / "tooling" / "uv-basics.md").write_text(
+        _valid_frontmatter(id_="uv-basics") + "See [[global/missing/no-such]]\n",
+        encoding="utf-8",
+    )
+    detailed = sp.check_invariants_detailed(k)
+    readme_or_link = [
+        v for v in detailed if "README" in v.message or "broken wikilink" in v.message
+    ]
+    assert readme_or_link  # we produced some
+    assert all(v.repair_kind is None for v in readme_or_link)
+    assert all(v.to_repair_task() is None for v in readme_or_link)
+
+
 def test_reconcile_creates_missing_readmes(tmp_path: Path):
     k = tmp_path / "knowledge"
     (k / "global" / "python").mkdir(parents=True)
@@ -765,6 +855,21 @@ def test_build_prompt_includes_no_literal_secrets_invariant():
     assert "contains-secret" in prompt
     for pattern in ("API key", "ghp_", "AKIA", "sk-", "BEGIN ... PRIVATE KEY"):
         assert pattern in prompt, f"secrets invariant missing pattern: {pattern!r}"
+
+
+def test_build_prompt_exempts_repair_proposals_from_novelty():
+    """Repair-originated proposals must be verify-and-execute, NOT judged
+    for novelty/dedupe. The prompt must say so explicitly and tie the
+    exemption to the packet's ``repair_fingerprints`` marker."""
+    prompt = scholar_prompt.build_prompt([], library_snapshot="(empty)")
+    assert "INTEGRITY-REPAIR PROPOSALS" in prompt
+    assert "repair_fingerprints" in prompt
+    assert "VERIFY-AND-EXECUTE" in prompt
+    # The salience filter must tell the Scholar to skip repair proposals.
+    assert "SKIP it" in prompt or "SKIP this section" in prompt or "bypass this filter" in prompt
+    # And it must spell out that "not novel"/"duplicate" are not valid veto
+    # reasons for a repair.
+    assert "NEVER valid veto reasons for a repair proposal" in prompt
 
 
 # ── repair_broken_wikilinks (post-write self-healing) ─────────────────

@@ -1,13 +1,22 @@
 """Integrity-repair task queue — escalation bridge into the curator.
 
-When the deterministic post-write pass (``scholar_prompt.repair_broken_wikilinks``)
-finds an invariant violation it CANNOT fix on its own — today, a broken
-wikilink with no unique on-disk target — it records a :class:`RepairTask`
-here. The next Librarian run drains the pending tasks, renders them into
-its prompt, and proposes an EXISTING curator action (rewrite the link,
-write the missing target, or remove it with a reason). The Scholar
-reviews/executes that proposal as a normal proposal. No new agent, no new
-role — the same Librarian→Scholar pipeline, fed a different kind of input.
+When a post-write check finds an invariant violation that cannot be fixed
+deterministically, it records a :class:`RepairTask` here. The next Librarian
+run drains the pending tasks, renders them into its prompt, and proposes an
+EXISTING curator action; the Scholar reviews/executes it as a normal
+proposal. No new agent, no new role — the same Librarian→Scholar pipeline,
+fed a different kind of input. Three invariant kinds escalate through this
+one mechanism (see the ``KIND_*`` constants), dispatched by ``kind``:
+
+  - ``broken_wikilink`` — surfaced by ``scholar_prompt.repair_broken_wikilinks``
+    when a link has no unique on-disk target → Librarian rewrites / writes
+    the missing target / removes the link.
+  - ``overcap_dir``     — surfaced by ``check_invariants`` when a flat dir
+    exceeds the entry cap → Librarian proposes a ``split_folder`` (or
+    ``move_entry``) to rebalance.
+  - ``bad_frontmatter`` — surfaced by ``check_invariants`` when an entry's
+    frontmatter is missing/unparseable/incomplete → Librarian proposes an
+    ``update_entry`` that re-serialises valid frontmatter.
 
 ────────────────────────────────────────────────────────────────────
 THE ONLY GUARD: in-flight, keyed on the issue fingerprint
@@ -39,12 +48,14 @@ because a fresh deterministic pass re-detects any still-broken link and
 re-escalates it. (For that to hold, the escalation path must NOT neutralise
 the link it escalates — see ``scholar_prompt._repair_body_links``: an
 escalated link is left broken on disk so it stays detectable until the
-Scholar actually fixes it.)
+Scholar actually fixes it. The over-cap and bad-frontmatter checks are
+already non-destructive — they only read — so re-detection is automatic.)
 
-Extensibility: :class:`RepairTask` carries a ``kind`` discriminator so
-other invariant types (over-cap directories, malformed frontmatter) can
-plug into the same queue + guard later. Only ``broken_wikilink`` is wired
-today.
+Generality: :class:`RepairTask` carries a ``kind`` discriminator and the
+queue treats every kind identically. Adding a fourth invariant type is a
+matter of (a) a new ``KIND_*`` literal, (b) a detection point that enqueues
+it, and (c) a prompt section telling the Librarian how to repair it — no
+change to the queue itself.
 """
 
 from __future__ import annotations
@@ -57,18 +68,31 @@ from typing import List, Sequence, Set, Tuple, cast
 # issue" so repeated detections collapse onto one in-flight attempt.
 Fingerprint = Tuple[str, str, str]
 
-# v1 wires only this kind. New invariant types add their own literal and
-# reuse the same enqueue/drain/clear machinery.
+# Invariant-type discriminators. Every kind reuses the SAME
+# enqueue/drain/clear machinery + in-flight guard — the queue itself stays
+# kind-agnostic; only the detection point (Scholar) and the rendering point
+# (Librarian prompt) branch on the value.
+#
+#   - ``broken_wikilink`` — a wikilink with no unique on-disk target.
+#   - ``overcap_dir``     — a flat directory over ``MAX_FLAT_DIR_ENTRIES``.
+#   - ``bad_frontmatter`` — an entry whose frontmatter is missing,
+#                           unparseable, or short the required fields.
 KIND_BROKEN_WIKILINK = "broken_wikilink"
+KIND_OVERCAP_DIR = "overcap_dir"
+KIND_BAD_FRONTMATTER = "bad_frontmatter"
 
 
 @dataclass(frozen=True)
 class RepairTask:
     """One integrity-repair task escalated to the Librarian.
 
-    ``kind``    discriminator for the invariant type (``broken_wikilink``).
-    ``file``    knowledge-root-relative path of the file holding the issue.
-    ``target``  the offending value — for a wikilink, its broken target.
+    ``kind``    discriminator for the invariant type (one of ``KIND_*``).
+    ``file``    knowledge-root-relative path of the file (or directory, for
+                ``overcap_dir``) holding the issue.
+    ``target``  the offending value, interpreted per ``kind``: a wikilink's
+                broken target; the directory path for an over-cap dir; the
+                entry path for bad frontmatter. Always non-empty so the
+                fingerprint is a stable identity.
     ``context`` a short human-readable snippet so the Librarian can see
                 where/how the issue appears without re-reading the file.
     """
