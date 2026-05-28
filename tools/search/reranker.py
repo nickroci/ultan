@@ -27,31 +27,14 @@ from typing import Any, List, Optional, Tuple
 
 from sentence_transformers import CrossEncoder
 
+from _device import select_device
+
 log = logging.getLogger("agent_mem_daemon.reranker")
 
 DEFAULT_MODEL = "cross-encoder/ms-marco-MiniLM-L-12-v2"
 
 # Module-level cache so the daemon pays the load cost exactly once.
 _MODEL_CACHE: dict[str, Any] = {}
-
-
-def _select_device() -> str:
-    """Return the best available torch device.
-
-    Apple Silicon's MPS is preferred when present; falls back to CUDA on
-    Linux/NVIDIA hosts; CPU otherwise. Detection is one-shot and lives at
-    load time, not per-request.
-    """
-    try:
-        import torch  # noqa: PLC0415 — lazy import keeps cold start lean.
-
-        if torch.backends.mps.is_available():
-            return "mps"
-        if torch.cuda.is_available():
-            return "cuda"
-    except Exception:
-        pass
-    return "cpu"
 
 
 def _load_model(model_name: str) -> Any:
@@ -68,7 +51,7 @@ def _load_model(model_name: str) -> Any:
     cached = _MODEL_CACHE.get(model_name)
     if cached is not None:
         return cached
-    device = _select_device()
+    device = select_device()
     model = CrossEncoder(model_name, device=device)
     _MODEL_CACHE[model_name] = model
     return model

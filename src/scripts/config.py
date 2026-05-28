@@ -8,62 +8,113 @@ Two roots to keep straight:
 
 - ``CODE_ROOT`` — the checkout (``…/agent-mem/src``). Used as ``cwd`` for the
   Claude Agent SDK and as the ``--directory`` argument to ``uv run``. The
-  schema file (``AGENTS.md``) ships with the code, so it lives here.
-- ``STORE_DIR`` — the user-global data directory (``~/.agent-mem/``). All
-  daily logs, compiled knowledge, state, and logs live here.
+  schema file (``AGENTS.md``) ships with the code, so it lives here. It is
+  derived from this file's location, so it's a genuine module constant.
+- The user-global data directory (``~/.agent-mem/``) and everything under
+  it. This is *runtime state*, not a constant: it depends on the
+  ``AGENT_MEM_HOME`` environment variable, which a test (or a late-binding
+  caller) may set after this module is imported. So these paths are resolved
+  on demand via :func:`get_config`, never frozen at import time.
 
 Override the store location with the ``AGENT_MEM_HOME`` environment variable
-(useful for tests and for users who don't want their HOME polluted).
+(useful for tests and for users who don't want their HOME polluted). Because
+:func:`get_config` reads the env var on every call, a test only has to
+``monkeypatch.setenv("AGENT_MEM_HOME", ...)`` — there is no module-level
+state to reset and no need to reload this module.
 """
 
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-# ── Roots ──────────────────────────────────────────────────────────────
-# Code root: this file lives at <CODE_ROOT>/scripts/config.py
+# ── Code locations (env-independent; derived from this file's path) ────
+# This file lives at <CODE_ROOT>/scripts/config.py.
 CODE_ROOT = Path(__file__).resolve().parent.parent
-
-# Storage root: user-global, overridable for tests.
-_env_home = os.environ.get("AGENT_MEM_HOME")
-STORE_DIR = Path(_env_home).expanduser().resolve() if _env_home else Path.home() / ".agent-mem"
-
-# Backwards-compat alias. A handful of upstream call sites reference
-# ``ROOT_DIR``; keep the name working but point it at the store. Anything
-# that needs the *code* root should import ``CODE_ROOT`` explicitly.
-ROOT_DIR = STORE_DIR
-
-# ── Storage layout (under STORE_DIR) ───────────────────────────────────
-DAILY_DIR = STORE_DIR / "daily"
-KNOWLEDGE_DIR = STORE_DIR / "knowledge"
-
-# Per-PLAN.md §1, knowledge is split into a global tier and per-project
-# subdirectories. Phase 0 only creates the global tier on first write;
-# per-project dirs are materialised lazily by the daemon/Scholar later.
-GLOBAL_DIR = KNOWLEDGE_DIR / "global"
-PROJECTS_DIR = KNOWLEDGE_DIR / "projects"
-
-# Phase-0 default write targets for the existing compile.py flow.
-# These point at the global tier so the upstream end-of-day compile still
-# has a place to put concept/connection articles. Per-project routing is a
-# Scholar concern (Phase 2) — see TODO in compile.py.
-CONCEPTS_DIR = GLOBAL_DIR / "concepts"
-CONNECTIONS_DIR = GLOBAL_DIR / "connections"
-QA_DIR = GLOBAL_DIR / "qa"
-
-REPORTS_DIR = STORE_DIR / "reports"
-STATE_DIR = STORE_DIR / "state"
-
-INDEX_FILE = KNOWLEDGE_DIR / "index.md"
-LOG_FILE = KNOWLEDGE_DIR / "log.md"
-STATE_FILE = STATE_DIR / "state.json"
-
-# ── Code locations (under CODE_ROOT) ───────────────────────────────────
 SCRIPTS_DIR = CODE_ROOT / "scripts"
 HOOKS_DIR = CODE_ROOT / "hooks"
 AGENTS_FILE = CODE_ROOT / "AGENTS.md"
+
+
+@dataclass(frozen=True)
+class StoreConfig:
+    """Resolved, user-global storage paths.
+
+    Built fresh from the environment by :func:`get_config`, so callers
+    always see paths consistent with the *current* ``AGENT_MEM_HOME`` —
+    there is no import-time freeze to work around.
+
+    Per-PLAN.md §1, knowledge is split into a global tier and per-project
+    subdirectories. The ``concepts``/``connections``/``qa`` dirs are the
+    Phase-0 default write targets for compile.py; per-project routing is a
+    Scholar concern (Phase 2).
+    """
+
+    store_dir: Path
+    daily_dir: Path
+    knowledge_dir: Path
+    global_dir: Path
+    projects_dir: Path
+    concepts_dir: Path
+    connections_dir: Path
+    qa_dir: Path
+    reports_dir: Path
+    state_dir: Path
+    index_file: Path
+    log_file: Path
+    state_file: Path
+
+    def all_dirs(self) -> tuple[Path, ...]:
+        """Every directory in the store tree, in creation-safe order."""
+        return (
+            self.store_dir,
+            self.daily_dir,
+            self.knowledge_dir,
+            self.global_dir,
+            self.concepts_dir,
+            self.connections_dir,
+            self.qa_dir,
+            self.projects_dir,
+            self.reports_dir,
+            self.state_dir,
+        )
+
+
+def _resolve_store_dir() -> Path:
+    """Resolve ``${AGENT_MEM_HOME:-~/.agent-mem}`` from the environment."""
+    env_home = os.environ.get("AGENT_MEM_HOME")
+    if env_home:
+        return Path(env_home).expanduser().resolve()
+    return Path.home() / ".agent-mem"
+
+
+def get_config() -> StoreConfig:
+    """Resolve all storage paths from the current environment.
+
+    Reads ``AGENT_MEM_HOME`` at call time (falling back to ``~/.agent-mem``),
+    so the override is honoured regardless of when it was set. Cheap enough
+    to call freely — no caching, so nothing to invalidate in tests.
+    """
+    store = _resolve_store_dir()
+    knowledge = store / "knowledge"
+    global_dir = knowledge / "global"
+    return StoreConfig(
+        store_dir=store,
+        daily_dir=store / "daily",
+        knowledge_dir=knowledge,
+        global_dir=global_dir,
+        projects_dir=knowledge / "projects",
+        concepts_dir=global_dir / "concepts",
+        connections_dir=global_dir / "connections",
+        qa_dir=global_dir / "qa",
+        reports_dir=store / "reports",
+        state_dir=store / "state",
+        index_file=knowledge / "index.md",
+        log_file=knowledge / "log.md",
+        state_file=store / "state" / "state.json",
+    )
 
 
 def ensure_store_dirs() -> None:
@@ -72,18 +123,7 @@ def ensure_store_dirs() -> None:
     Cheap and idempotent. Called by hooks and scripts before any write so a
     fresh install just works on the first SessionEnd.
     """
-    for d in (
-        STORE_DIR,
-        DAILY_DIR,
-        KNOWLEDGE_DIR,
-        GLOBAL_DIR,
-        CONCEPTS_DIR,
-        CONNECTIONS_DIR,
-        QA_DIR,
-        PROJECTS_DIR,
-        REPORTS_DIR,
-        STATE_DIR,
-    ):
+    for d in get_config().all_dirs():
         d.mkdir(parents=True, exist_ok=True)
 
 

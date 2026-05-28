@@ -55,19 +55,7 @@ if str(_THIS_DIR) not in sys.path:
 
 from _blockers import find_match, load_blockers, rel_to_knowledge  # noqa: E402
 from _events import EventPayload, HookPayload, append_event  # noqa: E402
-
-
-def _knowledge_dir() -> Path:
-    """Resolve ``${AGENT_MEM_HOME:-~/.agent-mem}/knowledge``.
-
-    Resolved at call time (not import time) so a test that sets
-    ``AGENT_MEM_HOME`` after this module loads still picks up the
-    override.
-    """
-    override = os.environ.get("AGENT_MEM_HOME")
-    if override:
-        return Path(override).expanduser() / "knowledge"
-    return Path.home() / ".agent-mem" / "knowledge"
+from config import get_config  # noqa: E402
 
 
 def _read_hook_input() -> HookPayload:
@@ -139,7 +127,7 @@ def main() -> None:
     # ── 2. Blocker check. Cached, sub-100ms even with hundreds of
     # entries (see _blockers.py for the cache strategy). ───────────────
     decision_payload: EventPayload = {"role": "assistant", "tool": tool_name, "phase": "pre"}
-    knowledge_dir = _knowledge_dir()
+    knowledge_dir = get_config().knowledge_dir
     try:
         blockers = load_blockers(knowledge_dir)
         match = find_match(blockers, tool_name, tool_input)

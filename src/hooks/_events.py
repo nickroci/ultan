@@ -111,16 +111,16 @@ MAX_LINE_BYTES = 3072
 def _events_path() -> Path:
     """Resolve ``${AGENT_MEM_HOME:-~/.agent-mem}/events.jsonl``.
 
-    Reuses ``config.STORE_DIR`` so the env-var override logic stays in one
-    place. Returns the path even if the parent dir doesn't exist yet —
+    Reuses ``config.get_config()`` so the env-var override logic stays in
+    one place. Returns the path even if the parent dir doesn't exist yet —
     caller creates it on first write.
     """
     # Lazy import: a config import failure (unlikely but possible) must
     # not break the recursion-guard short-circuit at the top of
     # :func:`append_event`. See module docstring.
-    from config import STORE_DIR  # noqa: E402,PLC0415
+    from config import get_config  # noqa: E402,PLC0415
 
-    return STORE_DIR / "events.jsonl"
+    return get_config().store_dir / "events.jsonl"
 
 
 def _truncate_payload(payload: Mapping[str, Any], budget: int) -> dict[str, Any]:

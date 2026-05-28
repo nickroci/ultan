@@ -40,10 +40,9 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
 from pathlib import Path
-from typing import Any, Optional, cast
+from typing import Any, Optional
 
 _THIS_DIR = Path(__file__).resolve().parent
 _CODE_ROOT = _THIS_DIR.parent
@@ -54,6 +53,7 @@ if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
 from _events import HookPayload, append_event  # noqa: E402
+from _hookutil import parse_stdin  # noqa: E402
 from _nudges import render_context, take_nudges  # noqa: E402
 from _priming_client import get_priming  # noqa: E402
 from scope import current_project_slug  # noqa: E402
@@ -74,25 +74,6 @@ def _emit_additional_context(context: str) -> None:
         }
     }
     print(json.dumps(output))
-
-
-def _parse_stdin() -> Optional[HookPayload]:
-    """Parse the JSON hook_input from stdin; return None on any failure.
-
-    Same Windows-backslash workaround as the other hooks.
-    """
-    try:
-        raw = sys.stdin.read()
-        try:
-            parsed: Any = json.loads(raw)
-        except json.JSONDecodeError:
-            fixed = re.sub(r'(?<!\\)\\(?!["\\])', r"\\\\", raw)
-            parsed = json.loads(fixed)
-    except (json.JSONDecodeError, ValueError, EOFError):
-        return None
-    if not isinstance(parsed, dict):
-        return None
-    return cast("HookPayload", parsed)
 
 
 def _priming_part(prompt: str, session_id: Optional[str]) -> str:
@@ -156,7 +137,7 @@ def main() -> None:
     if os.environ.get("CLAUDE_INVOKED_BY"):
         return
 
-    hook_input = _parse_stdin()
+    hook_input = parse_stdin()
     if hook_input is None:
         return
 

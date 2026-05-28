@@ -22,15 +22,7 @@ import re
 from pathlib import Path
 from typing import TypedDict
 
-from config import (
-    DAILY_DIR,
-    GLOBAL_DIR,
-    INDEX_FILE,
-    KNOWLEDGE_DIR,
-    PROJECTS_DIR,
-    STATE_DIR,
-    STATE_FILE,
-)
+from config import get_config
 
 # ── State shape ───────────────────────────────────────────────────────
 
@@ -62,17 +54,19 @@ class State(TypedDict, total=False):
 
 def load_state() -> State:
     """Load persistent state from state.json."""
-    if STATE_FILE.exists():
+    state_file = get_config().state_file
+    if state_file.exists():
         # json.loads returns Any; we trust the schema we wrote ourselves.
-        loaded: State = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        loaded: State = json.loads(state_file.read_text(encoding="utf-8"))
         return loaded
     return {"ingested": {}, "query_count": 0, "last_lint": None, "total_cost": 0.0}
 
 
 def save_state(state: State) -> None:
     """Save state to state.json."""
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    cfg = get_config()
+    cfg.state_dir.mkdir(parents=True, exist_ok=True)
+    cfg.state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
 # ── File hashing ──────────────────────────────────────────────────────
@@ -111,13 +105,14 @@ def wiki_article_exists(link: str) -> bool:
     ``projects/github.com-foo-bar/concepts/x``. As a courtesy we also accept
     the legacy ``concepts/x`` form by trying ``global/concepts/x`` next.
     """
-    path = KNOWLEDGE_DIR / f"{link}.md"
+    knowledge_dir = get_config().knowledge_dir
+    path = knowledge_dir / f"{link}.md"
     if path.exists():
         return True
 
     # Legacy form: ``concepts/x`` -> ``global/concepts/x``
     if not link.startswith(("global/", "projects/")):
-        legacy = KNOWLEDGE_DIR / "global" / f"{link}.md"
+        legacy = knowledge_dir / "global" / f"{link}.md"
         if legacy.exists():
             return True
     return False
@@ -128,8 +123,9 @@ def wiki_article_exists(link: str) -> bool:
 
 def read_wiki_index() -> str:
     """Read the knowledge base index file."""
-    if INDEX_FILE.exists():
-        return INDEX_FILE.read_text(encoding="utf-8")
+    index_file = get_config().index_file
+    if index_file.exists():
+        return index_file.read_text(encoding="utf-8")
     return (
         "# Knowledge Base Index\n\n"
         "| Article | Summary | Compiled From | Updated |\n"
@@ -144,14 +140,15 @@ def _iter_article_dirs() -> list[Path]:
     fair game. Order: global first (most lessons), then projects
     alphabetically for stable output.
     """
+    cfg = get_config()
     dirs: list[Path] = []
     for sub in ("concepts", "connections", "qa"):
-        d = GLOBAL_DIR / sub
+        d = cfg.global_dir / sub
         if d.exists():
             dirs.append(d)
 
-    if PROJECTS_DIR.exists():
-        for proj in sorted(p for p in PROJECTS_DIR.iterdir() if p.is_dir()):
+    if cfg.projects_dir.exists():
+        for proj in sorted(p for p in cfg.projects_dir.iterdir() if p.is_dir()):
             for sub in ("concepts", "connections", "qa"):
                 d = proj / sub
                 if d.exists():
@@ -163,9 +160,10 @@ def read_all_wiki_content() -> str:
     """Read index + all wiki articles into a single string for context."""
     parts = [f"## INDEX\n\n{read_wiki_index()}"]
 
+    knowledge_dir = get_config().knowledge_dir
     for subdir in _iter_article_dirs():
         for md_file in sorted(subdir.glob("*.md")):
-            rel = md_file.relative_to(KNOWLEDGE_DIR)
+            rel = md_file.relative_to(knowledge_dir)
             content = md_file.read_text(encoding="utf-8")
             parts.append(f"## {rel}\n\n{content}")
 
@@ -182,9 +180,10 @@ def list_wiki_articles() -> list[Path]:
 
 def list_raw_files() -> list[Path]:
     """List all daily log files."""
-    if not DAILY_DIR.exists():
+    daily_dir = get_config().daily_dir
+    if not daily_dir.exists():
         return []
-    return sorted(DAILY_DIR.glob("*.md"))
+    return sorted(daily_dir.glob("*.md"))
 
 
 # ── Index helpers ─────────────────────────────────────────────────────

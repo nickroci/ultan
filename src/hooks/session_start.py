@@ -27,27 +27,13 @@ if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
 from _events import HookPayload, append_event  # noqa: E402
+from _hookutil import ensure_store_dirs  # noqa: E402
 from aliases import session_bucket  # noqa: E402
+from config import get_config  # noqa: E402
 from scope import current_project_slug  # noqa: E402
 
 MAX_CONTEXT_CHARS = 20_000
 MAX_LOG_LINES = 30
-
-
-def _store_dir() -> Path:
-    """Resolve ``${AGENT_MEM_HOME:-~/.agent-mem}`` at call time."""
-    override = os.environ.get("AGENT_MEM_HOME")
-    if override:
-        return Path(override).expanduser()
-    return Path.home() / ".agent-mem"
-
-
-def _ensure_store_dirs(store: Path) -> None:
-    for sub in ("", "state", "knowledge", "daily"):
-        try:
-            (store / sub if sub else store).mkdir(parents=True, exist_ok=True)
-        except OSError:
-            pass
 
 
 def get_recent_log(daily_dir: Path) -> str:
@@ -101,8 +87,8 @@ def main() -> None:
     if os.environ.get("CLAUDE_INVOKED_BY"):
         return
 
-    store = _store_dir()
-    _ensure_store_dirs(store)
+    store = get_config().store_dir
+    ensure_store_dirs(store)
 
     # Read hook input if present; fall back to environment otherwise.
     hook_input: HookPayload = {}

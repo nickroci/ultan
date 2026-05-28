@@ -27,7 +27,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Mapping, NamedTuple, Protocol, Sequence, cast
+from typing import Iterable, Mapping, NamedTuple, Protocol, Sequence, TypeVar, cast
 
 import yaml
 from rank_bm25 import BM25Okapi
@@ -303,22 +303,38 @@ def save_index(index: BM25Index, index_path: Path | None = None) -> Path:
     return target
 
 
-def _load_pickled(index_path: Path) -> BM25Index | None:
+_PickledT = TypeVar("_PickledT")
+
+
+def load_pickled(index_path: Path, expected_type: type[_PickledT]) -> _PickledT | None:
+    """Unpickle ``index_path`` and return it only if it is ``expected_type``.
+
+    Any I/O, unpickling, or schema-drift error yields None so the caller
+    rebuilds from scratch. Shared by the BM25 and embedding indices.
+    """
     try:
         with index_path.open("rb") as f:
             obj: object = pickle.load(f)
-        if isinstance(obj, BM25Index):
+        if isinstance(obj, expected_type):
             return obj
     except (OSError, pickle.UnpicklingError, EOFError, AttributeError, ModuleNotFoundError):
         return None
     return None
 
 
-def _is_stale(index: BM25Index, knowledge_dir: Path) -> bool:
-    """True if any tracked file moved/disappeared, or any .md is newer than the index."""
-    current_files = {str(p): p.stat().st_mtime for p in _iter_markdown(knowledge_dir)}
-    tracked = {rec.path: rec.mtime for rec in index.docs}
+class _TimestampedDoc(Protocol):
+    path: str
+    mtime: float
 
+
+def is_stale(docs: Sequence[_TimestampedDoc], current_files: Mapping[str, float]) -> bool:
+    """True if the tracked doc set differs from what's on disk, or any current
+    file is newer than when it was indexed.
+
+    ``current_files`` maps absolute-path string → mtime; the caller builds it
+    from its own markdown walk. Shared by the BM25 and embedding indices.
+    """
+    tracked = {rec.path: rec.mtime for rec in docs}
     if set(current_files) != set(tracked):
         return True
     for path, mtime in current_files.items():
@@ -337,9 +353,10 @@ def load_or_build(
     target = index_path or _default_index_path(knowledge_dir)
 
     if not force_rebuild and target.exists():
-        cached = _load_pickled(target)
+        cached = load_pickled(target, BM25Index)
         if cached is not None and cached.knowledge_dir == knowledge_dir:
-            if not _is_stale(cached, knowledge_dir):
+            current_files = {str(p): p.stat().st_mtime for p in _iter_markdown(knowledge_dir)}
+            if not is_stale(cached.docs, current_files):
                 return cached
 
     index = build_index(knowledge_dir)

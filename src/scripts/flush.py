@@ -52,31 +52,32 @@ from claude_agent_sdk import (  # noqa: E402
 )
 from config import (  # noqa: E402
     CODE_ROOT,
-    DAILY_DIR,
-    STATE_DIR,
-    STORE_DIR,
     ensure_store_dirs,
+    get_config,
 )
 from utils import State  # noqa: E402
 
-# State files moved out of the code tree and into the user-global store.
-FLUSH_STATE_FILE = STATE_DIR / "last-flush.json"
-LOG_FILE = STORE_DIR / "flush.log"
-COMPILE_STATE_FILE = STATE_DIR / "state.json"
-COMPILE_LOG_FILE = STORE_DIR / "compile.log"
+# compile.py ships next to this script, so this is a genuine,
+# env-independent constant. The store-relative paths (flush state, log
+# files, compile state) are resolved on demand via get_config() instead,
+# so importing this module doesn't touch the filesystem.
 COMPILE_SCRIPT = _SCRIPTS_DIR / "compile.py"
 
-# Ensure the store exists before logging.basicConfig opens its file handle —
-# otherwise the first run on a clean machine crashes before we've written
-# anything diagnostic.
-ensure_store_dirs()
 
-logging.basicConfig(
-    filename=str(LOG_FILE),
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+def _setup_logging() -> None:
+    """Ensure the store exists, then point logging at ``<store>/flush.log``.
+
+    Called once at the top of :func:`main`. Deliberately kept out of import
+    time so that merely importing this module (e.g. from a test) neither
+    creates the store tree nor opens a log-file handle in someone's HOME.
+    """
+    ensure_store_dirs()
+    logging.basicConfig(
+        filename=str(get_config().store_dir / "flush.log"),
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
 
 
 class FlushState(TypedDict, total=False):
@@ -87,9 +88,10 @@ class FlushState(TypedDict, total=False):
 
 
 def load_flush_state() -> FlushState:
-    if FLUSH_STATE_FILE.exists():
+    flush_state_file = get_config().state_dir / "last-flush.json"
+    if flush_state_file.exists():
         try:
-            loaded: FlushState = json.loads(FLUSH_STATE_FILE.read_text(encoding="utf-8"))
+            loaded: FlushState = json.loads(flush_state_file.read_text(encoding="utf-8"))
             return loaded
         except (json.JSONDecodeError, OSError):
             pass
@@ -97,8 +99,9 @@ def load_flush_state() -> FlushState:
 
 
 def save_flush_state(state: FlushState) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    FLUSH_STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+    state_dir = get_config().state_dir
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "last-flush.json").write_text(json.dumps(state), encoding="utf-8")
 
 
 def append_to_daily_log(content: str, section: str, project_slug: str) -> None:
@@ -109,8 +112,9 @@ def append_to_daily_log(content: str, section: str, project_slug: str) -> None:
     ``knowledge/projects/<slug>/`` later.
     """
     today = datetime.now(timezone.utc).astimezone()
-    DAILY_DIR.mkdir(parents=True, exist_ok=True)
-    log_path = DAILY_DIR / f"{today.strftime('%Y-%m-%d')}.md"
+    daily_dir = get_config().daily_dir
+    daily_dir.mkdir(parents=True, exist_ok=True)
+    log_path = daily_dir / f"{today.strftime('%Y-%m-%d')}.md"
 
     if not log_path.exists():
         log_path.write_text(
@@ -199,13 +203,14 @@ def maybe_trigger_compilation() -> None:
     if now.hour < COMPILE_AFTER_HOUR:
         return
 
+    cfg = get_config()
     today_log = f"{now.strftime('%Y-%m-%d')}.md"
-    if COMPILE_STATE_FILE.exists():
+    if cfg.state_file.exists():
         try:
-            compile_state: State = json.loads(COMPILE_STATE_FILE.read_text(encoding="utf-8"))
+            compile_state: State = json.loads(cfg.state_file.read_text(encoding="utf-8"))
             ingested = compile_state.get("ingested", {})
             if today_log in ingested:
-                log_path = DAILY_DIR / today_log
+                log_path = cfg.daily_dir / today_log
                 if log_path.exists():
                     current_hash = hashlib.sha256(log_path.read_bytes()).hexdigest()[:16]
                     if ingested[today_log].get("hash") == current_hash:
@@ -224,7 +229,7 @@ def maybe_trigger_compilation() -> None:
     # ``creationflags`` is Windows-only, ``start_new_session`` is POSIX-only —
     # branching here keeps the kwargs concretely typed for each platform.
     try:
-        log_handle = open(str(COMPILE_LOG_FILE), "a")
+        log_handle = open(str(cfg.store_dir / "compile.log"), "a")
         if sys.platform == "win32":
             subprocess.Popen(
                 cmd,
@@ -246,6 +251,8 @@ def maybe_trigger_compilation() -> None:
 
 
 def main() -> None:
+    _setup_logging()
+
     if len(sys.argv) < 3:
         logging.error("Usage: %s <context_file.md> <session_id> [project_slug]", sys.argv[0])
         sys.exit(1)

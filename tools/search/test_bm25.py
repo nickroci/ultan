@@ -21,12 +21,13 @@ from bm25 import (
     _build_snippet,
     _default_index_path,
     _frontmatter_search_text,
-    _is_stale,
-    _load_pickled,
     _one_line,
     _strip_and_extract_frontmatter,
     build_index,
+    is_stale,
+    iter_markdown,
     load_or_build,
+    load_pickled,
     save_index,
     tokenize,
 )
@@ -224,7 +225,7 @@ def test_build_index_skips_unreadable_files(tmp_path: Path, monkeypatch) -> None
 def test_load_pickled_corrupt_file_returns_none(tmp_path: Path) -> None:
     p = tmp_path / "garbage.idx"
     p.write_bytes(b"not a pickle stream")
-    assert _load_pickled(p) is None
+    assert load_pickled(p, BM25Index) is None
 
 
 def test_load_or_build_rebuilds_when_knowledge_dir_changed(tmp_path: Path) -> None:
@@ -270,7 +271,8 @@ def test_is_stale_detects_removed_file(tmp_path: Path) -> None:
     idx = build_index(knowledge)
     # Remove a tracked file.
     (knowledge / "global" / "concepts" / "no-mock-db.md").unlink()
-    assert _is_stale(idx, knowledge) is True
+    current_files = {str(p): p.stat().st_mtime for p in iter_markdown(knowledge)}
+    assert is_stale(idx.docs, current_files) is True
 
 
 def test_build_snippet_falls_back_to_first_body_line() -> None:

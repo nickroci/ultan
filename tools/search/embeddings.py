@@ -43,8 +43,10 @@ from sentence_transformers import SentenceTransformer
 # Reuse BM25's file-selection + frontmatter discipline. ``bm25.py`` re-exports
 # these helpers under non-underscore names specifically so we can import them
 # here without triggering pyright's reportPrivateUsage check.
+from _device import select_device
 from bm25 import build_snippet as _build_snippet
 from bm25 import frontmatter_search_text as _frontmatter_search_text
+from bm25 import is_stale, load_pickled
 from bm25 import iter_markdown as _iter_markdown
 from bm25 import strip_and_extract_frontmatter as _strip_and_extract_frontmatter
 
@@ -71,25 +73,6 @@ _MODEL_CACHE: dict[str, Any] = {}
 
 
 # ── Model loading ──────────────────────────────────────────────────────────────
-
-
-def _select_device() -> str:
-    """Return the best available torch device.
-
-    Apple Silicon's MPS is preferred when present; falls back to CUDA on
-    Linux/NVIDIA hosts; CPU otherwise. Detection is one-shot at load time;
-    callers don't pay it per request.
-    """
-    try:
-        import torch  # noqa: PLC0415 — lazy import keeps cold start lean.
-
-        if torch.backends.mps.is_available():
-            return "mps"
-        if torch.cuda.is_available():
-            return "cuda"
-    except Exception:
-        pass
-    return "cpu"
 
 
 def _needs_trust_remote_code(model_name: str) -> bool:
@@ -120,7 +103,7 @@ def _load_model(model_name: str) -> Any:
     if cached is not None:
         return cached
 
-    device = _select_device()
+    device = select_device()
     extra: dict[str, Any] = {}
     if _needs_trust_remote_code(model_name):
         extra["trust_remote_code"] = True
@@ -354,30 +337,6 @@ def save_index(index: EmbeddingIndex, path: Path | None = None) -> Path:
     return target
 
 
-def _load_pickled(index_path: Path) -> EmbeddingIndex | None:
-    try:
-        with index_path.open("rb") as f:
-            obj = pickle.load(f)
-        if isinstance(obj, EmbeddingIndex):
-            return obj
-    except (OSError, pickle.UnpicklingError, EOFError, AttributeError, ModuleNotFoundError):
-        return None
-    return None
-
-
-def _is_stale(index: EmbeddingIndex, knowledge_dir: Path) -> bool:
-    """True if any tracked file moved/disappeared, or any .md is newer than the index."""
-    current_files = {str(p): p.stat().st_mtime for p in _iter_markdown(knowledge_dir)}
-    tracked = {rec.path: rec.mtime for rec in index.docs}
-
-    if set(current_files) != set(tracked):
-        return True
-    for path, mtime in current_files.items():
-        if mtime > tracked[path] + 1e-6:
-            return True
-    return False
-
-
 def load_or_build(
     knowledge_dir: Path,
     *,
@@ -395,12 +354,15 @@ def load_or_build(
     target = index_path or _default_index_path(knowledge_dir)
 
     if not force_rebuild and target.exists():
-        cached = _load_pickled(target)
+        cached = load_pickled(target, EmbeddingIndex)
         if (
             cached is not None
             and cached.knowledge_dir == knowledge_dir
             and cached.model_name == model_name
-            and not _is_stale(cached, knowledge_dir)
+            and not is_stale(
+                cached.docs,
+                {str(p): p.stat().st_mtime for p in _iter_markdown(knowledge_dir)},
+            )
         ):
             return cached
 

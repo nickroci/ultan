@@ -331,11 +331,11 @@ def test_pre_appends_event_with_inline_rule_text_missing(tmp_path: Path, monkeyp
     assert "(no inline rule text)" in body["hookSpecificOutput"]["permissionDecisionReason"]
 
 
-def test_pre_knowledge_dir_uses_default_when_unset(tmp_path: Path, monkeypatch):
-    """When AGENT_MEM_HOME is unset, _knowledge_dir resolves to
+def test_pre_knowledge_dir_uses_default_when_unset(monkeypatch):
+    """When AGENT_MEM_HOME is unset, the knowledge dir pre_tool_use reads
+    (now centralised in config.get_config) resolves to
     ``~/.agent-mem/knowledge``."""
     monkeypatch.delenv("AGENT_MEM_HOME", raising=False)
-    if "pre_tool_use" in sys.modules:
-        del sys.modules["pre_tool_use"]
-    pre = importlib.import_module("pre_tool_use")
-    assert pre._knowledge_dir() == Path.home() / ".agent-mem" / "knowledge"
+    from config import get_config
+
+    assert get_config().knowledge_dir == Path.home() / ".agent-mem" / "knowledge"

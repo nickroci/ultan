@@ -33,12 +33,8 @@ from claude_agent_sdk import (  # noqa: E402
 )
 from config import (  # noqa: E402
     AGENTS_FILE,
-    CONCEPTS_DIR,
-    CONNECTIONS_DIR,
-    DAILY_DIR,
-    KNOWLEDGE_DIR,
-    STORE_DIR,
     ensure_store_dirs,
+    get_config,
     now_iso,
 )
 from utils import (  # noqa: E402
@@ -58,6 +54,7 @@ async def compile_daily_log(log_path: Path, state: State) -> float:
 
     Returns the API cost of the compilation.
     """
+    cfg = get_config()
     log_content = log_path.read_text(encoding="utf-8")
     schema = AGENTS_FILE.read_text(encoding="utf-8")
     wiki_index = read_wiki_index()
@@ -66,7 +63,7 @@ async def compile_daily_log(log_path: Path, state: State) -> float:
     existing_articles_context = ""
     existing: dict[str, str] = {}
     for article_path in list_wiki_articles():
-        rel = article_path.relative_to(KNOWLEDGE_DIR)
+        rel = article_path.relative_to(cfg.knowledge_dir)
         existing[str(rel)] = article_path.read_text(encoding="utf-8")
 
     if existing:
@@ -131,10 +128,10 @@ Read the daily log above and compile it into wiki articles following the schema 
    ```
 
 ### File paths:
-- Write concept articles to: {CONCEPTS_DIR}
-- Write connection articles to: {CONNECTIONS_DIR}
-- Update index at: {KNOWLEDGE_DIR / "index.md"}
-- Append log at: {KNOWLEDGE_DIR / "log.md"}
+- Write concept articles to: {cfg.concepts_dir}
+- Write connection articles to: {cfg.connections_dir}
+- Update index at: {cfg.knowledge_dir / "index.md"}
+- Append log at: {cfg.knowledge_dir / "log.md"}
 
 ### Quality standards:
 - Every article must have complete YAML frontmatter
@@ -152,10 +149,10 @@ Read the daily log above and compile it into wiki articles following the schema 
             prompt=prompt,
             options=ClaudeAgentOptions(
                 # SDK cwd is the store — the knowledge base is what it
-                # reads and writes. Absolute paths to CONCEPTS_DIR etc.
+                # reads and writes. Absolute paths to cfg.concepts_dir etc.
                 # still work; this just makes Glob/Grep land in the right
                 # place if the model uses them.
-                cwd=str(STORE_DIR),
+                cwd=str(cfg.store_dir),
                 system_prompt={"type": "preset", "preset": "claude_code"},
                 allowed_tools=["Read", "Write", "Edit", "Glob", "Grep"],
                 permission_mode="acceptEdits",
@@ -190,14 +187,15 @@ Read the daily log above and compile it into wiki articles following the schema 
 def _resolve_target(file_arg: str) -> Path:
     """Resolve a ``--file`` argument to an absolute log path.
 
-    Tries the argument as-is, then under ``DAILY_DIR``, then under
-    ``STORE_DIR``. Exits with code 1 if none of the candidates exist.
+    Tries the argument as-is, then under the store's daily dir, then under
+    the store root. Exits with code 1 if none of the candidates exist.
     """
+    cfg = get_config()
     target = Path(file_arg)
     if not target.is_absolute():
-        target = DAILY_DIR / target.name
+        target = cfg.daily_dir / target.name
     if not target.exists():
-        target = STORE_DIR / file_arg
+        target = cfg.store_dir / file_arg
     if not target.exists():
         print(f"Error: {file_arg} not found")
         sys.exit(1)
@@ -208,7 +206,7 @@ def _select_files(args: argparse.Namespace, state: State) -> list[Path]:
     """Decide which daily logs to compile this run.
 
     - ``--file`` → exactly that one (resolved via :func:`_resolve_target`).
-    - ``--all`` → every log under ``DAILY_DIR``.
+    - ``--all`` → every log under the store's daily dir.
     - default → only logs whose content hash has changed since the last
       run (or never been compiled).
     """

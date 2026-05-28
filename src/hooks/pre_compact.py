@@ -14,13 +14,11 @@ shim Claude Code invokes via settings.json.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import re
 import sys
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 _THIS_DIR = Path(__file__).resolve().parent
 _CODE_ROOT = _THIS_DIR.parent
@@ -30,39 +28,13 @@ if str(_SCRIPTS_DIR) not in sys.path:
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-from _events import HookPayload, append_event  # noqa: E402
+from _events import append_event  # noqa: E402
 from _flush_spawn import snapshot_and_spawn_flush  # noqa: E402
+from _hookutil import ensure_store_dirs, parse_stdin, setup_logging  # noqa: E402
+from config import get_config  # noqa: E402
 from scope import current_project_slug  # noqa: E402
 
 MIN_TURNS_TO_FLUSH = 5
-
-
-def _store_dir() -> Path:
-    """Resolve ``${AGENT_MEM_HOME:-~/.agent-mem}`` at call time."""
-    override = os.environ.get("AGENT_MEM_HOME")
-    if override:
-        return Path(override).expanduser()
-    return Path.home() / ".agent-mem"
-
-
-def _ensure_store_dirs(store: Path) -> None:
-    for sub in ("", "state", "knowledge", "daily"):
-        try:
-            (store / sub if sub else store).mkdir(parents=True, exist_ok=True)
-        except OSError:
-            pass
-
-
-def _setup_logging(store: Path) -> None:
-    try:
-        logging.basicConfig(
-            filename=str(store / "flush.log"),
-            level=logging.INFO,
-            format="%(asctime)s %(levelname)s [pre-compact] %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
-    except OSError:
-        pass
 
 
 def main() -> None:
@@ -70,25 +42,14 @@ def main() -> None:
     if os.environ.get("CLAUDE_INVOKED_BY"):
         return
 
-    store = _store_dir()
-    _ensure_store_dirs(store)
-    _setup_logging(store)
+    store = get_config().store_dir
+    ensure_store_dirs(store)
+    setup_logging(store, "pre-compact")
 
-    try:
-        raw_input = sys.stdin.read()
-        parsed: Any
-        try:
-            parsed = json.loads(raw_input)
-        except json.JSONDecodeError:
-            fixed_input = re.sub(r'(?<!\\)\\(?!["\\])', r"\\\\", raw_input)
-            parsed = json.loads(fixed_input)
-    except (json.JSONDecodeError, ValueError, EOFError) as e:
-        logging.error("Failed to parse stdin: %s", e)
+    hook_input = parse_stdin()
+    if hook_input is None:
+        logging.error("Failed to parse stdin")
         return
-
-    if not isinstance(parsed, dict):
-        return
-    hook_input: HookPayload = cast("HookPayload", parsed)
 
     raw_session: Any = hook_input.get("session_id", "unknown")
     session_id: str = raw_session if isinstance(raw_session, str) else str(raw_session)

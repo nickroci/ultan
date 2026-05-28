@@ -24,12 +24,10 @@ shim Claude Code invokes via settings.json.
 
 from __future__ import annotations
 
-import json
 import os
-import re
 import sys
 from pathlib import Path
-from typing import Any, Mapping, Optional, cast
+from typing import Any, Mapping, cast
 
 _THIS_DIR = Path(__file__).resolve().parent
 _CODE_ROOT = _THIS_DIR.parent
@@ -40,27 +38,7 @@ if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
 from _events import EventPayload, HookPayload, append_event  # noqa: E402
-
-
-def _parse_stdin() -> Optional[HookPayload]:
-    """Parse the JSON hook_input from stdin; return None on any failure.
-
-    Same Windows-backslash workaround as the other hooks — Claude Code
-    on Windows sometimes emits paths with lone backslashes that aren't
-    valid JSON escapes.
-    """
-    try:
-        raw = sys.stdin.read()
-        try:
-            parsed: Any = json.loads(raw)
-        except json.JSONDecodeError:
-            fixed = re.sub(r'(?<!\\)\\(?!["\\])', r"\\\\", raw)
-            parsed = json.loads(fixed)
-    except (json.JSONDecodeError, ValueError, EOFError):
-        return None
-    if not isinstance(parsed, dict):
-        return None
-    return cast("HookPayload", parsed)
+from _hookutil import parse_stdin  # noqa: E402
 
 
 def _first_str_field(d: Mapping[str, Any], keys: tuple[str, ...]) -> str:
@@ -127,7 +105,7 @@ def main() -> None:
     if os.environ.get("CLAUDE_INVOKED_BY"):
         return
 
-    hook_input = _parse_stdin()
+    hook_input = parse_stdin()
     if hook_input is None:
         return
 

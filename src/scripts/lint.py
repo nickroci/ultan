@@ -31,10 +31,8 @@ from claude_agent_sdk import (  # noqa: E402
     query,
 )
 from config import (  # noqa: E402
-    KNOWLEDGE_DIR,
-    REPORTS_DIR,
-    STORE_DIR,
     ensure_store_dirs,
+    get_config,
     now_iso,
     today_iso,
 )
@@ -68,9 +66,10 @@ class Issue(TypedDict):
 def check_broken_links() -> list[Issue]:
     """Check for [[wikilinks]] that point to non-existent articles."""
     issues: list[Issue] = []
+    knowledge_dir = get_config().knowledge_dir
     for article in list_wiki_articles():
         content = article.read_text(encoding="utf-8")
-        rel = article.relative_to(KNOWLEDGE_DIR)
+        rel = article.relative_to(knowledge_dir)
         for link in extract_wikilinks(content):
             if link.startswith("daily/"):
                 continue  # daily log references are valid
@@ -89,8 +88,9 @@ def check_broken_links() -> list[Issue]:
 def check_orphan_pages() -> list[Issue]:
     """Check for articles with zero inbound links."""
     issues: list[Issue] = []
+    knowledge_dir = get_config().knowledge_dir
     for article in list_wiki_articles():
-        rel = article.relative_to(KNOWLEDGE_DIR)
+        rel = article.relative_to(knowledge_dir)
         link_target = str(rel).replace(".md", "").replace("\\", "/")
         inbound = count_inbound_links(link_target)
         if inbound == 0:
@@ -148,15 +148,16 @@ def check_stale_articles() -> list[Issue]:
 def check_missing_backlinks() -> list[Issue]:
     """Check for asymmetric links: A links to B but B doesn't link to A."""
     issues: list[Issue] = []
+    knowledge_dir = get_config().knowledge_dir
     for article in list_wiki_articles():
         content = article.read_text(encoding="utf-8")
-        rel = article.relative_to(KNOWLEDGE_DIR)
+        rel = article.relative_to(knowledge_dir)
         source_link = str(rel).replace(".md", "").replace("\\", "/")
 
         for link in extract_wikilinks(content):
             if link.startswith("daily/"):
                 continue
-            target_path = KNOWLEDGE_DIR / f"{link}.md"
+            target_path = knowledge_dir / f"{link}.md"
             if target_path.exists():
                 target_content = target_path.read_text(encoding="utf-8")
                 if f"[[{source_link}]]" not in target_content:
@@ -178,7 +179,7 @@ def check_sparse_articles() -> list[Issue]:
     for article in list_wiki_articles():
         word_count = get_article_word_count(article)
         if word_count < 200:
-            rel = article.relative_to(KNOWLEDGE_DIR)
+            rel = article.relative_to(get_config().knowledge_dir)
             issues.append(
                 Issue(
                     severity="suggestion",
@@ -221,7 +222,7 @@ Do NOT output anything else - no preamble, no explanation, just the formatted li
         async for message in query(
             prompt=prompt,
             options=ClaudeAgentOptions(
-                cwd=str(STORE_DIR),
+                cwd=str(get_config().store_dir),
                 allowed_tools=[],
                 max_turns=2,
             ),
@@ -334,8 +335,9 @@ def main() -> int:
 
     # Generate and save report
     report = generate_report(all_issues)
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    report_path = REPORTS_DIR / f"lint-{today_iso()}.md"
+    reports_dir = get_config().reports_dir
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    report_path = reports_dir / f"lint-{today_iso()}.md"
     report_path.write_text(report, encoding="utf-8")
     print(f"\nReport saved to: {report_path}")
 

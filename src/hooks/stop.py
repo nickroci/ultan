@@ -14,12 +14,9 @@ Latency target: < 5 ms.
 
 from __future__ import annotations
 
-import json
 import os
-import re
 import sys
 from pathlib import Path
-from typing import Any, cast
 
 _THIS_DIR = Path(__file__).resolve().parent
 _CODE_ROOT = _THIS_DIR.parent
@@ -29,7 +26,8 @@ if str(_SCRIPTS_DIR) not in sys.path:
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-from _events import HookPayload, append_event  # noqa: E402
+from _events import append_event  # noqa: E402
+from _hookutil import parse_stdin  # noqa: E402
 
 
 def main() -> None:
@@ -39,20 +37,9 @@ def main() -> None:
     if os.environ.get("CLAUDE_INVOKED_BY"):
         return
 
-    try:
-        raw_input = sys.stdin.read()
-        parsed: Any
-        try:
-            parsed = json.loads(raw_input)
-        except json.JSONDecodeError:
-            fixed_input = re.sub(r'(?<!\\)\\(?!["\\])', r"\\\\", raw_input)
-            parsed = json.loads(fixed_input)
-    except (json.JSONDecodeError, ValueError, EOFError):
+    hook_input = parse_stdin()
+    if hook_input is None:
         return
-
-    if not isinstance(parsed, dict):
-        return
-    hook_input: HookPayload = cast("HookPayload", parsed)
 
     append_event("Stop", hook_input, payload={})
 

@@ -29,10 +29,8 @@ from claude_agent_sdk import (  # noqa: E402
     query,
 )
 from config import (  # noqa: E402
-    KNOWLEDGE_DIR,
-    QA_DIR,
-    STORE_DIR,
     ensure_store_dirs,
+    get_config,
     now_iso,
 )
 from utils import (  # noqa: E402
@@ -44,6 +42,7 @@ from utils import (  # noqa: E402
 
 async def run_query(question: str, file_back: bool = False) -> str:
     """Query the knowledge base and optionally file the answer back."""
+    cfg = get_config()
     wiki_content = read_all_wiki_content()
 
     tools = ["Read", "Glob", "Grep"]
@@ -58,12 +57,12 @@ async def run_query(question: str, file_back: bool = False) -> str:
 ## File Back Instructions
 
 After answering, do the following:
-1. Create a Q&A article at {QA_DIR}/ with the filename being a slugified version
+1. Create a Q&A article at {cfg.qa_dir}/ with the filename being a slugified version
    of the question (e.g., knowledge/global/qa/how-to-handle-auth-redirects.md)
 2. Use the Q&A article format from the schema (frontmatter with title, question,
    consulted articles, filed date)
-3. Update {KNOWLEDGE_DIR / "index.md"} with a new row for this Q&A article
-4. Append to {KNOWLEDGE_DIR / "log.md"}:
+3. Update {cfg.knowledge_dir / "index.md"} with a new row for this Q&A article
+4. Append to {cfg.knowledge_dir / "log.md"}:
    ## [{timestamp}] query (filed) | question summary
    - Question: {question}
    - Consulted: [[list of articles read]]
@@ -98,7 +97,7 @@ consulting the knowledge base below.
         async for message in query(
             prompt=prompt,
             options=ClaudeAgentOptions(
-                cwd=str(STORE_DIR),
+                cwd=str(cfg.store_dir),
                 system_prompt={"type": "preset", "preset": "claude_code"},
                 allowed_tools=tools,
                 permission_mode="acceptEdits",
@@ -144,7 +143,8 @@ def main() -> None:
 
     if args.file_back:
         print("\n" + "-" * 60)
-        qa_count = len(list(QA_DIR.glob("*.md"))) if QA_DIR.exists() else 0
+        qa_dir = get_config().qa_dir
+        qa_count = len(list(qa_dir.glob("*.md"))) if qa_dir.exists() else 0
         print(f"Answer filed to knowledge/global/qa/ ({qa_count} Q&A articles total)")
 
 

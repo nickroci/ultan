@@ -269,18 +269,19 @@ def test_build_index_skips_unreadable_and_empty(tmp_path: Path, monkeypatch) -> 
 
 
 def test_load_pickled_corrupt_file_returns_none(tmp_path: Path) -> None:
-    from embeddings import _load_pickled
+    from bm25 import load_pickled
 
     p = tmp_path / "garbage.idx"
     p.write_bytes(b"not a pickle stream")
-    assert _load_pickled(p) is None
+    assert load_pickled(p, EmbeddingIndex) is None
 
 
 def test_is_stale_detects_new_file(built_index: EmbeddingIndex, tmp_path: Path) -> None:
     """A file appearing after the index was built is detected as stale."""
     import shutil as shu
 
-    from embeddings import _is_stale, build_index
+    from bm25 import is_stale, iter_markdown
+    from embeddings import build_index
 
     # Build a fresh index against a known corpus.
     knowledge = tmp_path / "kb"
@@ -289,7 +290,8 @@ def test_is_stale_detects_new_file(built_index: EmbeddingIndex, tmp_path: Path) 
     # Drop in a new file and confirm staleness.
     new = knowledge / "global" / "concepts" / "extra.md"
     new.write_text("# extra\n\nNew content.\n", encoding="utf-8")
-    assert _is_stale(idx, knowledge) is True
+    current_files = {str(p): p.stat().st_mtime for p in iter_markdown(knowledge)}
+    assert is_stale(idx.docs, current_files) is True
 
 
 def test_load_or_build_save_failure_returns_in_memory_index(tmp_path: Path, monkeypatch) -> None:
