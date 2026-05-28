@@ -940,3 +940,24 @@ def test_repair_skips_archive_and_log(tmp_path: Path):
     changes = scholar_prompt.repair_broken_wikilinks(k)
     assert changes == []
     assert "[[global/ghost/dead]]" in (k / "log.md").read_text(encoding="utf-8")
+
+
+def test_repair_index_row_prefix_does_not_delete_valid_longer_row(tmp_path: Path):
+    # A broken target that is a PREFIX of a valid entry's link must not
+    # trigger deletion of a row whose only link is the longer, valid one.
+    # E.g. broken ``global/python/use`` vs valid ``[[global/python/use-uv]]`` —
+    # a naive substring match on ``[[global/python/use`` would wrongly nuke
+    # the valid row. The match must be on the full ``]]``/``|`` token boundary.
+    k = _seed_repair_tree(tmp_path)
+    valid_row = "| [[global/python/use-uv]] | global | provisional | 0.7 | uv | x | y | z |\n"
+    phantom_row = "| [[global/python/use]] | global | provisional | 0.5 | g | a | b | c |\n"
+    (k / "index.md").write_text(_INDEX_HEADER + valid_row + phantom_row, encoding="utf-8")
+
+    changes = scholar_prompt.repair_broken_wikilinks(k)
+    assert any("phantom row" in c for c in changes)
+    index_after = (k / "index.md").read_text(encoding="utf-8")
+    # The valid longer-named entry's row must survive.
+    assert "[[global/python/use-uv]]" in index_after
+    # Only the genuinely broken prefix row is removed.
+    assert "[[global/python/use]]" not in index_after
+    assert not any("broken wikilink" in v for v in scholar_prompt.check_invariants(k))

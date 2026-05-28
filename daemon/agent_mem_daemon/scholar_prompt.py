@@ -1234,7 +1234,15 @@ def _repair_index_rows(text: str, broken_targets: set[str]) -> tuple[str, int]:
     removed = 0
     for line in text.splitlines(keepends=True):
         stripped = line.lstrip()
-        if stripped.startswith("|") and any(f"[[{t}" in line for t in broken_targets):
+        # Match the FULL wikilink token, not a prefix: a broken target
+        # ``global/foo`` must not delete a row whose only link is the
+        # valid ``[[global/foobar]]`` (prefix ``[[global/foo`` would match
+        # inside it). A table-cell wikilink is terminated by ``]]`` or by
+        # ``|`` (the alias separator), so require one of those right after
+        # the target.
+        if stripped.startswith("|") and any(
+            f"[[{t}]]" in line or f"[[{t}|" in line for t in broken_targets
+        ):
             removed += 1
             continue
         kept.append(line)
