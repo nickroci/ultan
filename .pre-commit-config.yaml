@@ -99,6 +99,38 @@ repos:
         pass_filenames: true
         stages: [pre-commit]
 
+      # Duplicate-code (copy-paste) detection per package, via pylint's
+      # R0801 check — the only pylint rule we enable. Like ruff, it runs on
+      # the WHOLE package tree (pass_filenames: false) because the
+      # similarity checker only finds copies among the files in a single
+      # run; a staged-only subset would compare a file against itself.
+      # Threshold + ignore knobs live in each package's
+      # [tool.pylint.similarities]. --fail-on forces a non-zero exit on a
+      # finding (symilar would always exit 0).
+      - id: duplicate-code-daemon
+        name: duplicate-code (daemon)
+        language: system
+        entry: bash -c 'cd daemon && find . -name "*.py" -not -path "./.venv/*" -print0 | xargs -0 uv run --frozen pylint --disable=all --enable=duplicate-code --fail-on=duplicate-code'
+        files: ^daemon/.*\.py$
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: duplicate-code-tools-search
+        name: duplicate-code (tools/search)
+        language: system
+        entry: bash -c 'cd tools/search && find . -name "*.py" -not -path "./.venv/*" -print0 | xargs -0 uv run --frozen pylint --disable=all --enable=duplicate-code --fail-on=duplicate-code'
+        files: ^tools/search/.*\.py$
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: duplicate-code-src
+        name: duplicate-code (src)
+        language: system
+        entry: bash -c 'cd src && find . -name "*.py" -not -path "./.venv/*" -print0 | xargs -0 uv run --frozen pylint --disable=all --enable=duplicate-code --fail-on=duplicate-code'
+        files: ^src/.*\.py$
+        pass_filenames: false
+        stages: [pre-commit]
+
       # Pytest per package — runs at pre-push, not pre-commit. Full suite,
       # only when something in that package changed since the last push.
       - id: pytest-daemon

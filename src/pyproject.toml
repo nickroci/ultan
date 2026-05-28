@@ -90,10 +90,21 @@ exclude_lines = [
   "if TYPE_CHECKING:",
 ]
 
+[tool.pylint.similarities]
+# Copy-paste detection (R0801) — the only pylint check we run; see the
+# duplicate-code pre-commit hook. Tuned to flag genuine copy-paste while
+# tolerating short, naturally-similar blocks (imports, signatures, etc).
+min-similarity-lines = 8
+ignore-comments = true
+ignore-docstrings = true
+ignore-imports = true
+ignore-signatures = true
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",
     "pyright>=1.1.409",
     "ruff>=0.15.14",
     "pytest-cov>=7.1.0",
+    "pylint>=3.3",
 ]

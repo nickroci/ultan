@@ -35,6 +35,7 @@ JSON response to stdout. The fixtures here build the scaffolding once:
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import shutil
@@ -45,7 +46,9 @@ import sys
 import tempfile
 import threading
 from contextlib import contextmanager
+from io import StringIO
 from pathlib import Path
+from types import ModuleType
 from typing import Callable, ContextManager, Iterator
 
 import pytest
@@ -119,42 +122,91 @@ def _entry(
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def seed_library(home: Path) -> Path:
+    """Seed a tiny knowledge dir under ``home`` and return its path.
+
+    Shared by the priming, end-to-end, and priming-socket hook tests so
+    they all exercise one library shape.
+    """
+    k = home / "knowledge"
+    for sub in ("global/python", "global/git"):
+        (k / sub).mkdir(parents=True, exist_ok=True)
+        (k / sub / "README.md").write_text(f"# {sub}\n", encoding="utf-8")
+    (k / "README.md").write_text("# knowledge\n", encoding="utf-8")
+    # log.md as the blocker-cache sentinel
+    (k / "log.md").write_text("# Build Log\n", encoding="utf-8")
+
+    _entry(
+        k / "global" / "python" / "use-uv-not-pip.md",
+        title="Always use uv for python",
+        applies_when="installing python deps",
+        keywords=["python", "uv", "pip"],
+        reinforced=3,
+    )
+    _entry(
+        k / "global" / "python" / "type-hints.md",
+        title="Use type hints",
+        applies_when="writing python functions",
+        keywords=["python", "types"],
+    )
+    _entry(
+        k / "global" / "git" / "no-force-push.md",
+        title="Never force-push",
+        applies_when="pushing to git remotes",
+        keywords=["git", "push"],
+    )
+    return k
+
+
 @pytest.fixture
 def seed_lib() -> Callable[[Path], Path]:
-    """Return a function that seeds a knowledge dir under the given
-    home and returns the path. Used by priming + end-to-end tests."""
+    """Fixture wrapper around :func:`seed_library`."""
+    return seed_library
 
-    def _seed(home: Path) -> Path:
-        k = home / "knowledge"
-        for sub in ("global/python", "global/git"):
-            (k / sub).mkdir(parents=True, exist_ok=True)
-            (k / sub / "README.md").write_text(f"# {sub}\n", encoding="utf-8")
-        (k / "README.md").write_text("# knowledge\n", encoding="utf-8")
-        # log.md as the blocker-cache sentinel
-        (k / "log.md").write_text("# Build Log\n", encoding="utf-8")
 
-        _entry(
-            k / "global" / "python" / "use-uv-not-pip.md",
-            title="Always use uv for python",
-            applies_when="installing python deps",
-            keywords=["python", "uv", "pip"],
-            reinforced=3,
-        )
-        _entry(
-            k / "global" / "python" / "type-hints.md",
-            title="Use type hints",
-            applies_when="writing python functions",
-            keywords=["python", "types"],
-        )
-        _entry(
-            k / "global" / "git" / "no-force-push.md",
-            title="Never force-push",
-            applies_when="pushing to git remotes",
-            keywords=["git", "push"],
-        )
-        return k
+# ── Flush-spawning hook helpers (session_end / pre_compact) ──────────
 
-    return _seed
+
+class FakePopen:
+    """Stand-in for ``subprocess.Popen`` so the flush-spawning hooks never
+    actually launch flush.py during tests."""
+
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.returncode = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+def fresh_hook(monkeypatch, home: Path, module_name: str) -> ModuleType:
+    """Import a flush-spawning hook module with ``AGENT_MEM_HOME`` pinned and
+    ``_flush_spawn.subprocess.Popen`` stubbed so no real flush is spawned.
+
+    No ``sys.modules`` surgery: ``config.get_config()`` reads
+    ``AGENT_MEM_HOME`` at call time, so a plain import already picks up the
+    test env.
+    """
+    monkeypatch.setenv("AGENT_MEM_HOME", str(home))
+    monkeypatch.delenv("CLAUDE_INVOKED_BY", raising=False)
+    import _flush_spawn
+
+    class _ShimSubprocess:
+        Popen = staticmethod(FakePopen)
+        DEVNULL = _flush_spawn.subprocess.DEVNULL
+        CREATE_NO_WINDOW = getattr(_flush_spawn.subprocess, "CREATE_NO_WINDOW", 0)
+
+    monkeypatch.setattr(_flush_spawn, "subprocess", _ShimSubprocess)
+    return importlib.import_module(module_name)
+
+
+def drive_stdin(monkeypatch, module: ModuleType, payload: dict) -> None:
+    """Feed ``payload`` as JSON on stdin and call the hook module's main()."""
+    monkeypatch.setattr(sys, "stdin", StringIO(json.dumps(payload)))
+    module.main()
 
 
 # ── Fake priming-socket RPC server ───────────────────────────────────

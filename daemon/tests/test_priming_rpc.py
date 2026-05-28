@@ -28,12 +28,14 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 import pytest
 
 from agent_mem_daemon import priming_rpc
 from agent_mem_daemon.priming_rpc import PrimingRpcThread
+
+from .conftest import build_library
 
 
 # macOS caps AF_UNIX socket paths at ~104 chars; pytest's tmp_path
@@ -48,124 +50,13 @@ def _short_socket_dir() -> Path:
 # ── Fixture helpers (small library seeded for hybrid search) ──────────
 
 
-def _entry(
-    *,
-    id_: str,
-    title: str,
-    applies_when: str,
-    keywords: List[str],
-    reinforced: Optional[int] = None,
-    body: str = "",
-    scope: str = "global",
-) -> str:
-    """Render a minimal valid library entry."""
-    lines = [
-        "---",
-        f"id: {id_}",
-        "type: lesson",
-        f"scope: {scope}",
-        "status: provisional",
-        "confidence: 0.7",
-        "applies-when: |",
-    ]
-    for line in applies_when.splitlines():
-        lines.append(f"  {line}")
-    lines.append("keywords: [" + ", ".join(keywords) + "]")
-    lines.append(f'title: "{title}"')
-    lines.append("created: 2026-05-19")
-    lines.append("updated: 2026-05-19")
-    lines.append("fired: 0")
-    lines.append("fired-helpful: 0")
-    if reinforced is not None:
-        lines.append(f"reinforced: {reinforced}")
-    lines.append("sources:")
-    lines.append("  - manual")
-    lines.append("---")
-    lines.append("")
-    lines.append(f"# {title}")
-    lines.append("")
-    lines.append(body or f"Body for {id_}. {applies_when}.")
-    lines.append("")
-    return "\n".join(lines)
-
-
-def _write(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
-
-
 def _seed_library(root: Path) -> Path:
-    """Build a small library — enough docs for BM25 to give nonzero IDF."""
-    k = root / "knowledge"
-    _write(k / "README.md", "# knowledge root\n")
-    _write(k / "global" / "README.md", "# global\n")
-    _write(k / "global" / "python" / "README.md", "# python\n")
-    _write(k / "global" / "git" / "README.md", "# git\n")
-    _write(
-        k / "global" / "python" / "use-uv-not-pip.md",
-        _entry(
-            id_="use-uv-not-pip",
-            title="Always use uv for python",
-            applies_when="installing python deps or running scripts",
-            keywords=["python", "uv", "pip", "packaging"],
-            body="Always use uv for python package management. Never pip.",
-        ),
-    )
-    _write(
-        k / "global" / "python" / "ruff-format.md",
-        _entry(
-            id_="ruff-format",
-            title="Format python with ruff",
-            applies_when="formatting python files",
-            keywords=["python", "ruff", "format"],
-        ),
-    )
-    _write(
-        k / "global" / "git" / "no-force-push.md",
-        _entry(
-            id_="no-force-push",
-            title="Never force-push to main",
-            applies_when="pushing to git remotes",
-            keywords=["git", "push", "remote"],
-        ),
-    )
-    _write(
-        k / "global" / "git" / "small-commits.md",
-        _entry(
-            id_="small-commits",
-            title="Prefer small commits",
-            applies_when="committing changes",
-            keywords=["git", "commits", "history"],
-        ),
-    )
-    _write(
-        k / "global" / "git" / "branch-naming.md",
-        _entry(
-            id_="branch-naming",
-            title="Use kebab-case branches",
-            applies_when="creating new git branches",
-            keywords=["git", "branches", "naming"],
-        ),
-    )
-    _write(
-        k / "global" / "git" / "rebase-not-merge.md",
-        _entry(
-            id_="rebase-not-merge",
-            title="Prefer rebase over merge",
-            applies_when="updating feature branches",
-            keywords=["git", "rebase", "merge"],
-        ),
-    )
-    _write(
-        k / "global" / "git" / "signed-commits.md",
-        _entry(
-            id_="signed-commits",
-            title="Sign all commits",
-            applies_when="committing changes",
-            keywords=["git", "gpg", "sign"],
-        ),
-    )
-    return k
+    """Build a small library — enough docs for BM25 to give nonzero IDF.
+
+    Thin wrapper over the shared ``build_library`` so this module's call
+    sites stay terse. The default (7 leaf entries, short uv body) is what
+    every rpc test expects."""
+    return build_library(root)
 
 
 @pytest.fixture(autouse=True)

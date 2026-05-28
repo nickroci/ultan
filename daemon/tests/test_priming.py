@@ -18,64 +18,34 @@ against on-disk fixtures rather than mocking — keeps the test honest.
 
 from __future__ import annotations
 
+import functools
 import os
 from pathlib import Path
-from typing import List, Optional
 
 import pytest
 
 from agent_mem_daemon import priming
 
+from .conftest import build_library, render_entry, write_entry
+
 # ── Fixture helpers ───────────────────────────────────────────────────
 
+# This module renders entries with a slightly different default body than
+# the shared default ("...The rule applies when..."). Bind that template
+# once so the renderer stays single-sourced in conftest while these
+# fixtures keep their exact, BM25-/rerank-sensitive bytes.
+_PRIMING_BODY_TEMPLATE = "Body for {id_}. The rule applies when {applies_when}."
 
-def _entry(
-    *,
-    id_: str,
-    title: str,
-    applies_when: str,
-    keywords: List[str],
-    reinforced: Optional[int] = None,
-    body: str = "",
-    scope: str = "global",
-) -> str:
-    """Render a valid library entry as a YAML-frontmattered markdown
-    string. Matches the schema enforced by
-    ``scholar_prompt._REQUIRED_FRONTMATTER_FIELDS``."""
-    lines = [
-        "---",
-        f"id: {id_}",
-        "type: lesson",
-        f"scope: {scope}",
-        "status: provisional",
-        "confidence: 0.7",
-        "applies-when: |",
-    ]
-    for line in applies_when.splitlines():
-        lines.append(f"  {line}")
-    lines.append("keywords: [" + ", ".join(keywords) + "]")
-    lines.append(f'title: "{title}"')
-    lines.append("created: 2026-05-19")
-    lines.append("updated: 2026-05-19")
-    lines.append("fired: 0")
-    lines.append("fired-helpful: 0")
-    if reinforced is not None:
-        lines.append(f"reinforced: {reinforced}")
-    lines.append("sources:")
-    lines.append("  - manual")
-    lines.append("---")
-    lines.append("")
-    lines.append(f"# {title}")
-    lines.append("")
-    body_text = body or f"Body for {id_}. The rule applies when {applies_when}."
-    lines.append(body_text)
-    lines.append("")
-    return "\n".join(lines)
+# Longer multi-line body for the python/uv seed entry — engineered so the
+# relevance test scores the python/uv entry highest by BM25.
+_PRIMING_UV_BODY = (
+    "Always use uv for python package management. Never pip. "
+    "uv is faster, deterministic, and the project standard. "
+    "Install dependencies with `uv add`, run scripts with `uv run`."
+)
 
-
-def _write(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+_entry = functools.partial(render_entry, default_body_template=_PRIMING_BODY_TEMPLATE)
+_write = write_entry
 
 
 def _seed_library(root: Path) -> Path:
@@ -85,90 +55,12 @@ def _seed_library(root: Path) -> Path:
     manager") is engineered to score the python/uv entry highest by
     BM25.
     """
-    k = root / "knowledge"
-    _write(k / "README.md", "# knowledge root\n")
-    _write(k / "global" / "README.md", "# global\n")
-    _write(k / "global" / "python" / "README.md", "# python\n")
-    _write(k / "global" / "git" / "README.md", "# git\n")
-
-    _write(
-        k / "global" / "python" / "use-uv-not-pip.md",
-        _entry(
-            id_="use-uv-not-pip",
-            title="Always use uv for python",
-            applies_when="installing python deps or running scripts",
-            keywords=["python", "uv", "pip", "packaging"],
-            body=(
-                "Always use uv for python package management. Never pip. "
-                "uv is faster, deterministic, and the project standard. "
-                "Install dependencies with `uv add`, run scripts with `uv run`."
-            ),
-        ),
+    return build_library(
+        root,
+        include_type_hints=True,
+        uv_body=_PRIMING_UV_BODY,
+        default_body_template=_PRIMING_BODY_TEMPLATE,
     )
-    _write(
-        k / "global" / "python" / "ruff-format.md",
-        _entry(
-            id_="ruff-format",
-            title="Format python with ruff",
-            applies_when="formatting python files",
-            keywords=["python", "ruff", "format"],
-        ),
-    )
-    _write(
-        k / "global" / "python" / "type-hints.md",
-        _entry(
-            id_="type-hints",
-            title="Always use type hints",
-            applies_when="writing python functions",
-            keywords=["python", "types", "mypy"],
-        ),
-    )
-    _write(
-        k / "global" / "git" / "no-force-push.md",
-        _entry(
-            id_="no-force-push",
-            title="Never force-push to main",
-            applies_when="pushing to git remotes",
-            keywords=["git", "push", "remote"],
-        ),
-    )
-    _write(
-        k / "global" / "git" / "small-commits.md",
-        _entry(
-            id_="small-commits",
-            title="Prefer small commits",
-            applies_when="committing changes",
-            keywords=["git", "commits", "history"],
-        ),
-    )
-    _write(
-        k / "global" / "git" / "branch-naming.md",
-        _entry(
-            id_="branch-naming",
-            title="Use kebab-case branches",
-            applies_when="creating new git branches",
-            keywords=["git", "branches", "naming"],
-        ),
-    )
-    _write(
-        k / "global" / "git" / "rebase-not-merge.md",
-        _entry(
-            id_="rebase-not-merge",
-            title="Prefer rebase over merge",
-            applies_when="updating feature branches",
-            keywords=["git", "rebase", "merge"],
-        ),
-    )
-    _write(
-        k / "global" / "git" / "signed-commits.md",
-        _entry(
-            id_="signed-commits",
-            title="Sign all commits",
-            applies_when="committing changes",
-            keywords=["git", "gpg", "sign"],
-        ),
-    )
-    return k
 
 
 @pytest.fixture(autouse=True)

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import io
 import shutil
-import textwrap
 from datetime import date
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
@@ -19,41 +19,13 @@ FIXTURES = Path(__file__).parent / "fixtures" / "knowledge"
 # ── Shared fixtures ────────────────────────────────────────────────────────────
 
 
-def _make_provisional_entry(path: Path, *, ident: str, scope: str = "global") -> Path:
-    body = textwrap.dedent(
-        f"""\
-        ---
-        id: {ident}
-        type: lesson
-        scope: {scope}
-        status: provisional
-        confidence: 0.6
-        applies-when: |
-          writing CLI lifecycle tests
-        keywords: [test, lifecycle, {ident}]
-        created: 2026-05-19
-        updated: 2026-05-19
-        fired: 0
-        fired-helpful: 0
-        ---
-
-        # {ident}
-
-        A provisional fixture entry for lifecycle tests.
-        """
-    )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
-    return path
-
-
 @pytest.fixture
-def knowledge_dir(tmp_path: Path) -> Path:
+def knowledge_dir(tmp_path: Path, make_provisional: Callable[..., Path]) -> Path:
     """A fresh copy of the fixture corpus + two provisional entries."""
     dst = tmp_path / "knowledge"
     shutil.copytree(FIXTURES, dst)
-    _make_provisional_entry(dst / "global" / "concepts" / "prov-one.md", ident="prov-one")
-    _make_provisional_entry(
+    make_provisional(dst / "global" / "concepts" / "prov-one.md", ident="prov-one")
+    make_provisional(
         dst / "projects" / "example-app" / "concepts" / "prov-two.md",
         ident="prov-two",
         scope="project:example-app",
