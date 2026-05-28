@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_mem_daemon import librarian, llm
+from agent_mem_daemon import librarian, llm, repair_queue
 
 
 @pytest.fixture
@@ -24,6 +24,16 @@ def home(tmp_path, monkeypatch):
     """Pin AGENT_MEM_HOME to a tmp dir."""
     monkeypatch.setenv("AGENT_MEM_HOME", str(tmp_path))
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _fresh_repair_queue():
+    """Isolate the process-global repair queue so a leftover escalation
+    from another module can't leak a ``repair_fingerprints`` key into these
+    packets (and so the drain tests start empty)."""
+    repair_queue.reset_queue()
+    yield
+    repair_queue.reset_queue()
 
 
 def _payload_snap(session_id: str, exchanges: list[tuple[str, str]]):
@@ -315,3 +325,87 @@ def test_evidence_packet_has_only_expected_top_level_keys(home, monkeypatch):
     snap = _payload_snap("sess-shape", [("user", "Always X.")])
     packet = librarian.scan(snap)
     assert set(packet.keys()) <= {"session_id", "proposals", "interrupts"}
+
+
+# ── Integrity-repair task routing ─────────────────────────────────────
+
+
+def _queue_task(target: str = "global/ghost/missing") -> tuple:
+    task = repair_queue.RepairTask(
+        kind=repair_queue.KIND_BROKEN_WIKILINK,
+        file="global/python/foo.md",
+        target=target,
+        context="…[[ghost]]…",
+    )
+    repair_queue.get_queue().enqueue(task)
+    return task.fingerprint
+
+
+def test_scan_drains_repair_task_into_prompt_and_attaches_fingerprint(home, monkeypatch):
+    """A pending repair task is drained, rendered into the prompt, and its
+    fingerprint is attached to the emitted packet so the Scholar can later
+    release the in-flight marker."""
+    fp = _queue_task()
+    captured = {"prompt": None}
+
+    def fake_llm(prompt, *, cwd=None, timeout_s=60.0):
+        captured["prompt"] = prompt
+        return ('{"proposals": [], "interrupts": []}', 0.0)
+
+    monkeypatch.setattr(llm, "run_librarian_call", fake_llm)
+    snap = _payload_snap("s-rep", [("user", "Always X.")])
+    packet = librarian.scan(snap)
+
+    assert captured["prompt"] is not None
+    assert "INTEGRITY-REPAIR TASKS" in captured["prompt"]
+    assert "target: global/ghost/missing" in captured["prompt"]
+    assert packet.get("repair_fingerprints") == [fp]
+    # Drained — no longer pending, but still in-flight until the Scholar
+    # concludes the review.
+    assert repair_queue.get_queue().pending_count() == 0
+    assert repair_queue.get_queue().inflight_count() == 1
+
+
+def test_scan_attaches_fingerprints_even_on_sdk_error(home, monkeypatch):
+    """Leak fix: a Librarian that drained a task but then errored must STILL
+    hand the fingerprint to the Scholar (on the error/empty packet) so the
+    marker can be released — otherwise it stays in-flight forever."""
+    fp = _queue_task()
+
+    def boom(prompt, *, cwd=None, timeout_s=60.0):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(llm, "run_librarian_call", boom)
+    snap = _payload_snap("s-rep-err", [("user", "Always X.")])
+    packet = librarian.scan(snap)
+
+    assert packet["proposals"] == []
+    assert packet.get("repair_fingerprints") == [fp]
+
+
+def test_scan_runs_llm_for_repair_task_even_with_empty_buffer(home, monkeypatch):
+    """A pending repair task is itself a reason to invoke the LLM — the
+    empty-buffer short-circuit must NOT skip it."""
+    fp = _queue_task()
+    called = {"n": 0}
+
+    def fake_llm(prompt, *, cwd=None, timeout_s=60.0):
+        called["n"] += 1
+        return ('{"proposals": [], "interrupts": []}', 0.0)
+
+    monkeypatch.setattr(llm, "run_librarian_call", fake_llm)
+    packet = librarian.scan({"session_id": "s-empty", "turns": []})
+
+    assert called["n"] == 1  # LLM ran despite empty buffer
+    assert packet.get("repair_fingerprints") == [fp]
+
+
+def test_scan_no_repair_tasks_attaches_no_fingerprints(home, monkeypatch):
+    monkeypatch.setattr(
+        llm,
+        "run_librarian_call",
+        lambda prompt, *, cwd=None, timeout_s=60.0: ('{"proposals": [], "interrupts": []}', 0.0),
+    )
+    snap = _payload_snap("s-clean", [("user", "Always X.")])
+    packet = librarian.scan(snap)
+    assert "repair_fingerprints" not in packet

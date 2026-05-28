@@ -22,7 +22,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, cast
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 
 import yaml
 
@@ -1249,6 +1249,33 @@ def _repair_index_rows(text: str, broken_targets: set[str]) -> tuple[str, int]:
     return ("".join(kept), removed) if removed else (text, 0)
 
 
+# Callback the escalation layer injects: given ``(rel_file, target,
+# context)`` for a wikilink the deterministic pass could not resolve, it
+# escalates the issue into the Librarian→Scholar pipeline and returns
+# ``True`` if the issue is now owned by that escalation path. When an
+# escalator owns the issue we deliberately LEAVE the link broken on disk
+# (do not neutralise) so the next deterministic pass can re-detect it and
+# re-escalate until the Scholar actually fixes it — neutralising would
+# erase the only on-disk signal. With no escalator wired (callback is
+# ``None``) the historical neutralise-as-stopgap behaviour is preserved.
+OnUnresolved = Callable[[str, str, str], bool]
+
+
+def _link_context(text: str, raw: str, *, window: int = 60) -> str:
+    """Return a short snippet of ``text`` around the first occurrence of the
+    raw ``[[…]]`` token — enough for the Librarian to see where/how the
+    broken link appears without re-reading the whole file."""
+    idx = text.find(raw)
+    if idx == -1:
+        return raw
+    start = max(0, idx - window)
+    end = min(len(text), idx + len(raw) + window)
+    snippet = text[start:end].replace("\n", " ").strip()
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(text) else ""
+    return f"{prefix}{snippet}{suffix}"
+
+
 def _broken_links_in(
     text: str, md: Path, knowledge_dir_path: Path
 ) -> List[markdown_utils.WikilinkHit]:
@@ -1264,13 +1291,24 @@ def _repair_body_links(
     text: str,
     broken: Sequence["markdown_utils.WikilinkHit"],
     knowledge_dir_path: Path,
+    *,
+    rel: str,
+    on_unresolved: Optional[OnUnresolved] = None,
 ) -> tuple[str, List[str]]:
     """Best-effort repair of broken wikilinks in an entry/README body.
 
     Each broken link is either resolved to a unique existing entry (the
-    link is rewritten, alias preserved) or — when unresolvable —
-    neutralised to plain text so the broken edge is removed without
-    destroying the surrounding prose. Returns ``(new_text, notes)``."""
+    link is rewritten, alias preserved) or — when unresolvable — handled
+    one of two ways:
+
+      - If an ``on_unresolved`` escalator is wired and it takes ownership
+        of the issue, the link is LEFT BROKEN on disk so a future pass can
+        re-detect and re-escalate it (neutralising would destroy that
+        signal). We record a note but do not mutate the link.
+      - Otherwise the link is neutralised to plain text so the broken edge
+        is removed without destroying the surrounding prose.
+
+    Returns ``(new_text, notes)``."""
     notes: List[str] = []
     for hit in broken:
         resolved = _resolve_broken_link_leaf(hit.target, knowledge_dir_path)
@@ -1278,14 +1316,26 @@ def _repair_body_links(
             alias = f"|{hit.alias}" if hit.alias else ""
             text = text.replace(hit.raw, f"[[{resolved}{alias}]]")
             notes.append(f"rewrote [[{hit.target}]] → [[{resolved}]]")
-        else:
-            display = hit.alias if hit.alias else hit.target.rsplit("/", 1)[-1]
-            text = _neutralise_wikilink(text, hit.raw, display)
-            notes.append(f"neutralised broken [[{hit.target}]] → {display!r}")
+            continue
+        if on_unresolved is not None and on_unresolved(
+            rel, hit.target, _link_context(text, hit.raw)
+        ):
+            # Escalated — keep the broken link so re-detection works.
+            notes.append(f"escalated unresolvable [[{hit.target}]] to the Librarian")
+            continue
+        display = hit.alias if hit.alias else hit.target.rsplit("/", 1)[-1]
+        text = _neutralise_wikilink(text, hit.raw, display)
+        notes.append(f"neutralised broken [[{hit.target}]] → {display!r}")
     return text, notes
 
 
-def _repair_one_file(md: Path, text: str, knowledge_dir_path: Path) -> tuple[str, List[str]]:
+def _repair_one_file(
+    md: Path,
+    text: str,
+    knowledge_dir_path: Path,
+    *,
+    on_unresolved: Optional[OnUnresolved] = None,
+) -> tuple[str, List[str]]:
     """Repair broken wikilinks in a single file's ``text``. Returns
     ``(new_text, change_notes)``; ``new_text == text`` when nothing was
     broken. Splits index-row removal from body-link repair."""
@@ -1302,26 +1352,42 @@ def _repair_one_file(md: Path, text: str, knowledge_dir_path: Path) -> tuple[str
         # Re-scan: links that weren't catalog rows still need body repair.
         broken = _broken_links_in(new_text, md, knowledge_dir_path)
     if broken:
-        new_text, notes = _repair_body_links(new_text, broken, knowledge_dir_path)
+        new_text, notes = _repair_body_links(
+            new_text,
+            broken,
+            knowledge_dir_path,
+            rel=rel.as_posix(),
+            on_unresolved=on_unresolved,
+        )
         changes.extend(f"{rel}: {n}" for n in notes)
     return new_text, changes
 
 
-def repair_broken_wikilinks(knowledge_dir_path: Path) -> List[str]:
+def repair_broken_wikilinks(
+    knowledge_dir_path: Path,
+    *,
+    on_unresolved: Optional[OnUnresolved] = None,
+) -> List[str]:
     """Best-effort, in-place repair of broken wikilinks across the tree.
 
-    Two cases, integrity-first:
+    Cases, integrity-first:
       - An ``index.md`` catalog row pointing at a non-existent entry → the
         whole phantom row is removed (the entry never existed; the row is
         pure noise that re-trips the broken-wikilink invariant forever).
       - A broken wikilink in any other body → resolve to a unique existing
-        entry by leaf-name match and rewrite (alias preserved); if
-        unresolvable, neutralise the link to plain text without touching
-        the surrounding content.
+        entry by leaf-name match and rewrite (alias preserved). If
+        unresolvable AND an ``on_unresolved`` escalator takes ownership,
+        the link is left broken (so the issue stays detectable until the
+        Scholar fixes it via the Librarian pipeline); otherwise it is
+        neutralised to plain text without touching surrounding content.
 
     Skips ``log.md`` (audit trail; quoted paths are not navigation) and
     ``_archive`` subtrees. Returns a list of human-readable change
-    messages; empty when the graph was already intact. Idempotent.
+    messages; empty when the graph was already intact. Idempotent — note
+    that an escalated (left-broken) link will surface in the change list
+    on every pass until fixed, which is the intended "keep escalating"
+    behaviour; the in-flight guard in ``repair_queue`` prevents duplicate
+    concurrent escalations.
     """
     if not knowledge_dir_path.exists():
         return []
@@ -1334,13 +1400,17 @@ def repair_broken_wikilinks(knowledge_dir_path: Path) -> List[str]:
             text = md.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        new_text, file_changes = _repair_one_file(md, text, knowledge_dir_path)
-        if new_text == text:
-            continue
-        try:
-            md.write_text(new_text, encoding="utf-8")
-        except OSError as e:
-            log.warning("could not write repaired %s: %s", md, e)
-            continue
+        new_text, file_changes = _repair_one_file(
+            md, text, knowledge_dir_path, on_unresolved=on_unresolved
+        )
+        # Even when the file body is unchanged (e.g. the only broken link
+        # was escalated and left in place), surface the escalation notes so
+        # the audit trail shows we acted.
+        if new_text != text:
+            try:
+                md.write_text(new_text, encoding="utf-8")
+            except OSError as e:
+                log.warning("could not write repaired %s: %s", md, e)
+                continue
         changes.extend(file_changes)
     return changes

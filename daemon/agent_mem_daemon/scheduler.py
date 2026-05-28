@@ -60,6 +60,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, cast
 
 from . import librarian as librarian_mod
+from . import repair_queue
 from . import scholar as scholar_mod
 from .buffer import Event, RollingBuffer
 from .librarian import EvidencePacket
@@ -83,6 +84,23 @@ DEFAULT_SWEEP_INTERVAL_SECS = 300.0  # buffer.sweep cadence
 
 LibrarianFn = Callable[[Dict[str, Any]], EvidencePacket]
 ScholarFn = Callable[[List[EvidencePacket]], None]
+
+
+def _release_repair_fingerprints(packet_dict: Dict[str, Any], session_id: str) -> None:
+    """Release any integrity-repair in-flight markers a dropped packet was
+    carrying. Called when the scheduler discards a Librarian packet before
+    the Scholar can review it (backpressure) — otherwise the escalation's
+    fingerprint would stay in-flight forever and block re-escalation of the
+    still-broken issue."""
+    fps = repair_queue.parse_fingerprints(packet_dict.get("repair_fingerprints"))
+    if fps:
+        repair_queue.get_queue().clear(fps)
+        log.warning(
+            "dropped packet for session=%s carried %d repair escalation(s); "
+            "released their in-flight markers so they re-escalate next detection",
+            session_id,
+            len(fps),
+        )
 
 
 @dataclass
@@ -674,6 +692,11 @@ class Scheduler:
                 self.config.queue_ceiling,
                 session_id,
             )
+            # If this packet carried integrity-repair escalations, the
+            # Scholar will never see it — so release their in-flight markers
+            # here, or the dropped escalation would stay in-flight forever
+            # and block re-escalation of the still-broken issue.
+            _release_repair_fingerprints(packet_dict, session_id)
             return
         self.stats.packets_queued_total += 1
         self.stats.queue_high_water = max(
