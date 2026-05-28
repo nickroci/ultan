@@ -1,19 +1,22 @@
-"""In-process MCP tools the Librarian and Scholar can call.
+"""In-process library tools the curator agents and executor call directly.
 
-This module exposes two SDK MCP tools, both running in-process so there
-is no subprocess, no HTTP, no extra deps:
+Three pure-Python entry points, no subprocess / no HTTP / no SDK:
 
-- ``bm25_search`` (Librarian + Scholar): wraps ``agent-mem-search`` BM25.
-- ``move_entries`` (Scholar only): atomic multi-file move that creates
+- ``run_bm25_search`` (Librarian + Scholar research): wraps
+  ``agent-mem-search`` BM25.
+- ``run_embedding_search`` (Librarian + Scholar research): wraps the
+  sentence-transformer embedding index.
+- ``move_entries`` (Scholar executor): atomic multi-file move that creates
   the destination folder if missing, optionally writes its README, and
   rewrites every inbound wikilink in the library so the graph stays
-  intact. Replaces the Scholar's old "Read + Write + Edit + remember to
-  fix every back-reference" dance, which had been the dominant source
-  of broken-wikilink violations.
+  intact. Replaces the old "Read + Write + Edit + remember to fix every
+  back-reference" dance, which had been the dominant source of
+  broken-wikilink violations.
 
-The SDK exposes each tool to the model as
-``mcp__<server_name>__<tool_name>``. ``allowed_tools`` entries in
-llm.py whitelist the canonical names.
+These were previously also exposed to the models as Claude-Agent-SDK MCP
+tools; that path is gone (the agents call the runners in-process through
+``_agent_common`` / ``scholar_executor``), so there is no SDK dependency
+here anymore.
 """
 
 from __future__ import annotations
@@ -21,41 +24,12 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Sequence, Tuple, cast
+from typing import Any, Dict, List, Sequence, Tuple, cast
 
 from bm25 import load_or_build
-from claude_agent_sdk import create_sdk_mcp_server, tool
 from embeddings import load_or_build as embeddings_load_or_build
 
-if TYPE_CHECKING:
-    from claude_agent_sdk.types import McpServerConfig
-
 log = logging.getLogger("agent_mem_daemon.library_tools")
-
-
-# Server + tool naming. Keep stable; allowed_tools entries in llm.py
-# refer to them.
-SERVER_NAME = "agent_mem_library"
-_BM25_TOOL_NAME = "bm25_search"
-_EMBEDDING_TOOL_NAME = "embedding_search"
-_MOVE_TOOL_NAME = "move_entries"
-
-
-def fully_qualified_bm25_name() -> str:
-    return f"mcp__{SERVER_NAME}__{_BM25_TOOL_NAME}"
-
-
-def fully_qualified_embedding_name() -> str:
-    return f"mcp__{SERVER_NAME}__{_EMBEDDING_TOOL_NAME}"
-
-
-def fully_qualified_move_name() -> str:
-    return f"mcp__{SERVER_NAME}__{_MOVE_TOOL_NAME}"
-
-
-def fully_qualified_tool_name() -> str:
-    """Backwards-compat shim — returns the bm25 name."""
-    return fully_qualified_bm25_name()
 
 
 def _text_response(text: str) -> Dict[str, Any]:
@@ -151,85 +125,6 @@ def _run_embedding_search(args: Dict[str, Any], root: Path) -> Dict[str, Any]:
     raw = index.search(query, k=k)
     as_tuples: list[Tuple[Path, float, str]] = [(h.path, h.score, h.snippet) for h in raw]
     return _format_hit_lines(as_tuples, root, query=query)
-
-
-def make_library_mcp_server(knowledge_dir: Path) -> McpServerConfig:
-    """Build and return an SDK MCP server config exposing the library tools.
-
-    Returns the value to pass into ``ClaudeAgentOptions.mcp_servers``
-    under any dict key (the daemon uses ``SERVER_NAME``). The
-    knowledge_dir is captured at construction time so the tools always
-    search the same store — no path injection possible from the model.
-
-    Exposed tools:
-      - ``bm25_search`` — lexical relevance.
-      - ``embedding_search`` — semantic similarity. Designed to be
-        fanned out in parallel with ``bm25_search``.
-      - ``move_entries`` — atomic multi-file move + wikilink rewrite.
-    """
-    root = knowledge_dir.expanduser().resolve()
-
-    @tool(
-        _BM25_TOOL_NAME,
-        (
-            "Search the agent-mem knowledge library by content relevance "
-            "(BM25 ranking). Returns the top-K most relevant entries as "
-            "lines of `<path>  score=<float>  <one-line snippet>`. Use "
-            "this when you suspect an entry already covers a topic but "
-            "don't see it in the library snapshot — it complements Glob "
-            "(filename pattern) and Grep (literal regex). Run in parallel "
-            "with `embedding_search` for any concept query. Typical k 3-8."
-        ),
-        {"query": str, "k": int},
-    )
-    async def bm25_search(args: Dict[str, Any]) -> Dict[str, Any]:
-        return _run_bm25_search(args, root)
-
-    @tool(
-        _EMBEDDING_TOOL_NAME,
-        (
-            "Search the agent-mem knowledge library by semantic similarity "
-            "(sentence-transformer embeddings, cosine similarity). Returns "
-            "the top-K most similar entries as lines of `<path>  score=<float>  "
-            "<one-line snippet>`. Complements `bm25_search` (lexical): call "
-            "BOTH in parallel for any concept query — BM25 catches exact "
-            "vocabulary matches, embeddings catch paraphrases. You may also "
-            "fan out N parallel calls to either tool with different queries "
-            "in a single turn (one tool_use block per query); they run "
-            "concurrently. Typical k 3-8."
-        ),
-        {"query": str, "k": int},
-    )
-    async def embedding_search(args: Dict[str, Any]) -> Dict[str, Any]:
-        return _run_embedding_search(args, root)
-
-    @tool(
-        _MOVE_TOOL_NAME,
-        (
-            "Atomically move one or more entries into a destination folder, "
-            "rewriting every inbound wikilink in the library so the graph "
-            "stays intact. Creates the destination folder if it does not "
-            "exist, and (optionally) writes its README.md. Use this for "
-            "BOTH single-file moves and split_folder operations — never "
-            "move entries with Read+Write+Edit, wikilinks will break.\n\n"
-            "Inputs (all paths relative to the knowledge root):\n"
-            "  to_folder: destination folder (e.g. 'global/user/profile').\n"
-            "  files: list of .md files to move into to_folder.\n"
-            "  readme: optional content for to_folder/README.md. Skipped "
-            "if a README already exists at that path.\n\n"
-            "Returns: a summary of files moved, READMEs created, and "
-            "wikilinks rewritten."
-        ),
-        {"to_folder": str, "files": list, "readme": str},
-    )
-    async def move_entries(args: Dict[str, Any]) -> Dict[str, Any]:
-        return _move_entries_impl(root, args)
-
-    return create_sdk_mcp_server(
-        name=SERVER_NAME,
-        version="1.0.0",
-        tools=[bm25_search, embedding_search, move_entries],
-    )
 
 
 # ── move_entries implementation (pure-Python, no LLM in the loop) ─────

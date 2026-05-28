@@ -267,19 +267,24 @@ class SplitFolder(_BaseAction):
     )
 
 
+# The bare union of proposed-action classes — usable as a type annotation
+# and for ``isinstance`` in the Librarian's boundary validator. The
+# discriminated alias below adds Pydantic's ``action`` dispatch on top.
+ProposedActionT = Union[
+    WriteEntry,
+    UpdateEntry,
+    MergeEntries,
+    MoveEntry,
+    ArchiveEntry,
+    DeprecateEntry,
+    UpdateReadme,
+    AddWikilink,
+    SplitFolder,
+]
+
 # Discriminated union — Pydantic dispatches on the ``action`` literal.
 ProposedAction = Annotated[
-    Union[
-        WriteEntry,
-        UpdateEntry,
-        MergeEntries,
-        MoveEntry,
-        ArchiveEntry,
-        DeprecateEntry,
-        UpdateReadme,
-        AddWikilink,
-        SplitFolder,
-    ],
+    ProposedActionT,
     Field(discriminator="action"),
 ]
 
@@ -698,40 +703,6 @@ def describe_scholar_decisions_shape() -> str:
     return _model_schema_block(ScholarDecisions)
 
 
-# ── Backwards-compat aliases (kept so test_response_parser and any
-# leftover references still type-check) ──────────────────────────────
-
-
-class LibrarianResponse(BaseModel):
-    """Legacy alias — accepts the old shape AND the new shape.
-
-    A handful of callers (and one response_parser test path) still
-    reference this name. The model is permissive: it accepts either the
-    legacy ``candidates``/``interrupt_candidates`` shape OR the new
-    ``proposals``/``interrupts`` shape. Validation never fails on shape;
-    callers must inspect the populated lists.
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    candidates: List[Dict[str, object]] = Field(default_factory=list[Dict[str, object]])
-    interrupt_candidates: List[Dict[str, object]] = Field(default_factory=list[Dict[str, object]])
-    proposals: List[Dict[str, object]] = Field(default_factory=list[Dict[str, object]])
-    interrupts: List[Dict[str, object]] = Field(default_factory=list[Dict[str, object]])
-
-
-class ScholarResponse(BaseModel):
-    """Legacy alias for the old Scholar shape.
-
-    Still accepted by the parser for nudge-pipeline backward compat.
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    candidates_processed: List[Dict[str, object]] = Field(default_factory=list[Dict[str, object]])
-    interrupts_processed: List[Dict[str, object]] = Field(default_factory=list[Dict[str, object]])
-
-
 # ── Prompt-shape generators ──────────────────────────────────────────
 #
 # Single source of truth: the Pydantic models above ARE the schema. The
@@ -739,11 +710,11 @@ class ScholarResponse(BaseModel):
 # generated from those models — never hand-written and copy-pasted —
 # so they can't drift.
 #
-# Two helpers:
+# Three helpers:
 #   - ``describe_action_types_markdown()`` for the Librarian's
 #     ProposedAction enumeration.
-#   - ``describe_librarian_response_shape()`` / ``describe_scholar_response_shape()``
-#     for the JSON envelope each role must emit.
+#   - ``describe_librarian_response_shape()`` for the Librarian's output
+#     envelope and ``describe_scholar_decisions_shape()`` for the Scholar's.
 
 
 _ACTION_CLASSES = [
@@ -825,9 +796,3 @@ def describe_librarian_response_shape() -> str:
     Pydantic model. Single source of truth: any field description on
     the model appears here automatically."""
     return _model_schema_block(LibrarianProposal)
-
-
-def describe_scholar_response_shape() -> str:
-    """Canonical JSON Schema for ``ScholarReview`` derived from the
-    Pydantic model. Single source of truth."""
-    return _model_schema_block(ScholarReview)

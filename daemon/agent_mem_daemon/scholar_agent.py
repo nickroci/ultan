@@ -19,20 +19,39 @@ re-emits. The output retry budget is set on the agent.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Set, Tuple
+from typing import TYPE_CHECKING, Dict, Set, Tuple
 
 from pydantic_ai import Agent, ModelRetry, RunContext
 
-from . import _validation, library_tools
+from . import _agent_common, _validation
+from ._agent_common import ResearchDeps as ScholarDeps  # the Scholar's deps type
+from ._agent_common import estimate_cost as _estimate_cost
+from ._agent_common import grep_library as _grep_library
+from ._agent_common import inside as _inside
+from ._agent_common import search_text as _search_text
 from ._schemas import ScholarDecisions
-from .llm import LLMTimeout
 
 if TYPE_CHECKING:
     from ._schemas import ScholarAction
+
+# The shared research helpers live in ``_agent_common`` now; re-export the
+# names the Scholar's unit tests reach for so they keep working without
+# knowing the helpers moved. Listed here (not just imported) so pyright
+# treats them as the module's intended public surface, not dead imports.
+__all__ = [
+    "SCHOLAR_AGENT",
+    "SCHOLAR_MODEL",
+    "SCHOLAR_TIMEOUT_S",
+    "ScholarDeps",
+    "run_scholar_agent",
+    "validate_decisions",
+    "_estimate_cost",
+    "_grep_library",
+    "_inside",
+    "_search_text",
+]
 
 log = logging.getLogger("agent_mem_daemon.scholar_agent")
 
@@ -47,23 +66,11 @@ SCHOLAR_TIMEOUT_S = 600.0
 OUTPUT_RETRIES = 4
 
 
-@dataclass
-class ScholarDeps:
-    """Dependencies handed to the agent's tools and output validator.
-
-    ``knowledge_dir`` is the pinned knowledge store root; the tools resolve
-    every model-supplied path against it (no path injection) and the output
-    validator resolves wikilinks / counts directory occupancy against it.
-    """
-
-    knowledge_dir: Path
-
-
 # The Scholar agent, built once at module import. ``defer_model_check=True``
 # lets the daemon import this module without an ``ANTHROPIC_API_KEY`` present
 # — the Anthropic provider is only instantiated when ``run`` actually fires.
-# Tools and the output validator are registered at MODULE scope below (not
-# nested in a builder) so each stays a referenced top-level function.
+# The read-only research tools are shared with the Librarian and registered
+# via ``_agent_common``; the output validator below is Scholar-specific.
 SCHOLAR_AGENT: "Agent[ScholarDeps, ScholarDecisions]" = Agent(
     SCHOLAR_MODEL,
     output_type=ScholarDecisions,
@@ -72,49 +79,7 @@ SCHOLAR_AGENT: "Agent[ScholarDeps, ScholarDecisions]" = Agent(
     defer_model_check=True,
 )
 
-
-# ── Read-only verification tools ─────────────────────────────────────────
-
-
-@SCHOLAR_AGENT.tool
-def read_entry(ctx: RunContext[ScholarDeps], path: str) -> str:
-    """Read a knowledge file by its path relative to the knowledge root
-    (e.g. ``index.md`` or ``global/python/use-uv.md``). Returns the file
-    contents, or a ``(not found ...)`` sentinel. Read-only."""
-    root = ctx.deps.knowledge_dir.resolve()
-    target = (root / path).resolve()
-    if not _inside(root, target):
-        return f"(path {path!r} resolves outside the knowledge store — refused)"
-    try:
-        return target.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return f"(not found: {path})"
-    except OSError as e:
-        return f"(could not read {path}: {e})"
-
-
-@SCHOLAR_AGENT.tool
-def grep_library(ctx: RunContext[ScholarDeps], pattern: str, path: str = "") -> str:
-    """Search the knowledge library for a literal substring (case-
-    insensitive), optionally scoped to a subdirectory ``path``. Returns
-    up to 40 ``<rel-path>:<line-no>: <line>`` matches. Read-only."""
-    return _grep_library(ctx.deps.knowledge_dir, pattern, path)
-
-
-@SCHOLAR_AGENT.tool
-def bm25_search(ctx: RunContext[ScholarDeps], query: str, k: int = 6) -> str:
-    """Lexical (BM25) search over the library. Returns the top-K entries
-    as ``<path>  score=<float>  <snippet>`` lines. Complements
-    ``embedding_search``. Read-only."""
-    return _search_text(library_tools.run_bm25_search, ctx.deps.knowledge_dir, query, k)
-
-
-@SCHOLAR_AGENT.tool
-def embedding_search(ctx: RunContext[ScholarDeps], query: str, k: int = 6) -> str:
-    """Semantic (embedding) search over the library. Returns the top-K
-    entries as ``<path>  score=<float>  <snippet>`` lines. Complements
-    ``bm25_search`` — run both for any concept query. Read-only."""
-    return _search_text(library_tools.run_embedding_search, ctx.deps.knowledge_dir, query, k)
+_agent_common.register_research_tools(SCHOLAR_AGENT)
 
 
 # ── Context-dependent boundary validation ────────────────────────────────
@@ -129,56 +94,6 @@ def validate_decisions(ctx: RunContext[ScholarDeps], output: ScholarDecisions) -
     _validate_wikilinks(output, root)
     _validate_flat_dir_caps(output, root)
     return output
-
-
-# ── Tool helpers (module-level, pure — easy to unit-test) ────────────────
-
-
-def _inside(root: Path, candidate: Path) -> bool:
-    try:
-        candidate.relative_to(root)
-    except ValueError:
-        return False
-    return True
-
-
-def _grep_library(knowledge_dir: Path, pattern: str, path: str) -> str:
-    root = knowledge_dir.resolve()
-    if not pattern.strip():
-        return "(grep_library: empty pattern)"
-    scope = (root / path).resolve() if path else root
-    if not _inside(root, scope) or not scope.exists():
-        return f"(grep_library: {path!r} not found under the knowledge store)"
-    needle = pattern.lower()
-    search_root = scope if scope.is_dir() else scope.parent
-    out: List[str] = []
-    for md in sorted(search_root.rglob("*.md")):
-        if "_archive" in md.parts:
-            continue
-        try:
-            text = md.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        for i, line in enumerate(text.splitlines(), start=1):
-            if needle in line.lower():
-                rel = md.relative_to(root).as_posix()
-                out.append(f"{rel}:{i}: {line.strip()}")
-                if len(out) >= 40:
-                    return "\n".join(out) + "\n(truncated at 40 matches)"
-    return "\n".join(out) if out else f"(no matches for {pattern!r})"
-
-
-def _search_text(
-    runner: Callable[[Dict[str, Any], Path], Dict[str, Any]],
-    knowledge_dir: Path,
-    query: str,
-    k: int,
-) -> str:
-    """Call a library search runner and unwrap its MCP-shaped response into
-    the plain text the agent reads."""
-    response = runner({"query": query, "k": k}, knowledge_dir.resolve())
-    text = library_tools.unwrap_text_response(response)
-    return text or "(search returned no content)"
 
 
 # ── Output-validator helpers ─────────────────────────────────────────────
@@ -307,21 +222,6 @@ def _validate_flat_dir_caps(output: "ScholarDecisions", root: Path) -> None:
             )
 
 
-def _estimate_cost(model_ref: str, usage: object) -> float:
-    """Best-effort USD cost for a run from token usage via ``genai_prices``.
-    Returns 0.0 if pricing is unavailable — cost is telemetry, never on the
-    critical path."""
-    try:
-        import genai_prices  # noqa: PLC0415 — optional, best-effort
-
-        bare = model_ref.split(":", 1)[1] if ":" in model_ref else model_ref
-        calc = genai_prices.calc_price(usage, bare, provider_id="anthropic")  # type: ignore[arg-type]
-        return float(calc.total_price)
-    except Exception:  # noqa: BLE001 — pricing must never break the pipeline
-        log.debug("scholar_agent: cost estimation unavailable", exc_info=True)
-        return 0.0
-
-
 def run_scholar_agent(
     prompt: str,
     knowledge_dir: Path,
@@ -338,20 +238,11 @@ def run_scholar_agent(
     propagates any other agent/model error for the caller to log.
     """
     deps = ScholarDeps(knowledge_dir=knowledge_dir.resolve())
-
-    async def _run() -> Tuple["ScholarDecisions", float]:
-        try:
-            result = await asyncio.wait_for(
-                SCHOLAR_AGENT.run(
-                    prompt,
-                    deps=deps,
-                    model_settings={"timeout": timeout_s},
-                ),
-                timeout=timeout_s,
-            )
-        except asyncio.TimeoutError as e:
-            raise LLMTimeout(f"Scholar agent exceeded {timeout_s}s") from e
-        cost = _estimate_cost(SCHOLAR_MODEL, result.usage)
-        return result.output, cost
-
-    return asyncio.run(_run())
+    return _agent_common.run_agent_to_output(
+        SCHOLAR_AGENT,
+        prompt,
+        deps,
+        model_ref=SCHOLAR_MODEL,
+        timeout_s=timeout_s,
+        role="Scholar",
+    )

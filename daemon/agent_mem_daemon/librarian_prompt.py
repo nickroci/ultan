@@ -1,8 +1,8 @@
 """Prompt assembly + response parsing for the Librarian.
 
 Pure functions. No I/O happens at import time. The daemon orchestrator
-(``librarian.scan``) wires these together with the SDK call wrapper in
-``llm.run_librarian_call`` and the audit machinery in ``runs.py``.
+(``librarian.scan``) wires these together with the Pydantic AI agent in
+``librarian_agent`` and the audit machinery in ``runs.py``.
 
 The Librarian is the *active organiser* in the new architecture. It
 receives:
@@ -13,12 +13,12 @@ receives:
        - root README excerpt
        - index.md content (truncated)
        - top-level folder READMEs
-…and emits a `LibrarianProposal` JSON object: a list of typed
-`ProposedAction` items. The Librarian has Read/Glob/Grep tools plus
-two in-process MCP search tools (``bm25_search`` for lexical match,
-``embedding_search`` for semantic match) that it is expected to fan
-out in parallel when checking for duplicates / contradictions. The
-final text message it produces must be the JSON.
+…and emits a typed `LibrarianProposal`: a list of `ProposedAction` items.
+The Librarian has read-only research tools (``read_entry``,
+``grep_library``, ``bm25_search`` for lexical match, ``embedding_search``
+for semantic match) wired in-process by ``_agent_common`` that it fans out
+when checking for duplicates / contradictions. Pydantic AI returns the
+validated typed object directly — there is no JSON to scrape.
 
 The Scholar is the gatekeeper that approves/vetoes each proposal —
 the Librarian never writes to disk.
@@ -47,9 +47,8 @@ from typing import (
 import yaml
 from aliases import session_bucket  # type: ignore[import-not-found]
 
-from . import _response_parser, repair_queue
+from . import repair_queue
 from ._schemas import (
-    LibrarianProposal,
     describe_action_types_markdown,
     describe_librarian_response_shape,
 )
@@ -669,14 +668,10 @@ a stricter check. Better to surface a maybe-novel candidate and let the \
 Scholar veto than to silently drop a real one.
 
 To classify ``contradicts`` / ``reinforces`` honestly, you MUST actually \
-search the library first. Call \
-``mcp__agent_mem_library__bm25_search`` AND \
-``mcp__agent_mem_library__embedding_search`` IN PARALLEL (emit both \
-tool_use blocks in the same turn — the SDK runs them concurrently) on \
-the topic, then Read the top hits and decide. BM25 catches exact \
-vocabulary matches; embeddings catch paraphrases. Without these \
-searches you can't claim ``novel`` truthfully either — you'd just be \
-guessing.
+search the library first. Call ``bm25_search`` AND ``embedding_search`` on \
+the topic, then ``read_entry`` the top hits and decide. BM25 catches exact \
+vocabulary matches; embeddings catch paraphrases. Without these searches \
+you can't claim ``novel`` truthfully either — you'd just be guessing.
 
 ═══════════════════════════════════════════════════════════════════
 IMPORTANT: YOU ARE THE ONLY MEMORY SYSTEM HERE
@@ -746,38 +741,33 @@ because the wording is short.
 right?" is not a question to debate — it's the user implicitly setting \
 an expectation. Treat it as a high-trust candidate, not as conversation.
 
-5. **You have four search tools — use them, and use them in parallel.** \
-The library snapshot in this prompt is a teaser; if you suspect an entry \
-already covers a candidate, look. The four tools complement each other:
+5. **You have four read-only research tools — use them.** The library \
+snapshot in this prompt is a teaser; if you suspect an entry already \
+covers a candidate, look. The four tools complement each other:
 
-  - ``Glob("**/*.md")`` — find by **filename pattern**. Use when you're \
-hunting for a specific path or a folder's contents.
-  - ``Grep(pattern="...", path="...")`` — find by **literal regex** match \
-in file contents. Use for exact strings or known phrasings.
-  - ``mcp__agent_mem_library__bm25_search(query="...", k=5)`` — find by \
-**lexical relevance** (BM25 over markdown bodies + paraphrases + \
-keywords). Best for queries that share vocabulary with stored entries.
-  - ``mcp__agent_mem_library__embedding_search(query="...", k=5)`` — \
-find by **semantic similarity** (sentence-transformer cosine). Best \
-when the user's phrasing differs from how the entry is written ("we \
-shouldn't ship without review" vs an entry titled "require PR \
-approval before deploy"). Catches paraphrases BM25 misses.
+  - ``read_entry(path="...")`` — read one entry's full contents by its \
+path relative to the knowledge root. Use to verify a hit before \
+proposing an action against it.
+  - ``grep_library(pattern="...", path="...")`` — find by **literal \
+substring** match in file contents (optionally scoped to a subdir). Use \
+for exact strings or known phrasings.
+  - ``bm25_search(query="...", k=5)`` — find by **lexical relevance** \
+(BM25 over markdown bodies + paraphrases + keywords). Best for queries \
+that share vocabulary with stored entries.
+  - ``embedding_search(query="...", k=5)`` — find by **semantic \
+similarity** (sentence-transformer cosine). Best when the user's phrasing \
+differs from how the entry is written ("we shouldn't ship without review" \
+vs an entry titled "require PR approval before deploy"). Catches \
+paraphrases BM25 misses.
 
-  **Run them in parallel.** Emit multiple tool_use blocks in the same \
-turn — the SDK runs them concurrently, so calling \
-``bm25_search`` and ``embedding_search`` for the same query (or \
-fanning out N different queries across both tools) costs you one \
-turn, not N. For "does anything already cover this concept?", default \
-to firing BOTH bm25 + embedding for the candidate's core claim, then \
-Read the top hits to confirm.
+  For "does anything already cover this concept?", default to firing \
+BOTH ``bm25_search`` + ``embedding_search`` for the candidate's core \
+claim, then ``read_entry`` the top hits to confirm. Keep your tool use \
+focused; you are Sonnet-tier and your budget is tight.
 
-  Aim for ~5 turns per run; you are Haiku-tier and your budget is \
-tight, but parallel tool fan-out is the lever that keeps you under \
-budget while expanding recall.
-
-6. **Then Read the candidates** the search returned to verify they're \
-actually the same thing. Both BM25 and embedding return false \
-positives — never propose UpdateEntry/MergeEntries without Reading \
+6. **Then ``read_entry`` the candidates** the search returned to verify \
+they're actually the same thing. Both BM25 and embedding return false \
+positives — never propose UpdateEntry/MergeEntries without reading \
 the target first.
 
 7. **NEVER quote secrets or credentials.** Buffer text may contain \
@@ -818,9 +808,9 @@ unless they are nonsensical.
 
 This is your read-only view of the library's current state. If you need \
 to verify an entry's contents before proposing an action against it, use \
-the Read tool with the relative path of an entry you see in the snapshot \
-above. Use Glob (e.g. `Glob("**/*.md")`) to find anything you suspect \
-exists but don't see in the snapshot.
+``read_entry`` with the relative path of an entry you see in the snapshot \
+above. Use ``grep_library`` / ``bm25_search`` / ``embedding_search`` to \
+find anything you suspect exists but don't see in the snapshot.
 
 ═══════════════════════════════════════════════════════════════════
 INTEGRITY-REPAIR TASKS (HIGHEST PRIORITY — fix these first)
@@ -849,11 +839,10 @@ kind: broken_wikilink  (``target`` = the wikilink that does not resolve)
 ──────────────────────────────────────────────────────────────────
 
   1. **Research the intended target.** The broken target usually got the \
-PATH wrong, not the concept. Run ``mcp__agent_mem_library__bm25_search`` \
-AND ``mcp__agent_mem_library__embedding_search`` IN PARALLEL on the \
-target's leaf name and the surrounding context, and ``Glob("**/<leaf>.md")`` \
-for the filename. Read the top hits to confirm which existing entry the \
-link was meant to point at.
+PATH wrong, not the concept. Run ``bm25_search`` AND ``embedding_search`` \
+on the target's leaf name and the surrounding context, and \
+``grep_library`` for the filename. ``read_entry`` the top hits to confirm \
+which existing entry the link was meant to point at.
 
   2. **Then propose exactly ONE of these EXISTING actions** (no new action \
 type — the Scholar executes it as a normal proposal):
@@ -861,8 +850,8 @@ type — the Scholar executes it as a normal proposal):
 ``update_entry`` on ``file`` whose ``new_body`` is the file's full body \
 with the broken ``[[target]]`` rewritten to the correct \
 ``[[full/path/from/knowledge/root]]`` (no ``.md``; trailing ``/`` for a \
-folder link). Read ``file`` first so you reproduce its body faithfully and \
-change only the link.
+folder link). ``read_entry`` ``file`` first so you reproduce its body \
+faithfully and change only the link.
      - **The intended target genuinely does NOT exist yet but SHOULD** \
 (the link describes a real lesson worth having) → ``write_entry`` creating \
 the missing entry at the path the link points to, with proper frontmatter \
@@ -883,9 +872,10 @@ kind: overcap_dir  (``file``/``target`` = the over-capacity directory)
 The directory holds more than 5 entry .md files and must be rebalanced. \
 The ``context`` lists every entry currently in it.
 
-  1. **Read the entries** (or their frontmatter ``title``/``keywords`` from \
-the snapshot) to find the natural thematic groupings. Use the existing \
-sub-structure of sibling folders as a guide for sensible subfolder names.
+  1. **``read_entry`` the entries** (or their frontmatter \
+``title``/``keywords`` from the snapshot) to find the natural thematic \
+groupings. Use the existing sub-structure of sibling folders as a guide \
+for sensible subfolder names.
 
   2. **Propose exactly ONE rebalancing action:**
      - **The entries split into 2+ coherent themes** → ``split_folder`` on \
@@ -912,8 +902,8 @@ The entry's YAML frontmatter is missing, unparseable, or short the \
 required fields (``context`` names the exact defect). The body content is \
 fine — only the frontmatter block needs repair.
 
-  1. **Read ``file``** to recover its current frontmatter (whatever is \
-salvageable) and its full body.
+  1. **``read_entry`` ``file``** to recover its current frontmatter \
+(whatever is salvageable) and its full body.
 
   2. **Propose an ``update_entry``** on ``file`` whose ``new_body`` is the \
 entry's UNCHANGED body preceded by a corrected frontmatter block that \
@@ -1050,17 +1040,24 @@ sources:
 OUTPUT
 ═══════════════════════════════════════════════════════════════════
 
-After any Read/Glob/Grep/bm25_search/embedding_search calls you need, \
-your FINAL message must be a single JSON object — nothing else, no \
-fences, no commentary, no markdown around it. The schema is:
+After any read_entry/grep_library/bm25_search/embedding_search calls you \
+need, RETURN a ``LibrarianProposal`` via the structured-output mechanism — \
+do NOT print JSON in your message text. The shape (generated from the \
+Pydantic model the daemon validates against, so it can't drift) is:
 
 {{RESPONSE_SHAPE}}
 
-If you have nothing to propose, emit \
-``{"proposals": [], "interrupts": []}``. Empty is a valid output. \
-**Don't make things up just to fill the list — but DO surface anything \
-that looks like a real preference, paradigm, convention, or workflow \
-pattern. The Scholar is the precision filter.**
+If you have nothing to propose, return empty lists for both ``proposals`` \
+and ``interrupts``. Empty is a valid output. **Don't make things up just \
+to fill the list — but DO surface anything that looks like a real \
+preference, paradigm, convention, or workflow pattern. The Scholar is the \
+precision filter.**
+
+Boundary rules the daemon enforces on your output (a violation bounces \
+back for you to fix, so get them right the first time): every entry path \
+is RELATIVE to the knowledge root and ends in ``.md`` (no absolute paths, \
+no ``..``); any body you supply on a write/update/merge must have a \
+parseable YAML frontmatter block.
 
 ═══════════════════════════════════════════════════════════════════
 APPLIES-WHEN TABLE (for interrupt candidates only)
@@ -1075,8 +1072,9 @@ Scan the buffer against these phrases. If a buffer turn matches a phrase \
 only. Max 5 interrupts per run.
 
 ═══════════════════════════════════════════════════════════════════
-END OF PROMPT — do your Read/Glob inspection if needed, then emit JSON \
-only, starting with `{` on the final line.
+END OF PROMPT — do your read_entry/grep_library/bm25_search/\
+embedding_search inspection if needed, then RETURN your typed \
+LibrarianProposal.
 ═══════════════════════════════════════════════════════════════════
 """
 
@@ -1135,57 +1133,6 @@ def assemble_prompt(
     ):
         out = out.replace(needle, value)
     return out
-
-
-# ── JSON response parsing ─────────────────────────────────────────────
-
-
-def parse_librarian_json(response_text: str) -> Optional[Dict[str, Any]]:
-    """Parse the Librarian's JSON output into a ``LibrarianProposal`` dict.
-
-    Returns the validated response as a plain dict (the
-    ``LibrarianProposal.model_dump()`` shape), or ``None`` on any
-    failure. The orchestrator turns ``None`` into an empty packet.
-    """
-    parsed, diag = _response_parser.parse_response(response_text, LibrarianProposal)
-    if parsed is None:
-        if diag.error:
-            log.debug("librarian JSON parse failed: %s", diag.error)
-        return None
-    if diag.repair_applied:
-        log.info("librarian JSON required json-repair to parse")
-    return parsed.model_dump()
-
-
-def normalise_packet(parsed: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
-    """Take a parsed Librarian dict and return the two lists the
-    scheduler-facing EvidencePacket needs: ``proposals`` and
-    ``interrupts``.
-
-    Tolerates the old shape (``candidates``/``interrupt_candidates``)
-    by returning empty proposals if those keys are present but
-    ``proposals`` is missing — this prevents a half-migrated daemon
-    from crashing on rolled-back files.
-    """
-    proposals_raw = parsed.get("proposals")
-    ints_raw = parsed.get("interrupts")
-    if ints_raw is None:
-        ints_raw = parsed.get("interrupt_candidates")
-
-    def _clean(items: Any) -> List[Dict[str, Any]]:
-        if not isinstance(items, list):
-            return []
-        items_list = cast(List[Any], items)
-        out: List[Dict[str, Any]] = []
-        for it in items_list:
-            if isinstance(it, dict):
-                out.append(cast(Dict[str, Any], it))
-        return out
-
-    return {
-        "proposals": _clean(proposals_raw),
-        "interrupts": _clean(ints_raw),
-    }
 
 
 # ── Convenience: flatten + format in one shot ─────────────────────────

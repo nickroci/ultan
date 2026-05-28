@@ -422,6 +422,62 @@ def test_grep_skips_archive(tmp_path: Path):
 # ── _apply_count_deltas (merge branch) ───────────────────────────────
 
 
+def test_action_body_and_path_all_body_kinds(tmp_path: Path):
+    """Each body-carrying action surfaces its (body, path) pair; non-body
+    actions return empty."""
+    decisions = _decisions(
+        [
+            {
+                "action": "update_entry",
+                "path": "global/python/u.md",
+                "new_body": _valid_body("u"),
+                "reasoning": "r",
+            },
+            {
+                "action": "merge_entries",
+                "source_paths": ["global/python/a.md"],
+                "target_path": "global/python/m.md",
+                "target_body": _valid_body("m"),
+                "reasoning": "r",
+            },
+            {"action": "archive_entry", "path": "global/python/old.md", "reasoning": "r"},
+        ]
+    )
+    upd, mrg, arch = decisions.actions
+    assert scholar_agent._action_body_and_path(upd) == (_valid_body("u"), "global/python/u.md")
+    assert scholar_agent._action_body_and_path(mrg) == (_valid_body("m"), "global/python/m.md")
+    assert scholar_agent._action_body_and_path(arch) == ("", "")
+
+
+def test_created_paths_covers_update_merge_move():
+    """``_created_paths`` collects targets a batch creates/relocates-to so a
+    sibling action's wikilink can resolve against them."""
+    decisions = _decisions(
+        [
+            {
+                "action": "update_entry",
+                "path": "global/python/u.md",
+                "new_body": _valid_body("u"),
+                "reasoning": "r",
+            },
+            {
+                "action": "merge_entries",
+                "source_paths": ["global/python/a.md"],
+                "target_path": "global/python/m.md",
+                "target_body": _valid_body("m"),
+                "reasoning": "r",
+            },
+            {
+                "action": "move_entry",
+                "from_path": "global/python/x.md",
+                "to_path": "global/python/y.md",
+            },
+        ]
+    )
+    created = scholar_agent._created_paths(decisions)
+    assert created == {"global/python/u", "global/python/m", "global/python/y"}
+
+
 def test_apply_count_deltas_merge(tmp_path: Path):
     k = _seed_clean_tree(tmp_path)
     decisions = _decisions(

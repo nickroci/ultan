@@ -1,13 +1,13 @@
-"""Pure-function tests for librarian_prompt — buffer flattening, seed
-extraction, BM25 attachment, library snapshot, prompt assembly, and
-JSON response parsing.
+"""Pure-function tests for librarian_prompt — buffer flattening, recency
+cap, library snapshot, project-bucket derivation, and prompt assembly
+(including the integrity-repair section).
 
-No SDK calls. No I/O outside tmp_path.
+No agent calls. No I/O outside tmp_path. The typed-output validation that
+the old JSON parser used to cover now lives in ``test_librarian_agent``.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from agent_mem_daemon import librarian_prompt as lp
@@ -349,7 +349,7 @@ def test_template_contains_expected_placeholders():
         "{{APPLIES_WHEN_TABLE}}",
     ):
         assert needle in t, f"missing placeholder: {needle}"
-    # BM25_SEEDS used to be a placeholder; it's now exposed as an MCP
+    # BM25_SEEDS used to be a placeholder; it's now an in-process research
     # tool the Librarian invokes itself. Regression guard:
     assert "{{BM25_SEEDS}}" not in t
     assert "bm25_search" in t  # the Librarian must be told about the tool
@@ -520,135 +520,6 @@ def test_assemble_prompt_renders_overcap_task_block():
     assert "kind: overcap_dir" in p
     assert "split_folder" in p
     assert "{{" not in p
-
-
-# ── parse_librarian_json / normalise_packet ───────────────────────────
-
-
-def test_parse_clean_proposal_json():
-    obj = {
-        "proposals": [
-            {
-                "action": "write_entry",
-                "path": "global/tooling/foo.md",
-                "body": "---\nid: foo\n---\n# foo\n",
-                "reasoning": "buffer turn [3] said 'always foo'",
-            }
-        ],
-        "interrupts": [],
-    }
-    out = lp.parse_librarian_json(json.dumps(obj))
-    assert out is not None
-    assert len(out["proposals"]) == 1
-    p = out["proposals"][0]
-    assert p["action"] == "write_entry"
-    assert p["path"] == "global/tooling/foo.md"
-    assert p["reasoning"].startswith("buffer turn")
-
-
-def test_parse_proposal_with_all_action_types():
-    """Each action type validates and round-trips through the parser."""
-    obj = {
-        "proposals": [
-            {"action": "write_entry", "path": "a.md", "body": "x", "reasoning": "r"},
-            {"action": "update_entry", "path": "b.md", "new_body": "x", "reasoning": "r"},
-            {
-                "action": "merge_entries",
-                "source_paths": ["c.md", "d.md"],
-                "target_path": "c.md",
-                "target_body": "x",
-                "reasoning": "r",
-            },
-            {"action": "move_entry", "from_path": "e.md", "to_path": "f.md", "reasoning": "r"},
-            {"action": "archive_entry", "path": "g.md", "reasoning": "r"},
-            {"action": "update_readme", "folder_path": "global", "new_body": "x", "reasoning": "r"},
-            {
-                "action": "add_wikilink",
-                "from_path": "h.md",
-                "to_path": "i.md",
-                "context": "see also",
-                "reasoning": "r",
-            },
-            {
-                "action": "split_folder",
-                "folder_path": "global/big",
-                "into": {"sub1": ["a.md", "b.md"]},
-                "reasoning": "r",
-            },
-        ],
-        "interrupts": [],
-    }
-    out = lp.parse_librarian_json(json.dumps(obj))
-    assert out is not None
-    assert len(out["proposals"]) == 8
-    assert [p["action"] for p in out["proposals"]] == [
-        "write_entry",
-        "update_entry",
-        "merge_entries",
-        "move_entry",
-        "archive_entry",
-        "update_readme",
-        "add_wikilink",
-        "split_folder",
-    ]
-
-
-def test_parse_proposal_unknown_action_rejected():
-    obj = {"proposals": [{"action": "summon_demon", "reasoning": "x"}], "interrupts": []}
-    out = lp.parse_librarian_json(json.dumps(obj))
-    # Unknown discriminator must reject the whole response.
-    assert out is None
-
-
-def test_parse_json_with_code_fences():
-    obj = {"proposals": [], "interrupts": []}
-    text = "```json\n" + json.dumps(obj) + "\n```"
-    out = lp.parse_librarian_json(text)
-    assert out is not None
-    assert out["proposals"] == []
-    assert out["interrupts"] == []
-
-
-def test_parse_json_with_prefix_prose():
-    obj = {"proposals": [], "interrupts": []}
-    text = "Here is my output:\n\n" + json.dumps(obj)
-    out = lp.parse_librarian_json(text)
-    assert out is not None
-    assert out["proposals"] == []
-
-
-def test_parse_malformed_returns_none():
-    assert lp.parse_librarian_json("{not json") is None
-    assert lp.parse_librarian_json("") is None
-    assert lp.parse_librarian_json("   ") is None
-
-
-def test_parse_non_object_returns_none():
-    assert lp.parse_librarian_json(json.dumps([1, 2, 3])) is None
-
-
-def test_normalise_packet_extracts_proposals_and_interrupts():
-    parsed = {
-        "proposals": [
-            {"action": "write_entry", "path": "a.md"},
-            "not a dict",
-        ],
-        "interrupts": [{"lesson_id": "x"}],
-    }
-    out = lp.normalise_packet(parsed)
-    assert len(out["proposals"]) == 1
-    assert out["proposals"][0]["path"] == "a.md"
-    assert out["interrupts"] == [{"lesson_id": "x"}]
-
-
-def test_normalise_packet_tolerates_missing_keys():
-    out = lp.normalise_packet({})
-    assert out == {"proposals": [], "interrupts": []}
-
-
-def test_normalise_packet_accepts_interrupt_candidates_alias():
-    out = lp.normalise_packet({"interrupt_candidates": [{"lesson_id": "x"}]})
-    assert out["interrupts"] == [{"lesson_id": "x"}]
 
 
 # ── Secrets-redaction guidance ───────────────────────────────────────

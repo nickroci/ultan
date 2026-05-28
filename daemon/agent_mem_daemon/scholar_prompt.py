@@ -1267,13 +1267,12 @@ def reconcile_readmes(knowledge_dir: Path) -> List[str]:
 # would re-trip that warning on every single run forever — observed 47×
 # for one phantom ``projects/some-fake-project/...`` row.
 #
-# The pre-write guard in ``llm._make_path_guard`` (check_wikilinks=True)
-# only inspects the Scholar's PROSPECTIVE Write/Edit content; it never
-# touches links already sitting on disk that the Scholar doesn't happen
-# to rewrite this pass — which is exactly the phantom-row case. This pass
-# closes that gap: after the Scholar finishes, walk the tree and repair
-# broken links in place. Integrity-first — we'd rather remove a known-
-# bogus phantom than leave the graph broken.
+# The Scholar agent's ``output_validator`` only inspects the actions the
+# model is about to apply this pass; it never touches links already sitting
+# on disk that no returned action rewrites — which is exactly the
+# phantom-row case. This pass closes that gap: after the executor finishes,
+# walk the tree and repair broken links in place. Integrity-first — we'd
+# rather remove a known-bogus phantom than leave the graph broken.
 
 
 def _resolve_broken_link_leaf(link: str, knowledge_dir_path: Path) -> str | None:

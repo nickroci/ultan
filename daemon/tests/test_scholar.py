@@ -73,13 +73,13 @@ def _make_canned(decisions: ScholarDecisions, cost: float = 0.01):
     return _stub
 
 
-# ── Manual-parsing path is gone ───────────────────────────────────────
+# ── Manual-parsing path is gone (whole daemon) ────────────────────────
 
 
 def test_scholar_path_has_no_json_repair_or_blob_extraction():
-    """The Scholar migrated off the hand-scraped-JSON parser. No module in
+    """Both curators migrated off the hand-scraped-JSON parser. No module in
     the Scholar path may reference ``json_repair`` / ``extract_json_blob`` /
-    ``_response_parser`` (those belong to the Librarian path only)."""
+    ``_response_parser``."""
     import inspect
 
     from agent_mem_daemon import scholar as scholar_mod
