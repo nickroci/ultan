@@ -302,6 +302,62 @@ def test_review_runs_invariants_check_after_sdk(monkeypatch, tmp_path):
     assert records[0].decisions.get("invariant_violations", 0) >= 1
 
 
+def test_review_repairs_phantom_index_row(monkeypatch, tmp_path):
+    """End-to-end: the review pipeline self-heals a phantom index.md row
+    (the live `some-fake-project` case) so no broken-wikilink violation
+    survives into the post-write invariants check."""
+    k = tmp_path / "knowledge"
+    (k / "global" / "python").mkdir(parents=True)
+    (k / "README.md").write_text("# Knowledge\n", encoding="utf-8")
+    (k / "global" / "README.md").write_text("# Global\n", encoding="utf-8")
+    (k / "global" / "python" / "README.md").write_text("# Python\n", encoding="utf-8")
+    (k / "global" / "python" / "use-uv.md").write_text(
+        "---\nid: use-uv\ntype: lesson\nscope: global\nstatus: provisional\n"
+        "confidence: 0.7\napplies-when: |\n  x\nkeywords: [a, b, c]\n"
+        'title: "use-uv"\ncreated: 2026-05-19\nupdated: 2026-05-19\n'
+        "fired: 0\nfired-helpful: 0\nsources:\n  - manual\n---\n\n# uv\n\nUse uv always for python.\n",
+        encoding="utf-8",
+    )
+    phantom = (
+        "| [[projects/some-fake-project/security/no-secrets-in-env-example]] "
+        "| project:some-fake-project | provisional | 0.85 | s | env.example | "
+        "session:hooktest-6AB94685 | 2026-05-19 |\n"
+    )
+    (k / "index.md").write_text(
+        "# Knowledge Index\n\n| Article | Scope |\n|---|---|\n"
+        "| [[global/python/use-uv]] | global |\n" + phantom,
+        encoding="utf-8",
+    )
+
+    canned = {"decisions": [], "interrupts_processed": []}
+    monkeypatch.setattr(
+        scholar,
+        "run_scholar_call",
+        _make_canned(json.dumps(canned), cost=0.01),
+    )
+
+    records: List[InvocationRecord] = []
+    orig = scholar.runs.InvocationRecord.finalise
+
+    def _spy(self):
+        records.append(self)
+        orig(self)
+
+    monkeypatch.setattr(scholar.runs.InvocationRecord, "finalise", _spy)
+
+    scholar.review(
+        [_packet("s1", proposals=[{"action": "archive_entry", "path": "x.md", "reasoning": "r"}])]
+    )
+
+    index_after = (k / "index.md").read_text(encoding="utf-8")
+    assert "some-fake-project" not in index_after  # phantom self-healed
+    assert "[[global/python/use-uv]]" in index_after  # real row survived
+    assert records[0].decisions.get("wikilinks_repaired", 0) >= 1
+    # The repair ran BEFORE the invariants check, so no broken-wikilink
+    # violation should remain on the audit row.
+    assert "invariant_violations" not in records[0].decisions
+
+
 def test_review_invariants_clean_does_not_log_violation(monkeypatch, tmp_path):
     """No violations → no ``invariant_violations`` key on the audit row."""
     k = tmp_path / "knowledge"
@@ -701,3 +757,167 @@ def test_end_to_end_proposal_approved_writes_entry_to_knowledge_dir(
     assert records[0].decisions.get("approve") == 1
     # No invariant violations introduced.
     assert records[0].decisions.get("invariant_violations", 0) == 0
+
+
+# ── Integrity-repair escalation (broken wikilink → Librarian pipeline) ─
+
+
+def _seed_library_with_broken_link(k: Path, *, broken: str = "global/ghost/never-existed") -> Path:
+    """Build a minimal invariant-clean tree, then add ONE entry whose body
+    contains an unresolvable wikilink the deterministic pass can't fix.
+    Returns the entry path. The link is left for the escalation path."""
+    (k / "global" / "python").mkdir(parents=True)
+    (k / "README.md").write_text("# Knowledge\n", encoding="utf-8")
+    (k / "global" / "README.md").write_text("# Global\n", encoding="utf-8")
+    (k / "global" / "python" / "README.md").write_text("# Python\n", encoding="utf-8")
+    entry = k / "global" / "python" / "narr.md"
+    entry.write_text(
+        "---\nid: narr\ntype: lesson\nscope: global\nstatus: provisional\n"
+        "confidence: 0.7\napplies-when: |\n  x\nkeywords: [a, b, c]\n"
+        'title: "narr"\ncreated: 2026-05-19\nupdated: 2026-05-19\n'
+        "fired: 0\nfired-helpful: 0\nsources:\n  - manual\n---\n\n"
+        f"# narr\n\nThis references [[{broken}]] in a sentence we keep.\n",
+        encoding="utf-8",
+    )
+    return entry
+
+
+@pytest.fixture(autouse=True)
+def _fresh_repair_queue():
+    """Isolate the process-global repair queue between escalation tests."""
+    from agent_mem_daemon import repair_queue
+
+    repair_queue.reset_queue()
+    yield
+    repair_queue.reset_queue()
+
+
+def _canned_review(monkeypatch):
+    canned = {"decisions": [], "interrupts_processed": []}
+    monkeypatch.setattr(scholar, "run_scholar_call", _make_canned(json.dumps(canned), cost=0.01))
+
+
+def test_review_escalates_unresolvable_wikilink(monkeypatch, tmp_path):
+    """The trigger: a broken link the deterministic pass can't resolve is
+    enqueued as a repair task (in-flight) AND left broken on disk."""
+    from agent_mem_daemon import repair_queue
+
+    k = tmp_path / "knowledge"
+    entry = _seed_library_with_broken_link(k)
+    _canned_review(monkeypatch)
+
+    scholar.review(
+        [_packet("s1", proposals=[{"action": "archive_entry", "path": "x.md", "reasoning": "r"}])]
+    )
+
+    q = repair_queue.get_queue()
+    # The issue is now queued + in-flight (this review carried NO incoming
+    # fingerprints, so nothing was cleared).
+    assert q.pending_count() == 1
+    assert q.inflight_count() == 1
+    fp = ("broken_wikilink", "global/python/narr.md", "global/ghost/never-existed")
+    drained = q.drain_pending()
+    assert [t.fingerprint for t in drained] == [fp]
+    # Left broken on disk so the next detection can re-fire.
+    assert "[[global/ghost/never-existed]]" in entry.read_text(encoding="utf-8")
+
+
+def test_inflight_guard_blocks_concurrent_duplicate(monkeypatch, tmp_path):
+    """Two consecutive reviews that BOTH detect the same still-broken link
+    (no incoming fingerprints to clear) must escalate it exactly once — the
+    in-flight marker blocks the duplicate."""
+    from agent_mem_daemon import repair_queue
+
+    k = tmp_path / "knowledge"
+    _seed_library_with_broken_link(k)
+    _canned_review(monkeypatch)
+
+    base = [
+        _packet("s1", proposals=[{"action": "archive_entry", "path": "x.md", "reasoning": "r"}])
+    ]
+    scholar.review(base)  # first detection: enqueues
+    scholar.review(base)  # second detection: marker still in-flight → skip
+
+    q = repair_queue.get_queue()
+    assert q.inflight_count() == 1
+    assert q.pending_count() == 1  # NOT 2 — the duplicate was rejected
+
+
+def test_review_releases_marker_then_reescalates(monkeypatch, tmp_path):
+    """Re-escalation across detections: a review that CARRIES the incoming
+    fingerprint releases it on conclusion; the next detection of the still-
+    broken link re-escalates (no max-attempts cap, no permanent give-up)."""
+    from agent_mem_daemon import repair_queue
+
+    k = tmp_path / "knowledge"
+    _seed_library_with_broken_link(k)
+    _canned_review(monkeypatch)
+
+    fp = ("broken_wikilink", "global/python/narr.md", "global/ghost/never-existed")
+
+    # Pre-load the queue as if a prior pass escalated this issue, then
+    # simulate the Librarian having drained it (so it's in-flight, attached
+    # to the packet now reaching the Scholar).
+    q = repair_queue.get_queue()
+    q.enqueue(
+        repair_queue.RepairTask(
+            kind="broken_wikilink",
+            file="global/python/narr.md",
+            target="global/ghost/never-existed",
+            context="ctx",
+        )
+    )
+    q.drain_pending()  # Librarian took it; marker stays in-flight
+    assert q.inflight_count() == 1
+
+    # The Scholar reviews the packet that carried this fingerprint. Its
+    # proposal does NOT fix the link (canned empty decisions), so the
+    # deterministic repair re-detects it — but the marker is still in-flight
+    # during the review, so re-detection is SUPPRESSED. The finally then
+    # releases the incoming marker.
+    packet = _packet(
+        "s1", proposals=[{"action": "archive_entry", "path": "x.md", "reasoning": "r"}]
+    )
+    packet["repair_fingerprints"] = [list(fp)]  # JSON-ish shape (list)
+    scholar.review([packet])
+
+    # Marker released; nothing re-queued during that same review.
+    assert q.inflight_count() == 0
+    assert q.pending_count() == 0
+
+    # The NEXT detection (fresh review, no incoming fingerprints) re-fires.
+    scholar.review(
+        [_packet("s1", proposals=[{"action": "archive_entry", "path": "x.md", "reasoning": "r"}])]
+    )
+    assert q.inflight_count() == 1
+    assert q.pending_count() == 1
+
+
+def test_marker_released_even_when_review_short_circuits_empty(monkeypatch, tmp_path):
+    """A packet that carries fingerprints but has no proposals/interrupts
+    hits the all-empty early return — the markers must STILL be released
+    (else a drained-then-errored Librarian leaks its escalation forever)."""
+    from agent_mem_daemon import repair_queue
+
+    k = tmp_path / "knowledge"
+    k.mkdir()  # empty tree — no detection happens
+    _canned_review(monkeypatch)
+
+    fp = ("broken_wikilink", "global/python/narr.md", "global/ghost/x")
+    q = repair_queue.get_queue()
+    q.enqueue(
+        repair_queue.RepairTask(kind="broken_wikilink", file=fp[1], target=fp[2], context="c")
+    )
+    q.drain_pending()
+    assert q.inflight_count() == 1
+
+    # Empty packet (no proposals, no interrupts) but carrying the fingerprint.
+    empty = {
+        "session_id": "s1",
+        "proposals": [],
+        "interrupts": [],
+        "repair_fingerprints": [list(fp)],
+    }
+    scholar.review([empty])
+
+    assert q.inflight_count() == 0  # released despite the empty early-return

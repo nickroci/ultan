@@ -22,9 +22,9 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, List, Mapping, Sequence
 
-from . import decay, priming, runs, scholar_prompt
+from . import decay, priming, repair_queue, runs, scholar_prompt
 from .llm import SCHOLAR_TIMEOUT_S, LLMTimeout, run_scholar_call
 from .paths import ensure_home, hot_context_path, knowledge_dir
 
@@ -182,9 +182,72 @@ def _reconcile_readmes_safe(record: runs.InvocationRecord) -> None:
         log.exception("scholar.review: README reconciliation raised")
 
 
+def _escalate_unresolved_wikilink(rel_file: str, target: str, context: str) -> bool:
+    """Escalation callback for a wikilink the deterministic pass cannot
+    resolve. Records an integrity-repair task on the process-global queue
+    so the next Librarian run researches the intended target and proposes
+    the right EXISTING fix (rewrite / create-target / remove).
+
+    Returns ``True`` when this issue is now owned by the escalation path —
+    whether we just enqueued it OR an attempt for the same fingerprint is
+    already in flight. Either way the caller must LEAVE the link broken so
+    re-detection keeps working; neutralising would erase the signal. The
+    in-flight guard inside ``RepairQueue.enqueue`` is what prevents two
+    concurrent attempts for the same issue.
+    """
+    task = repair_queue.RepairTask(
+        kind=repair_queue.KIND_BROKEN_WIKILINK,
+        file=rel_file,
+        target=target,
+        context=context,
+    )
+    enqueued = repair_queue.get_queue().enqueue(task)
+    if enqueued:
+        log.info(
+            "scholar.review: escalated unresolvable wikilink to Librarian (file=%s target=%s)",
+            rel_file,
+            target,
+        )
+    else:
+        log.debug(
+            "scholar.review: wikilink already in-flight; skipping duplicate "
+            "escalation (file=%s target=%s)",
+            rel_file,
+            target,
+        )
+    # Owned by escalation in both cases — leave the link broken on disk.
+    return True
+
+
+def _repair_wikilinks_safe(record: runs.InvocationRecord) -> None:
+    """Deterministic broken-wikilink repair. Removes phantom index.md rows
+    and resolves broken body links the Scholar left behind. A broken link
+    that cannot be deterministically resolved is ESCALATED into the
+    Librarian→Scholar pipeline (via ``_escalate_unresolved_wikilink``)
+    rather than silently neutralised, so Opus gets a chance to fix it
+    properly; the link is left in place so it stays detectable until fixed.
+
+    Runs BEFORE the invariants check so the safety net can confirm the
+    repair actually drove broken-wikilink violations down. Integrity-first
+    and idempotent (see scholar_prompt.repair_broken_wikilinks); swallows
+    + logs any error so it can never break the review pipeline."""
+    try:
+        repaired = scholar_prompt.repair_broken_wikilinks(
+            knowledge_dir(),
+            on_unresolved=_escalate_unresolved_wikilink,
+        )
+        if repaired:
+            record.decisions["wikilinks_repaired"] = len(repaired)
+            for c in repaired:
+                log.info("scholar.review: wikilink repair: %s", c)
+    except Exception:
+        log.exception("scholar.review: wikilink repair raised")
+
+
 def _check_invariants_safe(record: runs.InvocationRecord) -> None:
     """Deterministic post-write invariants check. Safety net for anything
-    that survived both the Scholar's judgement and the reconciler."""
+    that survived the Scholar's judgement, the reconciler, and the
+    wikilink repair pass."""
     try:
         violations = scholar_prompt.check_invariants(knowledge_dir())
         if violations:
@@ -195,6 +258,22 @@ def _check_invariants_safe(record: runs.InvocationRecord) -> None:
             log.debug("scholar.review: invariants clean")
     except Exception:
         log.exception("scholar.review: invariants check raised")
+
+
+def _collect_repair_fingerprints(
+    packets: Sequence[Mapping[str, Any]],
+) -> List[repair_queue.Fingerprint]:
+    """Pull the ``repair_fingerprints`` an escalation attached to each
+    packet at Librarian time, back into a flat list of tuples.
+
+    Collected BEFORE any risky review work so the in-flight markers can be
+    released in a ``finally`` no matter how the review exits — the attempt
+    these packets represent is concluding regardless of outcome (proposal
+    executed, vetoed, parse failed, or SDK error)."""
+    out: List[repair_queue.Fingerprint] = []
+    for p in packets:
+        out.extend(repair_queue.parse_fingerprints(p.get("repair_fingerprints")))
+    return out
 
 
 def review(packets: Sequence[Mapping[str, Any]]) -> None:
@@ -211,6 +290,30 @@ def review(packets: Sequence[Mapping[str, Any]]) -> None:
         log.debug("scholar.review: empty packet list; nothing to do")
         return
 
+    # Integrity-repair escalations carried by these packets. Concluding
+    # this batch RELEASES their in-flight markers (the attempt is over),
+    # so collect them up front and clear in a finally that covers every
+    # exit path — including the all-empty early return below and any
+    # mid-review exception. The clear runs AFTER ``_repair_wikilinks_safe``
+    # (whose re-detection of a still-broken link is suppressed while the
+    # marker is still in-flight), so a single review never double-escalates
+    # the same issue; the NEXT pass re-escalates once the marker is gone.
+    repair_fps = _collect_repair_fingerprints(packets)
+    try:
+        _review_inner(packets)
+    finally:
+        if repair_fps:
+            repair_queue.get_queue().clear(repair_fps)
+            log.debug(
+                "scholar.review: released %d in-flight repair marker(s)",
+                len(repair_fps),
+            )
+
+
+def _review_inner(packets: Sequence[Mapping[str, Any]]) -> None:
+    """Body of :func:`review` minus the repair-marker release. Split out so
+    the release in ``review``'s ``finally`` covers the early-return paths
+    here without duplicating the clear at each ``return``."""
     n_packets, n_props, n_ints = _count_inputs(packets)
 
     if _all_empty(packets):
@@ -275,6 +378,7 @@ def review(packets: Sequence[Mapping[str, Any]]) -> None:
             _apply_parsed_response(parsed, record)
 
         _reconcile_readmes_safe(record)
+        _repair_wikilinks_safe(record)
         _refresh_priming_safe(packets, "main path")
         _check_invariants_safe(record)
         _maybe_run_decay_sweep_safe("main path")

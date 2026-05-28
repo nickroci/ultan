@@ -95,6 +95,77 @@ def test_format_rolling_buffer_empty():
     assert "(empty" in lp.format_rolling_buffer([])
 
 
+# ── cap_buffer_to_recent / buffer_to_prompt_text recency cap ──────────
+
+
+def test_cap_buffer_keeps_all_when_under_budget():
+    flat = [(i, "user", f"turn {i}", False) for i in range(1, 6)]
+    capped = lp.cap_buffer_to_recent(flat, max_chars=10_000)
+    assert capped == flat
+
+
+def test_cap_buffer_drops_oldest_turns_over_budget():
+    # 10 turns of ~50 chars of text each. A 200-char budget should keep
+    # only the most-recent few and drop the oldest.
+    flat = [(i, "user", "x" * 50, False) for i in range(1, 11)]
+    capped = lp.cap_buffer_to_recent(flat, max_chars=200)
+    assert len(capped) < len(flat)
+    # The kept turns are the MOST RECENT, in original (oldest-first) order.
+    ids = [t for t, _r, _x, _u in capped]
+    assert ids == sorted(ids)
+    assert ids[-1] == 10  # newest turn always retained
+    assert ids[0] > 1  # at least the oldest turn was dropped
+
+
+def test_cap_buffer_always_keeps_at_least_most_recent_turn():
+    # A single turn far larger than the budget must still survive — an
+    # empty buffer would defeat the Librarian entirely.
+    flat = [(1, "user", "x" * 1000, False)]
+    capped = lp.cap_buffer_to_recent(flat, max_chars=10)
+    assert capped == flat
+
+
+def test_cap_buffer_empty_input():
+    assert lp.cap_buffer_to_recent([], max_chars=100) == []
+
+
+def test_cap_buffer_logs_dropped_count(caplog):
+    flat = [(i, "user", "x" * 50, False) for i in range(1, 11)]
+    with caplog.at_level("INFO", logger="agent_mem_daemon.librarian_prompt"):
+        lp.cap_buffer_to_recent(flat, max_chars=200)
+    assert any("truncated to recency budget" in r.message for r in caplog.records)
+
+
+def test_cap_buffer_no_log_when_nothing_dropped(caplog):
+    flat = [(1, "user", "short", False)]
+    with caplog.at_level("INFO", logger="agent_mem_daemon.librarian_prompt"):
+        lp.cap_buffer_to_recent(flat, max_chars=10_000)
+    assert not any("truncated" in r.message for r in caplog.records)
+
+
+def test_buffer_to_prompt_text_bounds_formatted_block():
+    # Build a snapshot with many large turns, then prove the formatted
+    # rolling-buffer block honours the char cap — this is what actually
+    # bounds `prompt_chars` in librarian.scan.
+    big_turns = [[_ev("UserPromptSubmit", {"text": "y" * 500})] for _ in range(50)]
+    snap = _snap(big_turns)
+    budget = 2_000
+    formatted, flat = lp.buffer_to_prompt_text(snap, max_chars=budget)
+    # The formatted block is bounded (allow a small per-line newline slop).
+    assert len(formatted) <= budget + 200
+    # Without the cap the same snapshot would render far larger.
+    uncapped = lp.format_rolling_buffer(lp.flatten_buffer(snap))
+    assert len(uncapped) > budget * 5
+    # The returned flat is the SAME capped window the model saw, newest-kept.
+    assert len(flat) < 50
+    assert flat[-1][0] == 50
+
+
+def test_buffer_to_prompt_text_default_cap_is_module_constant():
+    # The default budget must be the named, tunable module constant.
+    assert lp.ROLLING_BUFFER_MAX_CHARS == lp.ROLLING_BUFFER_BUDGET_TOKENS * 4
+
+
 # ── read_index_md / build_applies_when_table ──────────────────────────
 
 
@@ -322,6 +393,71 @@ def test_assemble_prompt_substitutes_all_placeholders():
     assert "[1] [user] hi" in p
     assert "global/" in p
     assert "factory | global | designing or building any new API" in p
+
+
+# ── format_repair_tasks / repair-task prompt block ────────────────────
+
+
+def test_format_repair_tasks_empty_returns_sentinel():
+    out = lp.format_repair_tasks([])
+    assert out == lp._NO_REPAIR_TASKS
+    assert "none" in out.lower()
+
+
+def test_format_repair_tasks_renders_each_field():
+    from agent_mem_daemon import repair_queue
+
+    tasks = [
+        repair_queue.RepairTask(
+            kind=repair_queue.KIND_BROKEN_WIKILINK,
+            file="global/python/foo.md",
+            target="global/ghost/bar",
+            context="…see [[global/ghost/bar]] for details…",
+        )
+    ]
+    out = lp.format_repair_tasks(tasks)
+    assert "kind: broken_wikilink" in out
+    assert "file: global/python/foo.md" in out
+    assert "target: global/ghost/bar" in out
+    assert "context: …see [[global/ghost/bar]] for details…" in out
+
+
+def test_assemble_prompt_renders_repair_tasks_block():
+    from agent_mem_daemon import repair_queue
+
+    tasks = [
+        repair_queue.RepairTask(
+            kind=repair_queue.KIND_BROKEN_WIKILINK,
+            file="global/python/foo.md",
+            target="global/ghost/bar",
+            context="ctx",
+        )
+    ]
+    p = lp.assemble_prompt(
+        project_slug="x",
+        rolling_buffer="(empty)",
+        library_snapshot="(empty)",
+        applies_when_table="(empty)",
+        repair_tasks=lp.format_repair_tasks(tasks),
+    )
+    # The dedicated highest-priority section and the rendered task land in
+    # the prompt, and the Librarian is told to fix it with an EXISTING action.
+    assert "INTEGRITY-REPAIR TASKS" in p
+    assert "target: global/ghost/bar" in p
+    assert "update_entry" in p  # one of the prescribed repair actions
+    assert "{{" not in p
+
+
+def test_assemble_prompt_repair_tasks_defaults_to_sentinel():
+    # Callers that don't escalate anything need not pass repair_tasks.
+    p = lp.assemble_prompt(
+        project_slug="x",
+        rolling_buffer="(empty)",
+        library_snapshot="(empty)",
+        applies_when_table="(empty)",
+    )
+    assert lp._NO_REPAIR_TASKS in p
+    assert "{{" not in p
 
 
 # ── parse_librarian_json / normalise_packet ───────────────────────────

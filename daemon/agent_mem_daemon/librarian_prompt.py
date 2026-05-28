@@ -47,7 +47,7 @@ from typing import (
 import yaml
 from aliases import session_bucket  # type: ignore[import-not-found]
 
-from . import _response_parser
+from . import _response_parser, repair_queue
 from ._schemas import (
     LibrarianProposal,
     describe_action_types_markdown,
@@ -62,6 +62,23 @@ log = logging.getLogger("agent_mem_daemon.librarian_prompt")
 # corpus to push the Librarian's prompt past Haiku's sensible context
 # size. ~3 KB per the cost-discipline brief.
 LIBRARY_SNAPSHOT_MAX_CHARS = 3 * 1024
+
+
+# Hard ceiling on the rolling-buffer block — the single largest, most
+# variable part of the Librarian prompt. Feeding the WHOLE session every
+# pass blew prompts up to 259K chars (median 71K), driving cost (~$100 /
+# 2 days) and OOM-killing the spawned SDK subprocess ("Fatal error in
+# message reader: exit code -N"). Re-scanning the whole session is also
+# pointless: anything already learned is persisted in the library, so the
+# Librarian only needs the most RECENT activity to catch NEW lessons.
+#
+# Budget is expressed in tokens and converted to a char proxy at ~4
+# chars/token. We keep the most-recent turns and drop the OLDEST when
+# over budget, always retaining at least the single most recent turn.
+# Tune ROLLING_BUFFER_BUDGET_TOKENS to trade recall depth against cost.
+ROLLING_BUFFER_BUDGET_TOKENS = 30_000
+_CHARS_PER_TOKEN = 4
+ROLLING_BUFFER_MAX_CHARS = ROLLING_BUFFER_BUDGET_TOKENS * _CHARS_PER_TOKEN
 
 
 # ── Shape definitions ─────────────────────────────────────────────────
@@ -168,6 +185,64 @@ def flatten_buffer(snapshot: Mapping[str, Any]) -> List[Tuple[int, str, str, boo
     return out
 
 
+def _render_turn_line(tid: int, role: str, text: str, user_asserted: bool) -> str:
+    """Render one (turn_id, role, text, user_asserted) tuple as the single
+    ``[id] [role] [USER-ASSERTED?] <squashed text>`` line the Librarian
+    sees. Shared by the formatter and the recency-cap char accounting so
+    the cap is measured against the EXACT bytes that land in the prompt."""
+    squashed = " ".join(text.split())
+    prefix = "[USER-ASSERTED] " if user_asserted else ""
+    return f"[{tid}] [{role}] {prefix}{squashed}"
+
+
+def cap_buffer_to_recent(
+    flat: Sequence[Tuple[int, str, str, bool]],
+    *,
+    max_chars: int = ROLLING_BUFFER_MAX_CHARS,
+) -> List[Tuple[int, str, str, bool]]:
+    """Trim ``flat`` to the most-recent turns that fit within ``max_chars``.
+
+    The rendered ``<rolling_buffer>`` block is the dominant, unbounded
+    part of the Librarian prompt; feeding an entire session here is what
+    pushed prompts to 259K chars and OOM-killed the SDK subprocess. We
+    walk the turns NEWEST-first, accumulating their rendered line length
+    (the exact bytes ``format_rolling_buffer`` will emit, newline
+    included), and stop once the next-oldest turn would blow the budget.
+    Always keeps at least the single most-recent turn even if that one
+    line alone exceeds ``max_chars`` — dropping everything would defeat
+    the Librarian entirely.
+
+    Returns the kept turns in their original (oldest-first) order so the
+    caller can format them unchanged.
+    """
+    if not flat:
+        return []
+    kept_rev: List[Tuple[int, str, str, bool]] = []
+    used = 0
+    for tid, role, text, user_asserted in reversed(flat):
+        line_len = len(_render_turn_line(tid, role, text, user_asserted))
+        # +1 for the newline join cost between lines (the very first kept
+        # line has no separator, but over-counting by one is harmless and
+        # keeps the accounting a strict upper bound on the joined output).
+        cost = line_len + 1
+        if kept_rev and used + cost > max_chars:
+            break
+        kept_rev.append((tid, role, text, user_asserted))
+        used += cost
+    kept_rev.reverse()
+    dropped = len(flat) - len(kept_rev)
+    if dropped:
+        log.info(
+            "librarian buffer truncated to recency budget: kept %d of %d turns "
+            "(dropped %d oldest, budget=%d chars)",
+            len(kept_rev),
+            len(flat),
+            dropped,
+            max_chars,
+        )
+    return kept_rev
+
+
 def format_rolling_buffer(flat: Sequence[Tuple[int, str, str, bool]]) -> str:
     """Render the (turn_id, role, text, user_asserted) list as the
     ``<rolling_buffer>`` body.
@@ -178,11 +253,9 @@ def format_rolling_buffer(flat: Sequence[Tuple[int, str, str, bool]]) -> str:
     """
     if not flat:
         return "(empty — no turns with quotable text)"
-    lines: List[str] = []
-    for tid, role, text, user_asserted in flat:
-        squashed = " ".join(text.split())
-        prefix = "[USER-ASSERTED] " if user_asserted else ""
-        lines.append(f"[{tid}] [{role}] {prefix}{squashed}")
+    lines = [
+        _render_turn_line(tid, role, text, user_asserted) for tid, role, text, user_asserted in flat
+    ]
     return "\n".join(lines)
 
 
@@ -750,6 +823,56 @@ above. Use Glob (e.g. `Glob("**/*.md")`) to find anything you suspect \
 exists but don't see in the snapshot.
 
 ═══════════════════════════════════════════════════════════════════
+INTEGRITY-REPAIR TASKS (HIGHEST PRIORITY — fix these first)
+═══════════════════════════════════════════════════════════════════
+
+<repair_tasks>
+{{REPAIR_TASKS}}
+</repair_tasks>
+
+If the block above is not empty, the daemon's deterministic post-write \
+pass found library invariants it could NOT fix on its own and is handing \
+them to you. These are NOT discretionary — propose an action to repair \
+each one. They take priority over salience-driven proposals.
+
+Each task names a ``file`` (relative to ``knowledge/``), a broken ``target`` \
+(the wikilink that does not resolve), and a ``context`` snippet showing \
+where it appears. For EACH broken-wikilink task, do this:
+
+  1. **Research the intended target.** The broken target usually got the \
+PATH wrong, not the concept. Run ``mcp__agent_mem_library__bm25_search`` \
+AND ``mcp__agent_mem_library__embedding_search`` IN PARALLEL on the \
+target's leaf name and the surrounding context, and ``Glob("**/<leaf>.md")`` \
+for the filename. Read the top hits to confirm which existing entry the \
+link was meant to point at.
+
+  2. **Then propose exactly ONE of these EXISTING actions** (no new action \
+type — the Scholar executes it as a normal proposal):
+     - **Link points at the wrong path but the right entry EXISTS** → \
+``update_entry`` on ``file`` whose ``new_body`` is the file's full body \
+with the broken ``[[target]]`` rewritten to the correct \
+``[[full/path/from/knowledge/root]]`` (no ``.md``; trailing ``/`` for a \
+folder link). Read ``file`` first so you reproduce its body faithfully and \
+change only the link.
+     - **The intended target genuinely does NOT exist yet but SHOULD** \
+(the link describes a real lesson worth having) → ``write_entry`` creating \
+the missing entry at the path the link points to, with proper frontmatter \
+and body. The link then resolves.
+     - **The link is bogus / the concept isn't worth an entry** → \
+``update_entry`` on ``file`` that removes the broken ``[[target]]`` (drop \
+the link or replace it with plain descriptive text), preserving the rest \
+of the prose. Explain in ``reasoning`` why no target should exist.
+
+  3. In ``reasoning``, quote the task's ``file`` and ``target`` and state \
+which of the three fixes you chose and why (cite the entry you found, or \
+state that no entry exists). Set ``salience_signal: null`` for repair \
+proposals — they are integrity fixes, not salience judgments.
+
+Do the link research with the SAME parallel-search discipline as for \
+dedup. A repair proposal that guesses the path without searching will \
+likely be vetoed.
+
+═══════════════════════════════════════════════════════════════════
 HIERARCHY INVARIANTS (the Scholar will veto violations)
 ═══════════════════════════════════════════════════════════════════
 
@@ -907,24 +1030,50 @@ def load_prompt_template() -> str:
     return _PROMPT_TEMPLATE
 
 
+_NO_REPAIR_TASKS = "(none — no integrity-repair tasks this run)"
+
+
+def format_repair_tasks(tasks: Sequence[repair_queue.RepairTask]) -> str:
+    """Render drained integrity-repair tasks as the ``<repair_tasks>`` body.
+
+    One numbered block per task, listing kind/file/target/context so the
+    Librarian can research and repair each one. Returns a sentinel when
+    there are no tasks so the prompt block is never blank."""
+    if not tasks:
+        return _NO_REPAIR_TASKS
+    lines: List[str] = []
+    for i, t in enumerate(tasks, start=1):
+        lines.append(f"{i}. kind: {t.kind}")
+        lines.append(f"   file: {t.file}")
+        lines.append(f"   target: {t.target}")
+        if t.context:
+            lines.append(f"   context: {t.context}")
+    return "\n".join(lines)
+
+
 def assemble_prompt(
     *,
     project_slug: str,
     rolling_buffer: str,
     library_snapshot: str,
     applies_when_table: str,
+    repair_tasks: str = _NO_REPAIR_TASKS,
 ) -> str:
     """Substitute placeholders into the prompt template.
 
     ACTION_TYPES and RESPONSE_SHAPE are generated from ``_schemas.py``
     at call time so the prompt instructions can never drift from the
-    Pydantic models the parser actually validates against.
+    Pydantic models the parser actually validates against. ``repair_tasks``
+    is the pre-rendered ``<repair_tasks>`` body (see
+    :func:`format_repair_tasks`); it defaults to the empty sentinel so
+    callers that don't escalate anything need not pass it.
     """
     out = load_prompt_template()
     for needle, value in (
         ("{{PROJECT_SLUG}}", project_slug or "unknown"),
         ("{{ROLLING_BUFFER}}", rolling_buffer or "(empty)"),
         ("{{LIBRARY_SNAPSHOT}}", library_snapshot or "(empty)"),
+        ("{{REPAIR_TASKS}}", repair_tasks or _NO_REPAIR_TASKS),
         ("{{APPLIES_WHEN_TABLE}}", applies_when_table or "(empty)"),
         ("{{ACTION_TYPES}}", describe_action_types_markdown()),
         ("{{RESPONSE_SHAPE}}", describe_librarian_response_shape()),
@@ -989,10 +1138,19 @@ def normalise_packet(parsed: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
 
 def buffer_to_prompt_text(
     snapshot: Mapping[str, Any],
+    *,
+    max_chars: int = ROLLING_BUFFER_MAX_CHARS,
 ) -> Tuple[str, List[Tuple[int, str, str, bool]]]:
     """Flatten a snapshot and return both the formatted block and the
-    raw 4-tuples (turn_id, role, text, user_asserted)."""
-    flat = flatten_buffer(snapshot)
+    raw 4-tuples (turn_id, role, text, user_asserted).
+
+    The flattened turns are capped to the most-recent ones that fit
+    within ``max_chars`` (see :func:`cap_buffer_to_recent`) before
+    formatting, so the rolling-buffer block — and therefore the
+    Librarian prompt — stays bounded. The returned tuple list is the
+    SAME capped window, so downstream consumers (seed text, turn count)
+    agree with what the model actually saw."""
+    flat = cap_buffer_to_recent(flatten_buffer(snapshot), max_chars=max_chars)
     return format_rolling_buffer(flat), flat
 
 
