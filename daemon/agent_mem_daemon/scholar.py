@@ -22,15 +22,11 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, List, Mapping, Sequence
+from typing import Any, List, Mapping, Sequence
 
-from . import decay, priming, repair_queue, runs, scholar_executor, scholar_prompt
-from .llm import LLMTimeout
+from . import decay, priming, repair_queue, runs, scholar_prompt
+from .llm import SCHOLAR_TIMEOUT_S, LLMTimeout, run_scholar_call
 from .paths import ensure_home, hot_context_path, knowledge_dir
-from .scholar_agent import SCHOLAR_TIMEOUT_S, run_scholar_agent
-
-if TYPE_CHECKING:
-    from ._schemas import ScholarDecisions
 
 log = logging.getLogger("agent_mem_daemon.scholar")
 
@@ -120,63 +116,44 @@ def _bump_reinforcement_counters(
         log.exception("scholar.review: reinforcement-counter pass raised")
 
 
-def _invoke_scholar_agent(
+def _invoke_scholar_sdk(
     prompt: str,
     knowledge_root: Path,
     record: runs.InvocationRecord,
-) -> "tuple[ScholarDecisions, float] | None":
-    """Run the Pydantic AI Scholar agent. Returns ``(decisions, cost_usd)``
-    on success or ``None`` if the run timed out / raised (record is marked
-    errored in that case). The returned ``ScholarDecisions`` is already
-    boundary-validated by the agent's per-action validators + output
-    validator (the model was re-prompted on any ModelRetry)."""
+) -> tuple[str, float] | None:
+    """Run the SDK call. Returns ``(response_text, cost_usd)`` on success
+    or ``None`` if the call timed out / raised (record is marked errored
+    in that case)."""
     try:
-        return run_scholar_agent(
+        return run_scholar_call(
             prompt,
-            knowledge_root,
+            cwd=knowledge_root,
             timeout_s=SCHOLAR_TIMEOUT_S,
         )
     except LLMTimeout as e:
-        log.warning("scholar.review: agent timeout (%s); batch dropped", e)
+        log.warning("scholar.review: SDK timeout (%s); batch dropped", e)
         record.mark_error(e)
         record.output_raw = ""
         return None
     except Exception as e:
-        log.exception("scholar.review: agent raised; batch dropped")
+        log.exception("scholar.review: SDK raised; batch dropped")
         record.mark_error(e)
         record.output_raw = ""
         return None
 
 
-def _apply_decisions(
-    decisions: "ScholarDecisions",
-    session_id: str,
+def _apply_parsed_response(
+    parsed: Any,
     record: runs.InvocationRecord,
 ) -> None:
-    """Apply the validated decisions to disk via the deterministic executor,
-    roll the resulting counters into the run record, and append any approved
-    nudges to the pending-nudges file."""
-    try:
-        exec_result = scholar_executor.apply_decisions(
-            decisions,
-            knowledge_dir(),
-            session_id=session_id,
-        )
-        for k, v in exec_result.counts.items():
-            record.decisions[k] = record.decisions.get(k, 0) + v
-        for note in exec_result.notes:
-            log.info("scholar.review: executor: %s", note)
-    except Exception:
-        log.exception("scholar.review: executor raised")
-
-    for k, v in scholar_prompt.summarise_decisions(decisions).items():
-        # Interrupt counters (nudge / interrupt-veto) come from here; the
-        # executor owns the per-action counts, so don't double-count those.
-        if k in ("nudge", "interrupt-veto"):
-            record.decisions[k] = record.decisions.get(k, 0) + v
+    """Roll the Scholar's parsed JSON into the run record and append any
+    approved nudges to the pending-nudges file."""
+    decisions = scholar_prompt.summarise_decisions(parsed)
+    for k, v in decisions.items():
+        record.decisions[k] = record.decisions.get(k, 0) + v
 
     try:
-        written = scholar_prompt.append_nudges_from_response(decisions)
+        written = scholar_prompt.append_nudges_from_response(parsed)
         if written:
             record.decisions["nudges_written"] = record.decisions.get("nudges_written", 0) + len(
                 written
@@ -392,8 +369,7 @@ def _review_inner(packets: Sequence[Mapping[str, Any]]) -> None:
         return
 
     session_id = _batch_session_id(packets)
-    ensure_home()  # create ~/.agent-mem/ if missing (side effect only)
-    knowledge_root = knowledge_dir()
+    knowledge_root = ensure_home()
     prompt = scholar_prompt.build_prompt(packets)
 
     record = runs.InvocationRecord(
@@ -412,7 +388,7 @@ def _review_inner(packets: Sequence[Mapping[str, Any]]) -> None:
     _bump_reinforcement_counters(packets, record)
 
     log.info(
-        "scholar.review: invoking agent (session=%s packets=%d proposals=%d interrupts=%d)",
+        "scholar.review: invoking SDK (session=%s packets=%d proposals=%d interrupts=%d)",
         session_id,
         n_packets,
         n_props,
@@ -420,20 +396,25 @@ def _review_inner(packets: Sequence[Mapping[str, Any]]) -> None:
     )
 
     try:
-        result = _invoke_scholar_agent(prompt, knowledge_root, record)
+        result = _invoke_scholar_sdk(prompt, knowledge_root, record)
         if result is None:
             return
-        decisions, cost_usd = result
+        response_text, cost_usd = result
 
-        # The agent returned a typed, boundary-validated ScholarDecisions —
-        # there is no fragile JSON-scrape step. ``parsed_ok`` now means "the
-        # agent produced a validated decisions object", which by construction
-        # it did if we got here.
-        record.parsed_ok = True
+        record.output_raw = response_text or ""
         record.cost_usd = float(cost_usd or 0.0)
-        record.output_raw = decisions.model_dump_json(indent=2)
 
-        _apply_decisions(decisions, session_id, record)
+        parsed, ok = scholar_prompt.parse_response(record.output_raw)
+        record.parsed_ok = ok
+        if not ok:
+            log.warning(
+                "scholar.review: final-JSON parse failed "
+                "(session=%s response_chars=%d); continuing without counters",
+                session_id,
+                len(record.output_raw),
+            )
+        else:
+            _apply_parsed_response(parsed, record)
 
         _reconcile_readmes_safe(record)
         _repair_wikilinks_safe(record)

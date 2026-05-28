@@ -27,10 +27,8 @@ from __future__ import annotations
 import json
 from typing import Dict, List, Literal, Mapping, Optional, Union, cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing_extensions import Annotated
-
-from . import _validation
 
 # ── Common building blocks (kept for backward compat: the Librarian's
 # interrupt path is unchanged and tests for the response_parser may still
@@ -267,24 +265,19 @@ class SplitFolder(_BaseAction):
     )
 
 
-# The bare union of proposed-action classes — usable as a type annotation
-# and for ``isinstance`` in the Librarian's boundary validator. The
-# discriminated alias below adds Pydantic's ``action`` dispatch on top.
-ProposedActionT = Union[
-    WriteEntry,
-    UpdateEntry,
-    MergeEntries,
-    MoveEntry,
-    ArchiveEntry,
-    DeprecateEntry,
-    UpdateReadme,
-    AddWikilink,
-    SplitFolder,
-]
-
 # Discriminated union — Pydantic dispatches on the ``action`` literal.
 ProposedAction = Annotated[
-    ProposedActionT,
+    Union[
+        WriteEntry,
+        UpdateEntry,
+        MergeEntries,
+        MoveEntry,
+        ArchiveEntry,
+        DeprecateEntry,
+        UpdateReadme,
+        AddWikilink,
+        SplitFolder,
+    ],
     Field(discriminator="action"),
 ]
 
@@ -505,202 +498,38 @@ class ScholarReview(BaseModel):
     )
 
 
-# ── Scholar typed-action output (Pydantic AI migration) ──────────────
-#
-# In the Pydantic-AI architecture the Scholar no longer hand-writes files
-# nor emits an approve/veto ``ScholarReview``. Instead it RETURNS the
-# structural actions it has decided to apply, as a typed
-# ``ScholarDecisions`` object, and the daemon's deterministic executor
-# applies them. The action shapes mirror the Librarian's ``ProposedAction``
-# union one-for-one, but these subclasses add boundary VALIDATORS: the
-# Scholar's emitted actions must be well-formed (frontmatter parses, id
-# matches the filename slug, scope agrees with the path) or Pydantic AI
-# bounces them back to the model via ``ModelRetry``.
-#
-# The Librarian's loose ``ProposedAction`` union (above) is deliberately
-# left untouched — the Librarian proposes partial JSON and the Scholar is
-# its gatekeeper; only the Scholar's *output* is held to the strict bar.
+# ── Backwards-compat aliases (kept so test_response_parser and any
+# leftover references still type-check) ──────────────────────────────
 
 
-def _frontmatter_field_errors(body: str, *, path: str) -> List[str]:
-    """Self-contained frontmatter checks shared by every body-carrying
-    Scholar action. Returns a list of human-readable error strings (empty
-    when the body is well-formed). Skips silently when ``body`` is empty —
-    an empty body is caught by the action's own field requirements, not
-    here."""
-    errors: List[str] = []
-    if not body.strip():
-        return errors
-    fm = _validation.parse_frontmatter(body)
-    if not fm:
-        errors.append(
-            f"body for {path!r} has no parseable YAML frontmatter block "
-            "(expected a leading '---' ... '---' section)"
-        )
-        return errors
-    missing = _validation.missing_frontmatter_fields(fm)
-    if missing:
-        errors.append(f"frontmatter for {path!r} is missing required fields: {', '.join(missing)}")
-    if path:
-        expected_id = _validation.path_slug(path)
-        actual_id = str(fm.get("id", "")).strip()
-        if actual_id and actual_id != expected_id:
-            errors.append(
-                f"frontmatter id {actual_id!r} does not match the filename slug "
-                f"{expected_id!r} for path {path!r}"
-            )
-        scope = str(fm.get("scope", "")).strip()
-        if scope:
-            from pathlib import Path  # noqa: PLC0415 — local, validator-only
+class LibrarianResponse(BaseModel):
+    """Legacy alias — accepts the old shape AND the new shape.
 
-            scope_err = _validation.scope_path_violation(Path(path), scope)
-            if scope_err:
-                errors.append(scope_err)
-    return errors
-
-
-class ScholarWriteEntry(WriteEntry):
-    """Scholar-validated ``write_entry`` — body frontmatter must parse, carry
-    the required fields, and agree (id/scope) with ``path``."""
-
-    @model_validator(mode="after")
-    def _validate_body(self) -> "ScholarWriteEntry":
-        errors = _frontmatter_field_errors(self.body, path=self.path)
-        if not self.path.strip():
-            errors.append("write_entry requires a non-empty `path`")
-        if not self.body.strip():
-            errors.append(f"write_entry for {self.path!r} requires a non-empty `body`")
-        if errors:
-            raise ValueError("; ".join(errors))
-        return self
-
-
-class ScholarUpdateEntry(UpdateEntry):
-    """Scholar-validated ``update_entry`` — ``new_body`` held to the same
-    frontmatter bar as a fresh write."""
-
-    @model_validator(mode="after")
-    def _validate_body(self) -> "ScholarUpdateEntry":
-        errors = _frontmatter_field_errors(self.new_body, path=self.path)
-        if not self.path.strip():
-            errors.append("update_entry requires a non-empty `path`")
-        if not self.new_body.strip():
-            errors.append(f"update_entry for {self.path!r} requires a non-empty `new_body`")
-        if errors:
-            raise ValueError("; ".join(errors))
-        return self
-
-
-class ScholarMergeEntries(MergeEntries):
-    """Scholar-validated ``merge_entries`` — ``target_body`` held to the
-    frontmatter bar against ``target_path``."""
-
-    @model_validator(mode="after")
-    def _validate_body(self) -> "ScholarMergeEntries":
-        errors = _frontmatter_field_errors(self.target_body, path=self.target_path)
-        if not self.target_path.strip():
-            errors.append("merge_entries requires a non-empty `target_path`")
-        if not self.target_body.strip():
-            errors.append(f"merge_entries for {self.target_path!r} requires a non-empty body")
-        if not self.source_paths:
-            errors.append("merge_entries requires at least one `source_paths` entry")
-        if errors:
-            raise ValueError("; ".join(errors))
-        return self
-
-
-class ScholarMoveEntry(MoveEntry):
-    """Scholar-validated ``move_entry`` — both endpoints required."""
-
-    @model_validator(mode="after")
-    def _validate_paths(self) -> "ScholarMoveEntry":
-        if not self.from_path.strip() or not self.to_path.strip():
-            raise ValueError("move_entry requires non-empty `from_path` and `to_path`")
-        return self
-
-
-class ScholarArchiveEntry(ArchiveEntry):
-    """Scholar-validated ``archive_entry`` — ``path`` required."""
-
-    @model_validator(mode="after")
-    def _validate_path(self) -> "ScholarArchiveEntry":
-        if not self.path.strip():
-            raise ValueError("archive_entry requires a non-empty `path`")
-        return self
-
-
-class ScholarDeprecateEntry(DeprecateEntry):
-    """Scholar-validated ``deprecate_entry`` — both ``path`` and
-    ``superseded_by`` required (a deprecation with no successor should be an
-    archive instead)."""
-
-    @model_validator(mode="after")
-    def _validate_paths(self) -> "ScholarDeprecateEntry":
-        if not self.path.strip() or not self.superseded_by.strip():
-            raise ValueError("deprecate_entry requires non-empty `path` and `superseded_by`")
-        return self
-
-
-# Discriminated union of the Scholar's validated actions. Same
-# ``action`` discriminator keys as ``ProposedAction`` so the prompt
-# enumeration generated from those models still matches.
-ScholarAction = Annotated[
-    Union[
-        ScholarWriteEntry,
-        ScholarUpdateEntry,
-        ScholarMergeEntries,
-        ScholarMoveEntry,
-        ScholarArchiveEntry,
-        ScholarDeprecateEntry,
-    ],
-    Field(discriminator="action"),
-]
-
-
-class ScholarDecisions(BaseModel):
-    """Top-level Scholar output in the Pydantic-AI architecture.
-
-    ``actions`` is the ordered list of structural changes the Scholar has
-    APPROVED and wants the daemon to apply (vetoed proposals simply do not
-    appear). ``interrupts_processed`` keeps the nudge pipeline intact and
-    is identical to the old ``ScholarReview`` field.
-
-    The daemon's executor walks ``actions`` in order and applies each to
-    disk; the Pydantic field/model validators above plus the agent's
-    ``output_validator`` guarantee each action is well-formed before the
-    executor runs.
+    A handful of callers (and one response_parser test path) still
+    reference this name. The model is permissive: it accepts either the
+    legacy ``candidates``/``interrupt_candidates`` shape OR the new
+    ``proposals``/``interrupts`` shape. Validation never fails on shape;
+    callers must inspect the populated lists.
     """
 
     model_config = ConfigDict(extra="ignore")
 
-    actions: List[ScholarAction] = Field(
-        default_factory=list[ScholarAction],
-        description=(
-            "Ordered list of structural actions the Scholar has APPROVED "
-            "and the daemon will apply, each a typed object discriminated "
-            "by `action`. Emit [] when every proposal is vetoed. Each "
-            "write/update/merge body MUST include valid YAML frontmatter "
-            "whose `id` matches the filename slug and whose `scope` agrees "
-            "with the path. Every [[wikilink]] in a body must resolve to an "
-            "existing entry or to a path another action in this same list "
-            "creates."
-        ),
-    )
-    interrupts_processed: List[ScholarInterruptDecision] = Field(
-        default_factory=list[ScholarInterruptDecision],
-        description=(
-            "One ScholarInterruptDecision per LibrarianInterrupt the Scholar "
-            "reviewed. Approved decisions are written to pending-nudges.md; "
-            "vetoed decisions are dropped."
-        ),
-    )
+    candidates: List[Dict[str, object]] = Field(default_factory=list[Dict[str, object]])
+    interrupt_candidates: List[Dict[str, object]] = Field(default_factory=list[Dict[str, object]])
+    proposals: List[Dict[str, object]] = Field(default_factory=list[Dict[str, object]])
+    interrupts: List[Dict[str, object]] = Field(default_factory=list[Dict[str, object]])
 
 
-def describe_scholar_decisions_shape() -> str:
-    """Canonical JSON Schema for ``ScholarDecisions`` derived from the
-    Pydantic model. Inlined into the Scholar prompt so its description of
-    the output can never drift from the model the agent validates against."""
-    return _model_schema_block(ScholarDecisions)
+class ScholarResponse(BaseModel):
+    """Legacy alias for the old Scholar shape.
+
+    Still accepted by the parser for nudge-pipeline backward compat.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    candidates_processed: List[Dict[str, object]] = Field(default_factory=list[Dict[str, object]])
+    interrupts_processed: List[Dict[str, object]] = Field(default_factory=list[Dict[str, object]])
 
 
 # ── Prompt-shape generators ──────────────────────────────────────────
@@ -710,11 +539,11 @@ def describe_scholar_decisions_shape() -> str:
 # generated from those models — never hand-written and copy-pasted —
 # so they can't drift.
 #
-# Three helpers:
+# Two helpers:
 #   - ``describe_action_types_markdown()`` for the Librarian's
 #     ProposedAction enumeration.
-#   - ``describe_librarian_response_shape()`` for the Librarian's output
-#     envelope and ``describe_scholar_decisions_shape()`` for the Scholar's.
+#   - ``describe_librarian_response_shape()`` / ``describe_scholar_response_shape()``
+#     for the JSON envelope each role must emit.
 
 
 _ACTION_CLASSES = [
@@ -796,3 +625,9 @@ def describe_librarian_response_shape() -> str:
     Pydantic model. Single source of truth: any field description on
     the model appears here automatically."""
     return _model_schema_block(LibrarianProposal)
+
+
+def describe_scholar_response_shape() -> str:
+    """Canonical JSON Schema for ``ScholarReview`` derived from the
+    Pydantic model. Single source of truth."""
+    return _model_schema_block(ScholarReview)
