@@ -19,9 +19,6 @@ from pathlib import Path
 def _fresh(monkeypatch, home: Path):
     monkeypatch.setenv("AGENT_MEM_HOME", str(home))
     monkeypatch.delenv("CLAUDE_INVOKED_BY", raising=False)
-    for mod in ("config", "_events", "_nudges", "_priming_client", "user_prompt_submit"):
-        if mod in sys.modules:
-            del sys.modules[mod]
     return importlib.import_module("user_prompt_submit")
 
 

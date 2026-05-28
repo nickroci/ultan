@@ -54,7 +54,10 @@ reportPrivateUsage = "warning"
 extraPaths = ["hooks", "scripts"]
 
 [tool.pytest.ini_options]
-testpaths = ["hooks"]
+# scripts/ tests are behavioural regression tests; coverage stays scoped to
+# hooks/ (see [tool.coverage.run]) because the scripts' SDK-orchestration
+# main()s aren't worth forcing to the 90% bar.
+testpaths = ["hooks", "scripts"]
 addopts = "-ra --cov --cov-report=term-missing"
 
 [tool.coverage.run]

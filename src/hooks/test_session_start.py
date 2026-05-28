@@ -16,9 +16,6 @@ if str(_THIS_DIR) not in sys.path:
 def _fresh(monkeypatch, home: Path):
     monkeypatch.setenv("AGENT_MEM_HOME", str(home))
     monkeypatch.delenv("CLAUDE_INVOKED_BY", raising=False)
-    for mod in ("config", "_events", "session_start"):
-        if mod in sys.modules:
-            del sys.modules[mod]
     return importlib.import_module("session_start")
 
 

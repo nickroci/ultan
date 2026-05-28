@@ -18,9 +18,6 @@ if str(_THIS_DIR) not in sys.path:
 def _fresh_post(monkeypatch, home: Path):
     monkeypatch.setenv("AGENT_MEM_HOME", str(home))
     monkeypatch.delenv("CLAUDE_INVOKED_BY", raising=False)
-    for mod in ("config", "_events", "post_tool_use"):
-        if mod in sys.modules:
-            del sys.modules[mod]
     return importlib.import_module("post_tool_use")
 
 

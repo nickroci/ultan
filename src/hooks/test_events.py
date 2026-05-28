@@ -21,16 +21,10 @@ if str(_THIS_DIR) not in sys.path:
 
 
 def _reload_events_with_home(monkeypatch, home: Path):
-    """``_events`` reads its STORE_DIR via config.py at import time, so
-    a test that flips AGENT_MEM_HOME must reload both modules to pick
-    up the new value."""
+    """Pin AGENT_MEM_HOME for the test. ``_events`` resolves the store
+    path via ``config.get_config()`` at call time, so a plain import
+    already picks up the new value — no module reload needed."""
     monkeypatch.setenv("AGENT_MEM_HOME", str(home))
-    # config's STORE_DIR is resolved at import; flush both.
-    if "config" in sys.modules:
-        del sys.modules["config"]
-    if "_events" in sys.modules:
-        del sys.modules["_events"]
-
     return importlib.import_module("_events")
 
 

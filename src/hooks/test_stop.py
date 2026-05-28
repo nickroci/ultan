@@ -18,9 +18,6 @@ def _fresh_stop(monkeypatch, home: Path):
     resolves under ``home``."""
     monkeypatch.setenv("AGENT_MEM_HOME", str(home))
     monkeypatch.delenv("CLAUDE_INVOKED_BY", raising=False)
-    for mod in ("config", "_events", "stop"):
-        if mod in sys.modules:
-            del sys.modules[mod]
     return importlib.import_module("stop")
 
 
