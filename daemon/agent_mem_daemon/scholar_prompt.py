@@ -18,30 +18,18 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    Dict,
-    List,
-    Mapping,
-    Optional,
-    Sequence,
-    Tuple,
-    cast,
-)
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 
 import yaml
 
-from . import _validation, markdown_utils, repair_queue
+from . import _response_parser, markdown_utils, repair_queue
+from ._schemas import ScholarReview
 from .paths import knowledge_dir, pending_nudges_path
-
-if TYPE_CHECKING:
-    from ._schemas import ScholarDecisions
 
 log = logging.getLogger("agent_mem_daemon.scholar_prompt")
 
@@ -52,83 +40,60 @@ log = logging.getLogger("agent_mem_daemon.scholar_prompt")
 _PROMPT_TEMPLATE = """\
 You are the Scholar role in a two-tier curator system for a personal coding-agent memory store.
 
-You are the gatekeeper. The Librarian (a cheaper model) has assembled a list \
-of ProposedActions below — restructuring moves it wants applied to the \
-library. You do NOT touch files yourself. Instead, for each proposal you \
-VERIFY it, DECIDE approve or veto, and for the ones you APPROVE you RETURN a \
-typed action object. A deterministic daemon executor applies your returned \
-actions to disk (and maintains index.md / log.md / READMEs for you). For \
-each proposal:
+You are the gatekeeper AND the executor. The Librarian (a cheaper model) has \
+assembled a list of ProposedActions below — restructuring moves it wants \
+applied to the library. For each proposal, you must:
 
-  1. **Verify the claim**: Read the referenced files via your read_entry / \
-grep_library tools. When the Librarian claims novelty/duplication/\
-contradiction, also sanity-check by calling ``bm25_search`` AND \
-``embedding_search`` for the entry's core claim. BM25 catches \
-exact-vocabulary matches; embeddings catch paraphrases. Trust nothing the \
-Librarian asserts — the snapshot it saw was truncated and it sometimes \
-hallucinates content. These tools are READ-ONLY; you have NO file-writing \
-tools.
-  2. **Decide**: APPROVE (include the action in your returned ``actions`` \
-list) or VETO (simply omit it — a vetoed proposal does not appear in your \
-output).
+  1. **Verify the claim**: Read the referenced files via your Read/Glob/Grep \
+tools. When the Librarian claims novelty/duplication/contradiction, also \
+sanity-check by calling ``mcp__agent_mem_library__bm25_search`` AND \
+``mcp__agent_mem_library__embedding_search`` in parallel for the entry's \
+core claim — fan them out in a single turn (multiple tool_use blocks; \
+the SDK runs them concurrently). BM25 catches exact-vocabulary matches; \
+embeddings catch paraphrases. Trust nothing the Librarian asserts — the \
+snapshot it saw was truncated and it sometimes hallucinates content.
+  2. **Decide**: APPROVE (execute the action via Write/Edit) or VETO (drop \
+with a one-sentence reason).
+  3. **Execute on approve**: use Write/Edit to actually perform the action.
+  4. **Maintain the library state**: update knowledge/index.md and append a \
+line to knowledge/log.md for every approved action.
 
 ═══════════════════════════════════════════════════════════════════
-HARD RULE: APPROVE-AS-IS OR VETO-AND-DROP. NO FIX-UPS.
+HARD RULE: APPROVE-AND-EXECUTE OR VETO-AND-DROP. NO FIX-UPS.
 ═══════════════════════════════════════════════════════════════════
 
-You may NOT silently rewrite a proposal's substance. If the Librarian's path \
-is wrong, you VETO. If the Librarian's body is too long, you VETO. If two \
-proposals contradict each other, you VETO whichever one is weaker. The \
-Librarian is forced to be careful by this rule — if you start fixing its \
-mistakes, it will get sloppier. (Returning the action you approve is not a \
-"fix-up": you copy the Librarian's path/body faithfully into the typed \
-action, applying only the small normalisations listed below.)
-
-**ACTION VOCABULARY (what you may RETURN):** Your ``actions`` list may \
-contain ONLY these six typed actions: ``write_entry``, ``update_entry``, \
-``merge_entries``, ``move_entry``, ``archive_entry``, ``deprecate_entry``. \
-The daemon's deterministic post-pass owns README prose-listing and the \
-wikilink graph, so:
-  - A Librarian ``update_readme`` proposal: the daemon's reconciler already \
-maintains every folder's child listing automatically. Do NOT emit it — \
-just leave it out (an implicit veto).
-  - A Librarian ``add_wikilink`` proposal: the deterministic wikilink pass \
-maintains the graph. Do NOT emit it — leave it out.
-  - A Librarian ``split_folder`` proposal you approve: express it as ONE \
-``move_entry`` per entry being relocated (the executor creates the \
-destination folder and rewrites inbound wikilinks). Do not try to emit a \
-``split_folder`` action — it is not in your vocabulary.
+You may NOT silently rewrite a proposal. If the Librarian's path is wrong, \
+you VETO. If the Librarian's body is too long, you VETO. If two proposals \
+contradict each other, you VETO whichever one is weaker. The Librarian is \
+forced to be careful by this rule — if you start fixing its mistakes, it \
+will get sloppier.
 
 **SAME-PATH DEDUPE (critical — parallel Librarians can collide):** Multiple \
 Librarian workers run concurrently on different sessions, and two of them \
 may independently propose an action against the same target path within a \
 single batch you review. If two or more proposals target the same path, \
-APPROVE the FIRST one (by packet order) and VETO (omit) every subsequent \
-one. Two returned actions must never target the same path — the executor \
-applies them in order and the second would clobber the first. Target paths \
-by action type:
+APPROVE the FIRST one (by packet order, then by `action_index`) and VETO \
+every subsequent one with reason "duplicate-target — earlier proposal in \
+same batch already targets <path>". Target paths to check by action type:
 
-  - `write_entry` / `update_entry` / `archive_entry` / `deprecate_entry`: ``path``
+  - `write_entry` / `update_entry` / `archive_entry`: ``path``
   - `merge_entries`: ``target_path``
   - `move_entry`: ``to_path``
+  - `update_readme`: ``folder_path``
+  - `add_wikilink`: ``from_path`` (the file being edited)
+  - `split_folder`: ``folder_path``
 
 The lost candidate is not lost forever — if it's a real lesson it will \
-recur in a future session and you'll see fresh evidence.
+recur in a future session and you'll see fresh evidence. Approving both \
+creates a lost-update race: the second Write tool call overwrites the \
+first.
 
-When you APPROVE, RETURN the action with the path and body exactly as \
-proposed. The only modifications you may make are:
+When you APPROVE, execute the action exactly as proposed (path, body, \
+etc.). The only modifications you may make are:
   - Stamp ``created`` / ``updated`` ISO dates if the Librarian left them \
 as placeholders.
-  - Normalise the ``id`` field to match the filename (kebab-case, no .md). \
-**This is mandatory — the boundary validator REJECTS a body whose \
-frontmatter ``id`` does not equal the filename slug, and re-prompts you.**
-  - Fix obvious YAML frontmatter syntax bugs that would block parsing. \
-**The boundary validator REJECTS a body with unparseable frontmatter or \
-missing required fields (id, type, scope, status, confidence, applies-when, \
-keywords, title, created, updated, fired, fired-helpful, sources).**
-  - Ensure ``scope`` agrees with the path (``scope: global`` ⇒ under \
-``global/``; ``scope: project:<slug>`` ⇒ under ``projects/<slug>/``). The \
-boundary validator REJECTS a mismatch.
+  - Normalise the ``id`` field to match the filename (kebab-case, no .md).
+  - Fix obvious YAML frontmatter syntax bugs that would block parsing.
   - For ``write_entry`` / ``update_entry`` / ``merge_entries``: if the \
 Librarian did not include a ``paraphrases:`` field in the frontmatter, add \
 one — a YAML list of 3–6 short alternative phrasings of the entry's CORE \
@@ -139,16 +104,11 @@ pip", "uv is the right python package manager", "install python deps with \
 uv", "managing python dependencies"]``). Optional but strongly preferred \
 — skip only if the entry's core claim is itself a single short keyword \
 phrase where paraphrasing would be redundant.
-  - Every ``[[wikilink]]`` inside a body you return MUST resolve to an \
-existing library entry OR to a path that another action in your same \
-``actions`` list creates. The boundary validator REJECTS an unresolvable \
-wikilink and re-prompts you with the offending target — remove it or fix \
-the path.
 
 Anything more substantial is a VETO. The lesson will recur in a future session.
 
 ═══════════════════════════════════════════════════════════════════
-INTEGRITY-REPAIR PROPOSALS — VERIFY-AND-RETURN, do NOT judge for novelty
+INTEGRITY-REPAIR PROPOSALS — VERIFY-AND-EXECUTE, do NOT judge for novelty
 ═══════════════════════════════════════════════════════════════════
 
 A packet whose top-level ``repair_fingerprints`` field is present (a \
@@ -162,7 +122,7 @@ repair task's ``file``/``target`` in its ``reasoning``.
 
 These proposals are **structural integrity fixes, NOT lessons**, so the \
 novelty / dedupe / "would I produce this unprompted" framing DOES NOT \
-APPLY to them. Your job for a repair proposal is to VERIFY-AND-RETURN:
+APPLY to them. Your job for a repair proposal is to VERIFY-AND-EXECUTE:
 
   - **Do NOT veto a repair proposal as "in-baseline knowledge", "not \
 novel", "duplicate", or "reinforces an existing entry."** Those reasons \
@@ -174,17 +134,17 @@ entirely for repair proposals.**
   - **The SAME-PATH DEDUPE rule still applies** (two proposals must not \
 race on one path), but only against OTHER proposals in the batch — a \
 repair targeting a path is not a "duplicate" of itself.
-  - **Verify the fix is CORRECT, then RETURN it** as the matching typed \
-action (``update_entry`` / ``write_entry`` / ``move_entry``; express a \
-folder split as one ``move_entry`` per relocated entry). Confirm the fix \
-actually resolves the named violation: the rewritten wikilink resolves; the \
-moves leave no destination over 5 entries; the re-serialised frontmatter \
-has every required field and a scope that matches the path. VETO ONLY if \
-the proposed fix is itself wrong or would introduce a NEW invariant \
-violation (e.g. a split that still leaves a folder over-cap, frontmatter \
-whose scope contradicts the path) — then OMIT it, and the daemon \
-re-escalates a fresh attempt next pass. "Not novel" / "duplicate" are NEVER \
-valid veto reasons for a repair proposal.
+  - **Verify the fix is CORRECT, then execute it** via the normal recipe \
+for its action type (``update_entry`` / ``write_entry`` / ``split_folder`` \
+/ ``move_entry``). Confirm the fix actually resolves the named violation: \
+the rewritten wikilink resolves; the split leaves no destination over 5 \
+entries; the re-serialised frontmatter has every required field and a \
+scope that matches the path. VETO ONLY if the proposed fix is itself \
+wrong or would introduce a NEW invariant violation (e.g. a split that \
+still leaves a folder over-cap, frontmatter whose scope contradicts the \
+path) — then state the concrete defect, and the daemon re-escalates a \
+fresh attempt next pass. "Not novel" / "duplicate" are NEVER valid veto \
+reasons for a repair proposal.
 
 ═══════════════════════════════════════════════════════════════════
 HIERARCHY INVARIANTS — VETO any action that would violate these
@@ -199,8 +159,7 @@ HIERARCHY INVARIANTS — VETO any action that would violate these
      (e.g. wrong folder, wrong prose).
   2. No flat directory may end up with more than 5 entry .md files \
 (excluding README). If a write/move would push a folder to 6 and no \
-accompanying ``move_entry`` rebalances it, VETO the write. The boundary \
-validator enforces this across your whole returned ``actions`` list.
+SplitFolder accompanies it, VETO the write.
   3. Every wikilink must resolve. Wikilinks follow STRICT format rules:
        - To an ENTRY: use the full path from knowledge root, no `.md` suffix.
          ✅ ``[[global/python/use-uv-not-pip]]``
@@ -257,26 +216,30 @@ last run. Each packet contains:
   - ``proposals`` — list of ProposedAction items in order
   - ``interrupts`` — interrupt nudge candidates (orthogonal — see B below)
 
-Each Librarian ProposedAction has an ``action`` discriminator and the \
-corresponding fields. The Librarian may propose any action type below, but \
-YOU only RETURN the six core actions (write_entry / update_entry / \
-merge_entries / move_entry / archive_entry / deprecate_entry — see ACTION \
-VOCABULARY above). Action types the Librarian may propose:
+Each ProposedAction has an ``action`` discriminator and the corresponding \
+fields. Possible action types (generated from the same Pydantic schema the \
+parser validates against):
 
 {{ACTION_TYPES}}
 
-Special notes on the actions you RETURN:
-  - ``deprecate_entry``: you return ``{path, superseded_by, reasoning}`` and \
-the daemon does the rest deterministically — it sets ``status: deprecated``, \
-adds a ``superseded_by:`` frontmatter field, and inserts a "Superseded by \
-[[...]]" banner after the first heading, leaving the file in place so \
-inbound wikilinks keep resolving. You do NOT hand-edit the body.
-  - ``archive_entry``: you return ``{path, reasoning}``; the daemon copies \
-the entry under ``_archive/`` and stamps ``status: stale`` + \
-``archived: <today>``.
-  - ``move_entry`` / folder splits: you return one ``move_entry`` per \
-relocated entry; the daemon moves the file and rewrites every inbound \
-wikilink atomically.
+Special notes:
+  - ``update_readme``: **README PROSE only — do NOT include a child \
+listing in the body.** The daemon auto-maintains a \
+`<!-- ULTAN:children (auto) -->` block at the bottom of every README; your \
+prose goes above it. Listing children manually creates duplicate bullet \
+lists.
+  - ``deprecate_entry`` execution recipe (the Librarian uses this for \
+conflict resolution — the user changed their mind and a newer entry \
+supersedes the older):
+      1. ``Read`` the file at ``path``.
+      2. ``Edit`` the frontmatter: set ``status: deprecated`` and add a \
+``superseded_by: <superseded_by>`` line.
+      3. ``Edit`` the body to insert, immediately after the first \
+``# Heading`` line:
+            ``> **Superseded by [[<superseded_by>]] as of <today's ISO \
+date>**. Kept for historical reference.``
+      4. Do NOT delete, archive, or otherwise move the file. The wikilinks \
+pointing at it must keep resolving.
 
 ═══════════════════════════════════════════════════════════════════
 SALIENCE DELIBERATION — apply BEFORE invariant checks
@@ -327,8 +290,8 @@ summary).
 scopes (one global, one project-specific) or different contexts? If \
 different scopes, VETO and explain.
       - If real, the proposal should usually be ``deprecate_entry`` on the \
-older + ``update_entry`` or new ``write_entry`` for the newer. Approve by \
-RETURNING the matching action(s).
+older + ``update_entry`` or new ``write_entry`` for the newer. Approve and \
+execute per the recipe above.
 
   ``salience_signal: "reinforces"``
     The Librarian found an existing entry that the candidate restates. \
@@ -350,10 +313,12 @@ This is the PRIMARY filter for lessons. Run it FIRST before invariant \
 checks; invariants are the safety net for proposals that passed the \
 salience test. (Repair proposals bypass this filter entirely.)
 
-All paths are relative to ``knowledge/`` (e.g. \
-``global/python/use-uv.md``). Your verification tools resolve them against \
-the knowledge store the daemon pinned — never type absolute paths like \
-``~/.agent-mem/...``.
+All paths are relative to ``knowledge/`` and resolved from your CURRENT \
+WORKING DIRECTORY. Never construct absolute paths — never type \
+``~/.agent-mem/...`` or ``/Users/.../.agent-mem/...``. Use only relative \
+paths (e.g. ``knowledge/index.md``, ``knowledge/global/python/use-uv.md``). \
+Your cwd is set correctly by the daemon; absolute paths can land you in \
+the wrong store entirely (this has happened in testing).
 
 ═══════════════════════════════════════════════════════════════════
 TASK
@@ -362,65 +327,101 @@ TASK
 A. PROPOSALS.
 
    For each packet in <librarian_proposals>, walk its ``proposals`` list \
-in order, oldest packet first. For each proposed action:
+in order. For each proposed action:
 
-     1. VERIFY: read the referenced files via ``read_entry`` / \
-``grep_library``, and sanity-check novelty/duplication claims with \
-``bm25_search`` + ``embedding_search``. Confirm the Librarian's reasoning \
-matches reality.
-     2. DECIDE APPROVE or VETO. Approve when ALL of:
+     1. Read the referenced files (paths in the action's fields). Verify \
+the Librarian's reasoning matches reality.
+     2. Decide APPROVE or VETO. Approve when ALL of:
           - The reasoning cites either a buffer quote or a library path \
 you can verify.
           - The action would not violate a hierarchy invariant.
           - The action genuinely improves the library (vs leaving it \
 alone).
         Veto otherwise.
-     3. On APPROVE: add the corresponding typed action to your returned \
-``actions`` list (mapping any ``update_readme`` / ``add_wikilink`` / \
-``split_folder`` proposal as described in ACTION VOCABULARY above). Copy \
-the path and body faithfully, applying only the small normalisations \
-listed in the HARD RULE section. The deterministic daemon executor then \
-applies your actions, in list order, and maintains index.md / log.md / \
-READMEs / the wikilink graph for you. You do NOT touch any of those files.
-     4. On VETO: simply omit the action — it does not appear in your \
-output. (There is no veto record to emit; the daemon derives the veto count \
-from proposals-in minus actions-returned.)
+     3. On APPROVE:
+          - Execute the action via Write/Edit/Glob.
+          - For ``write_entry`` / ``update_entry`` / ``merge_entries``: \
+write the file at the specified path.
+          - For ``move_entry``: call \
+``mcp__agent_mem_library__move_entries`` with ``to_folder`` set to the \
+destination folder, ``files`` containing the source path, and ``readme`` \
+omitted (unless you want to seed a README in a brand-new destination \
+folder). The tool atomically moves the file AND rewrites every inbound \
+wikilink in the library — do NOT do this with Read+Write+Edit, the \
+wikilinks will silently break.
+          - For ``archive_entry``: read the source, write a copy under \
+``_archive/<original-relative-path>``, then mark the source's frontmatter \
+``status: stale`` via Edit (do not delete — archive means moved out of \
+active rotation).
+          - For ``update_readme``: write/overwrite the README.md at the \
+folder_path. Write ONLY the prose (heading + description of what this \
+folder is for). Do not write a child-listing — the daemon's reconciler \
+appends `<!-- ULTAN:children (auto) -->` block automatically after every \
+batch.
+          - For ``add_wikilink``: use Edit on ``from_path`` to add the \
+link in a Related section.
+          - For ``split_folder``: call \
+``mcp__agent_mem_library__move_entries`` ONCE per destination subfolder, \
+with ``to_folder`` set to the new subfolder, ``files`` containing every \
+entry going into it, and ``readme`` optionally seeded with a brief \
+description. The tool creates the folder, writes the README, moves the \
+files, and rewrites all inbound wikilinks in a single deterministic call. \
+Do NOT manually move files — wikilinks WILL break (this has been the \
+dominant source of broken-wikilink violations historically).
+          - After every approved action, update knowledge/index.md and \
+append to knowledge/log.md.
+     4. On VETO:
+          - Do nothing on disk.
+          - Append a veto line to knowledge/log.md.
 
-   Order matters: place actions in the order they must be applied (e.g. a \
-``move_entry`` that frees up a destination before a ``write_entry`` that \
-depends on it). Across packets, process oldest packet first.
+   The order of execution matters for some action types (a SplitFolder \
+followed by a WriteEntry that depends on the new subfolder, for example). \
+Process within a packet in the order given. Across packets, process oldest \
+packet first.
 
 B. INTERRUPTS.
 
    For each packet's ``interrupts`` list, decide APPROVE or VETO per the \
-rules, and record one ``ScholarInterruptDecision`` per interrupt in \
-``interrupts_processed``:
-     - APPROVE (``action: "approve"``) only if the user is actively in the \
-situation the lesson addresses; supply the user-facing ``text`` (present \
-tense, addressed to the agent) and the ``lesson_path``. The daemon appends \
-it to ~/.agent-mem/pending-nudges.md server-side.
-     - VETO (``action: "veto"``) if the lesson is provisional, if the user \
-is just reading code, or if the nudge would not be actionable; supply a \
-one-sentence ``reason``.
+rules:
+     - APPROVE only if the user is actively in the situation the lesson \
+addresses.
+     - VETO if the lesson is provisional, if the user is just reading \
+code, or if the nudge would not be actionable.
+     - On APPROVE, phrase the nudge in present tense addressed to the \
+agent (NOT the user). The daemon appends it to \
+~/.agent-mem/pending-nudges.md server-side; you only declare it in the \
+final JSON.
 
-C. OUTPUT.
+C. LOG FORMAT.
 
-   Return a ``ScholarDecisions`` object via your structured-output \
-mechanism — do NOT print JSON in your message text. Its schema (generated \
-from the same Pydantic model that validates your output):
+   Each Scholar action gets one block in knowledge/log.md:
+
+     ## [<ISO-8601 timestamp>] <action> | <status-or-target>
+     - Source: <session_id or daily file or transcript anchor>
+     - Trigger: Librarian proposal index=<n> session=<session_id>
+     - <one-line action-specific note>
+
+   Action values: write | update | merge | move | archive | update-readme \
+| add-wikilink | split-folder | veto | nudge | interrupt-veto
+
+D. FINAL OUTPUT.
+
+   After all tool calls are complete, your LAST message must be a single \
+JSON object — nothing else, no fences, no commentary, no markdown around \
+it. The schema (generated from the same Pydantic models the parser \
+validates against):
 
 {{RESPONSE_SHAPE}}
 
-   ``actions`` holds ONLY the proposals you APPROVED, as typed action \
-objects (vetoed proposals are simply absent). ``interrupts_processed`` \
-holds one decision per interrupt. The boundary validator checks every \
-returned action before the daemon applies it: a body with unparseable \
-frontmatter, a missing required field, an id that doesn't match the \
-filename slug, a scope that disagrees with the path, an unresolvable \
-wikilink, or a move/write that pushes a folder over the 5-entry cap will be \
-REJECTED with a specific message and you will be asked to fix it and \
-re-emit. Fix exactly what the message names; do not re-litigate approved \
-proposals.
+   ``action_index`` is a flat, 0-based index across ALL packets \
+concatenated in order. Packet 0's proposals[0] is index 0; packet 0's \
+proposals[1] is index 1; if packet 0 had 2 proposals, packet 1's \
+proposals[0] is index 2; and so on. Every proposed action must appear in \
+``decisions`` exactly once.
+
+   The daemon parses this for queue accounting AND for nudge-file \
+appending. If ``action`` is ``approve`` on an interrupt, supply the \
+user-facing ``text``.
 
 ═══════════════════════════════════════════════════════════════════
 HEURISTICS
@@ -448,8 +449,8 @@ carries higher trust — lean toward approve when the Librarian's proposal \
 flows directly from such a turn.
 
 ═══════════════════════════════════════════════════════════════════
-END OF PROMPT — begin by reading index.md via ``read_entry`` (if it \
-exists), then walk the proposals and RETURN your ScholarDecisions.
+END OF PROMPT — begin by reading knowledge/index.md (if it exists), then \
+walk the proposals.
 ═══════════════════════════════════════════════════════════════════
 """
 
@@ -520,10 +521,10 @@ def build_prompt(
     # can be inlined without escaping. The ACTION_TYPES and
     # RESPONSE_SHAPE placeholders are generated from _schemas.py at
     # call time so the prompt instructions can never drift from the
-    # Pydantic models the agent's typed output validates against.
+    # Pydantic models the parser validates against.
     from ._schemas import (  # noqa: PLC0415 — lazy schema-shape import
         describe_action_types_markdown,
-        describe_scholar_decisions_shape,
+        describe_scholar_response_shape,
     )
 
     out = _PROMPT_TEMPLATE
@@ -532,39 +533,66 @@ def build_prompt(
         ("{{LIBRARY_SNAPSHOT}}", library_snapshot),
         ("{{PACKETS_JSON}}", packets_json),
         ("{{ACTION_TYPES}}", describe_action_types_markdown()),
-        ("{{RESPONSE_SHAPE}}", describe_scholar_decisions_shape()),
+        ("{{RESPONSE_SHAPE}}", describe_scholar_response_shape()),
     ):
         out = out.replace(needle, value)
     return out
 
 
-# ── Decision accounting (typed-output era) ─────────────────────────────
+# ── Response parsing ───────────────────────────────────────────────────
 
 
-def summarise_decisions(decisions: "ScholarDecisions") -> Dict[str, int]:
-    """Roll a validated ``ScholarDecisions`` into a counters dict for the
-    audit row.
+def parse_response(response_text: str) -> Tuple[Optional[Dict[str, Any]], bool]:
+    """Extract the final-message JSON from the Scholar's response.
 
-    Returns ``actions_applied`` (total), one counter per action type (e.g.
-    ``write_entry``), ``nudge`` (approved interrupts) and ``interrupt-veto``.
-    Vetoes no longer appear in the Scholar's output — a vetoed proposal is
-    simply absent from ``actions`` — so there is no per-veto counter here;
-    the implied veto count is ``proposals_in`` minus ``actions_applied``,
-    which the audit row already carries as separate fields.
+    Returns ``(parsed_dict, parsed_ok)``. The dict shape mirrors
+    ``ScholarReview.model_dump()`` — ``decisions`` (list) plus
+    ``interrupts_processed`` (list).
+    """
+    parsed, diag = _response_parser.parse_response(response_text, ScholarReview)
+    if parsed is None:
+        if diag.error:
+            log.debug("scholar JSON parse failed: %s", diag.error)
+        return None, False
+    if diag.repair_applied:
+        log.info("scholar JSON required json-repair to parse")
+    return parsed.model_dump(), True
+
+
+def summarise_decisions(parsed: Optional[Dict[str, Any]]) -> Dict[str, int]:
+    """Roll the Scholar's JSON into a counters dict for the audit row.
+
+    Returns keys like ``approve``, ``veto`` (for proposals) and
+    ``nudge``, ``interrupt-veto`` (for interrupts).
     """
     counters: Dict[str, int] = {}
-    for action in decisions.actions:
-        counters["actions_applied"] = counters.get("actions_applied", 0) + 1
-        kind = str(action.action)
-        counters[kind] = counters.get(kind, 0) + 1
-    for item in decisions.interrupts_processed:
-        verb = str(item.action or "").strip().lower()
-        if verb == "approve":
-            counters["nudge"] = counters.get("nudge", 0) + 1
-        elif verb == "veto":
-            counters["interrupt-veto"] = counters.get("interrupt-veto", 0) + 1
-        elif verb:
-            counters[verb] = counters.get(verb, 0) + 1
+    if not isinstance(parsed, dict):
+        return counters
+    parsed_dict: Dict[str, Any] = parsed
+    decisions_raw: object = parsed_dict.get("decisions", []) or []
+    decisions_list: Sequence[object] = (
+        cast(Sequence[object], decisions_raw) if isinstance(decisions_raw, list) else []
+    )
+    for item in decisions_list:
+        if isinstance(item, dict):
+            item_dict = cast(Dict[str, Any], item)
+            d = str(item_dict.get("decision", "")).strip().lower()
+            if d:
+                counters[d] = counters.get(d, 0) + 1
+    interrupts_raw: object = parsed_dict.get("interrupts_processed", []) or []
+    interrupts_list: Sequence[object] = (
+        cast(Sequence[object], interrupts_raw) if isinstance(interrupts_raw, list) else []
+    )
+    for item in interrupts_list:
+        if isinstance(item, dict):
+            item_dict = cast(Dict[str, Any], item)
+            action = str(item_dict.get("action", "")).strip().lower()
+            if action == "approve":
+                counters["nudge"] = counters.get("nudge", 0) + 1
+            elif action == "veto":
+                counters["interrupt-veto"] = counters.get("interrupt-veto", 0) + 1
+            elif action:
+                counters[action] = counters.get(action, 0) + 1
     return counters
 
 
@@ -590,34 +618,43 @@ def render_nudge_block(
 
 
 def append_nudges_from_response(
-    decisions: "ScholarDecisions",
+    parsed: Optional[Dict[str, Any]],
     *,
     now: Optional[datetime] = None,
     path: Optional[Path] = None,
 ) -> List[Dict[str, str]]:
     """Append approved interrupts to the pending-nudges file.
 
-    Returns the list of nudge dicts actually written. Same on-disk
-    semantics as the previous design — kept stable so the hook layer
-    doesn't need changes — but consumes a validated ``ScholarDecisions``
-    rather than a hand-scraped dict.
+    Returns the list of nudge dicts actually written. Same semantics as
+    the previous design — kept stable so the hook layer doesn't need
+    changes.
     """
+    if not isinstance(parsed, dict):
+        return []
+    parsed_dict: Dict[str, Any] = parsed
+    interrupts_raw: object = parsed_dict.get("interrupts_processed") or []
+    if not isinstance(interrupts_raw, list):
+        return []
+    interrupts: Sequence[object] = cast(Sequence[object], interrupts_raw)
     if now is None:
         now = datetime.now(timezone.utc)
     target = path if path is not None else pending_nudges_path()
 
     written: List[Dict[str, str]] = []
     blocks: List[str] = []
-    for item in decisions.interrupts_processed:
-        verb = str(item.action or "").strip().lower()
-        if verb != "approve":
+    for item in interrupts:
+        if not isinstance(item, dict):
             continue
-        text = str(item.text or "").strip()
-        lesson_path = str(item.lesson_path or item.lesson_id or "").strip()
+        item_dict = cast(Dict[str, Any], item)
+        action = str(item_dict.get("action", "")).strip().lower()
+        if action != "approve":
+            continue
+        text = str(item_dict.get("text") or "").strip()
+        lesson_path = str(item_dict.get("lesson_path") or item_dict.get("lesson_id") or "").strip()
         if not text or not lesson_path:
             log.warning(
                 "skipping malformed nudge approval (missing text or lesson): %r",
-                item,
+                item_dict,
             )
             continue
         nudge_id = _make_nudge_id()
@@ -696,11 +733,26 @@ def parse_nudges_file(text: str) -> List[Dict[str, str]]:
 # ── Hierarchy invariants (deterministic post-write validation) ────────
 
 
-# Frontmatter fields the schema requires on every entry / the per-directory
-# entry cap. Re-exported from the shared ``_validation`` module so the
-# post-write checker and the boundary validators read the SAME constants.
-_REQUIRED_FRONTMATTER_FIELDS = _validation.REQUIRED_FRONTMATTER_FIELDS
-MAX_FLAT_DIR_ENTRIES = _validation.MAX_FLAT_DIR_ENTRIES
+# Frontmatter fields the schema requires on every entry.
+_REQUIRED_FRONTMATTER_FIELDS = (
+    "id",
+    "type",
+    "scope",
+    "status",
+    "confidence",
+    "applies-when",
+    "keywords",
+    "title",
+    "created",
+    "updated",
+    "fired",
+    "fired-helpful",
+    "sources",
+)
+
+
+# How many entry .md files per directory we permit before flagging.
+MAX_FLAT_DIR_ENTRIES = 5
 
 
 @dataclass(frozen=True)
@@ -819,12 +871,22 @@ def _check_flat_dir_caps(
 
 def _wikilink_resolves(link: str, md: Path, knowledge_dir_path: Path) -> bool:
     """Apply the resolution rules (root-relative + sibling fallback) to
-    one wikilink target. Returns True if it points at an existing entry.
-
-    Thin wrapper over the shared ``_validation.wikilink_resolves`` so the
-    post-write checker and the boundary ``output_validator`` use identical
-    resolution rules."""
-    return _validation.wikilink_resolves(link, md.parent, knowledge_dir_path)
+    one wikilink target. Returns True if it points at an existing entry."""
+    if link.startswith("_archive/") or "/_archive/" in link:
+        return True
+    if link.startswith("daily/"):
+        return True
+    if link.endswith("/"):
+        target = knowledge_dir_path / link / "README.md"
+    else:
+        target = knowledge_dir_path / (link if link.endswith(".md") else f"{link}.md")
+    if target.exists():
+        return True
+    if link.endswith("/"):
+        sibling = md.parent / link / "README.md"
+    else:
+        sibling = md.parent / (link if link.endswith(".md") else f"{link}.md")
+    return sibling.exists()
 
 
 def _check_wikilinks(
@@ -863,11 +925,20 @@ def _check_wikilinks(
 def _check_scope_path_agreement(rel: Path, scope: str) -> str | None:
     """Per prompt invariant #5: ``scope: global`` must live under
     ``global/``; ``scope: project:<slug>`` under ``projects/<slug>/``.
-    Returns the violation string or ``None`` if the file is in agreement.
-
-    Thin wrapper over the shared ``_validation.scope_path_violation`` so the
-    post-write checker and the boundary validators agree."""
-    return _validation.scope_path_violation(rel, scope)
+    Returns the violation string or ``None`` if the file is in agreement."""
+    parts = rel.parts
+    if scope == "global":
+        if parts[0] != "global":
+            return f"scope/path mismatch in {rel}: scope=global but path is not under global/"
+        return None
+    if scope.startswith("project:"):
+        slug = scope.split(":", 1)[1].strip()
+        if parts[0] != "projects" or (len(parts) > 1 and parts[1] != slug):
+            return (
+                f"scope/path mismatch in {rel}: scope={scope!r} but "
+                f"path is not under projects/{slug}/"
+            )
+    return None
 
 
 def _bad_frontmatter_violation(rel_posix: str, message: str) -> InvariantViolation:
@@ -977,20 +1048,27 @@ def check_invariants(knowledge_dir_path: Path) -> List[str]:
 
 
 def _strip_frontmatter(text: str) -> str:
-    """Return ``text`` with a leading YAML frontmatter block removed.
-    Delegates to the shared ``_validation`` helper."""
-    return _validation.strip_frontmatter(text)
+    """Return ``text`` with a leading YAML frontmatter block removed."""
+    m = _FRONTMATTER_HEAD_RE.match(text)
+    if not m:
+        return text
+    return text[m.end() :]
 
 
-# Re-exported so the reinforcement-counter bookkeeping below (which mutates
-# frontmatter in place) keeps using the same regex as the shared parser.
-_FRONTMATTER_HEAD_RE = _validation.FRONTMATTER_HEAD_RE
+_FRONTMATTER_HEAD_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 
 
 def _parse_frontmatter(text: str) -> Dict[str, Any]:
-    """Parse a leading YAML frontmatter block to a mapping (``{}`` when
-    missing/unparseable). Delegates to the shared ``_validation`` helper."""
-    return _validation.parse_frontmatter(text)
+    m = _FRONTMATTER_HEAD_RE.match(text)
+    if not m:
+        return {}
+    try:
+        loaded: object = yaml.safe_load(m.group(1)) or {}
+    except yaml.YAMLError:
+        return {}
+    if isinstance(loaded, dict):
+        return cast(Dict[str, Any], loaded)
+    return {}
 
 
 # ── Deterministic reinforcement-counter bookkeeping ──────────────────
@@ -1267,12 +1345,13 @@ def reconcile_readmes(knowledge_dir: Path) -> List[str]:
 # would re-trip that warning on every single run forever — observed 47×
 # for one phantom ``projects/some-fake-project/...`` row.
 #
-# The Scholar agent's ``output_validator`` only inspects the actions the
-# model is about to apply this pass; it never touches links already sitting
-# on disk that no returned action rewrites — which is exactly the
-# phantom-row case. This pass closes that gap: after the executor finishes,
-# walk the tree and repair broken links in place. Integrity-first — we'd
-# rather remove a known-bogus phantom than leave the graph broken.
+# The pre-write guard in ``llm._make_path_guard`` (check_wikilinks=True)
+# only inspects the Scholar's PROSPECTIVE Write/Edit content; it never
+# touches links already sitting on disk that the Scholar doesn't happen
+# to rewrite this pass — which is exactly the phantom-row case. This pass
+# closes that gap: after the Scholar finishes, walk the tree and repair
+# broken links in place. Integrity-first — we'd rather remove a known-
+# bogus phantom than leave the graph broken.
 
 
 def _resolve_broken_link_leaf(link: str, knowledge_dir_path: Path) -> str | None:

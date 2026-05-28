@@ -4,14 +4,12 @@ Runs on every ``Stop`` event. Given a rolling-buffer snapshot, it:
 
 1. Flattens the snapshot into ``[turn_id] [role] <text>`` lines.
 2. Builds a library snapshot (tree + READMEs + index excerpt).
-3. Assembles the prompt and runs the Pydantic AI ``librarian_agent`` (with
-   read-only research tools — read/grep/bm25/embedding — so the Librarian
-   can inspect specific entries before proposing actions). No regex
-   pre-pass, no BM25 seed hits — the model decides what's worth checking
-   via its own tools.
-4. The agent returns a typed, boundary-validated ``LibrarianProposal``;
-   ``scan`` dumps it into the ``proposals`` / ``interrupts`` dict lists the
-   Scholar pipeline consumes — there is no fragile JSON-scrape step.
+3. Assembles the prompt and calls ``llm.run_librarian_call`` (with
+   Read+Glob tools enabled so the Librarian can inspect specific
+   entries before proposing actions). No regex pre-pass, no BM25 seed
+   hits — the model decides what's worth checking via its own tools.
+4. Parses the response into a `LibrarianProposal` packet the Scholar
+   can consume.
 
 The Librarian PROPOSES actions; the Scholar approves or vetoes each
 one. The Librarian writes nothing to disk.
@@ -29,15 +27,14 @@ from typing import Any, Dict, List, TypedDict
 
 from typing_extensions import NotRequired
 
-from . import librarian_agent, repair_queue, runs
 from . import librarian_prompt as lp
-from .llm import LLMTimeout
+from . import llm, repair_queue, runs
 from .paths import ensure_home, knowledge_dir
 
 log = logging.getLogger("agent_mem_daemon.librarian")
 
 
-_LIBRARIAN_TIMEOUT_S = librarian_agent.LIBRARIAN_TIMEOUT_S
+_LIBRARIAN_TIMEOUT_S = llm.LIBRARIAN_TIMEOUT_S
 
 
 class EvidencePacket(TypedDict):
@@ -140,9 +137,9 @@ def _scan_for_packet(
             return packet
 
         # ── Step 2: knowledge-store inputs ─────────────────────────
-        # No regex pre-pass, no BM25 seed hits. The Librarian has its
-        # read-only research tools and a library snapshot — it decides what
-        # to inspect for dedup itself. Smart model, not pattern matching.
+        # No regex pre-pass, no BM25 seed hits. The Librarian has
+        # Read/Glob tools and a library snapshot — it decides what to
+        # inspect for dedup itself. Smart model, not pattern matching.
         kdir = knowledge_dir()
         library_snapshot = lp.build_library_snapshot(kdir)
         applies_when_table = lp.build_applies_when_table(kdir)
@@ -172,16 +169,16 @@ def _scan_for_packet(
             len(prompt),
         )
 
-        # The Librarian needs the knowledge dir so its read/grep/bm25/
-        # embedding tools land in the right tree. ensure_home() creates the
-        # dir if missing so we never pass a nonexistent path.
+        # The Librarian needs cwd set to the knowledge dir so its
+        # Read/Glob calls land in the right tree. ensure_home() creates
+        # the dir if missing so we never pass a nonexistent path.
         ensure_home()
         try:
-            proposal, cost_usd = librarian_agent.run_librarian_agent(
-                prompt, kdir, timeout_s=_LIBRARIAN_TIMEOUT_S
+            response_text, cost_usd = llm.run_librarian_call(
+                prompt, cwd=kdir, timeout_s=_LIBRARIAN_TIMEOUT_S
             )
-        except LLMTimeout as e:
-            log.warning("librarian agent timeout for session=%s: %s", session_id, e)
+        except llm.LLMTimeout as e:
+            log.warning("librarian SDK timeout for session=%s: %s", session_id, e)
             record.mark_error(e)
             record.decisions = {
                 "proposals": 0,
@@ -190,7 +187,7 @@ def _scan_for_packet(
             }
             return packet
         except Exception as e:
-            log.exception("librarian agent call failed for session=%s", session_id)
+            log.exception("librarian SDK call failed for session=%s", session_id)
             record.mark_error(e)
             record.decisions = {
                 "proposals": 0,
@@ -199,33 +196,41 @@ def _scan_for_packet(
             }
             return packet
 
+        record.output_raw = response_text or ""
         record.cost_usd = float(cost_usd or 0.0)
 
-        # ── Step 4: dump the typed proposal into the packet's dict lists ──
-        # The agent already validated structure + boundaries (per-action
-        # validators + the output validator, re-prompted on ModelRetry), so
-        # there is no JSON-scrape step. ``parsed_ok`` now means "the agent
-        # produced a validated LibrarianProposal", which by construction it
-        # did if we got here.
-        dumped = proposal.model_dump()
-        proposals: List[Dict[str, Any]] = dumped.get("proposals") or []
-        interrupts: List[Dict[str, Any]] = dumped.get("interrupts") or []
-        record.output_raw = proposal.model_dump_json(indent=2)
+        # ── Step 6: parse the JSON response ────────────────────────
+        parsed = lp.parse_librarian_json(response_text)
+        if parsed is None:
+            log.warning(
+                "librarian returned unparseable JSON (session=%s, chars=%d); emitting empty packet",
+                session_id,
+                len(response_text or ""),
+            )
+            record.parsed_ok = False
+            record.decisions = {
+                "proposals": 0,
+                "interrupts": 0,
+                "parse_failed": 1,
+            }
+            return packet
+
+        normalised = lp.normalise_packet(parsed)
         packet = EvidencePacket(
             session_id=session_id,
-            proposals=proposals,
-            interrupts=interrupts,
+            proposals=normalised["proposals"],
+            interrupts=normalised["interrupts"],
         )
         record.parsed_ok = True
         record.decisions = {
-            "proposals": len(proposals),
-            "interrupts": len(interrupts),
+            "proposals": len(normalised["proposals"]),
+            "interrupts": len(normalised["interrupts"]),
         }
         log.info(
             "librarian.scan: session=%s emitted %d proposal(s), %d interrupt(s)",
             session_id,
-            len(proposals),
-            len(interrupts),
+            len(normalised["proposals"]),
+            len(normalised["interrupts"]),
         )
         return packet
 

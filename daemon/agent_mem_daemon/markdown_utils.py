@@ -12,8 +12,7 @@ at the top of every entry) is stripped before parsing.
 
 Used by:
   - scholar_prompt.check_invariants (post-write validator)
-  - scholar_agent / librarian_agent output validators (boundary wikilink
-    + body checks before the executor writes)
+  - llm._make_path_guard (pre-write Scholar guard, when added)
 """
 
 from __future__ import annotations

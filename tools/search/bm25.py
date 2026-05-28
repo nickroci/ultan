@@ -22,10 +22,8 @@ Index persistence:
 
 from __future__ import annotations
 
-import os
 import pickle
 import re
-import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -293,39 +291,16 @@ def build_index(knowledge_dir: Path) -> BM25Index:
     )
 
 
-def save_pickled(obj: object, target: Path) -> Path:
-    """Atomically pickle ``obj`` to ``target``. Returns the path written.
-
-    Concurrency-safe: each writer pickles to its OWN uniquely-named temp file
-    (``tempfile.mkstemp`` in the destination directory) before a single
-    ``os.replace``. Two threads or processes saving the same index therefore
-    never interleave their byte streams into one shared ``*.tmp`` file — the
-    failure mode that produced a half-written, corrupt index when the daemon's
-    parallel Librarian threads rebuilt a stale index at once. ``os.replace``
-    is atomic, so readers see either the old file or a complete new one, never
-    a partial write. Last writer wins; every file on disk is internally
-    complete. Shared by the BM25 and embedding indices.
-    """
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=target.name + ".", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
-        os.replace(tmp_name, target)
-    except BaseException:
-        # Never leave an orphaned temp file behind on a failed write.
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
-    return target
-
-
 def save_index(index: BM25Index, index_path: Path | None = None) -> Path:
     """Pickle the index. Returns the path it was written to."""
     target = index_path or _default_index_path(index.knowledge_dir)
-    return save_pickled(index, target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # Write to a temp file then rename — atomic enough for v1.
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    with tmp.open("wb") as f:
+        pickle.dump(index, f, protocol=pickle.HIGHEST_PROTOCOL)
+    tmp.replace(target)
+    return target
 
 
 _PickledT = TypeVar("_PickledT")
@@ -334,24 +309,17 @@ _PickledT = TypeVar("_PickledT")
 def load_pickled(index_path: Path, expected_type: type[_PickledT]) -> _PickledT | None:
     """Unpickle ``index_path`` and return it only if it is ``expected_type``.
 
-    Any failure to read the cache yields None so the caller rebuilds from
-    scratch. The ``except`` is deliberately broad: a persisted index is a
-    disposable cache, and corruption surfaces in many guises beyond
-    ``pickle.UnpicklingError`` — a mangled stream misread as a string raises
-    ``UnicodeDecodeError``/``ValueError``, a bogus length prefix raises
-    ``MemoryError``, a truncated file raises ``EOFError``, schema drift raises
-    ``AttributeError``/``ModuleNotFoundError``. The only correct response to an
-    unreadable cache is to discard and rebuild it, so we catch ``Exception``
-    rather than enumerate an inevitably-incomplete list. ``BaseException``
-    (``KeyboardInterrupt``, ``SystemExit``) still propagates. Shared by the
-    BM25 and embedding indices.
+    Any I/O, unpickling, or schema-drift error yields None so the caller
+    rebuilds from scratch. Shared by the BM25 and embedding indices.
     """
     try:
         with index_path.open("rb") as f:
             obj: object = pickle.load(f)
-    except Exception:
+        if isinstance(obj, expected_type):
+            return obj
+    except (OSError, pickle.UnpicklingError, EOFError, AttributeError, ModuleNotFoundError):
         return None
-    return obj if isinstance(obj, expected_type) else None
+    return None
 
 
 class _TimestampedDoc(Protocol):
