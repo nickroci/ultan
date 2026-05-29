@@ -12,7 +12,7 @@ A personal memory system for coding agents. Built for Claude Code; lives outside
 
 The memory features that exist today — `CLAUDE.md`, Cursor rules, ChatGPT memory, the various provider built-ins — are *there* but I always felt they did not surface the lessons that had been learned well enough. They seem to be rarely useful, bloat the context, get ignored and when they fire they often feel trivial: shallow grep against a static rules file, no judgment about what's worth remembering vs what isn't, no idea what's stale, no composition with the current turn. I was tired of teaching the same agent the same thing over and over and I did not want to have to manually curate an ever changing set of shared knowledge per project and globally.
 
-So I wondered what could be achieved with a much more advanced system. There are obviously many alternatives but none had all the features that I wanted. Real memory is salience-gated at write time, decays without reinforcement, mutates on retrieval, resists deletion of high-importance traces, and uses different mechanisms for different latencies (ambient familiarity, deliberate recall, fast suppression). So we took the neurology seriously and built towards it — a curator pair (currently Sonnet + Opus) gating writes by surprise magnitude; three retrieval tiers each tuned to a different cognitive analog; surfacing-aware decay with optional arousal pinning; an opt-in mutation/reconsolidation pathway; archive-don't-delete so contradictions can resurrect old traces. Tokens cost something, but less than the friction of repeating yourself.
+So I wondered what could be achieved with a much more advanced system. There are obviously many alternatives but none had all the features that I wanted. Real memory is salience-gated at write time, decays without reinforcement, mutates on retrieval, resists deletion of high-importance traces, and uses different mechanisms for different latencies (ambient familiarity, deliberate recall, fast suppression). So we took the neurology seriously and built towards it — a curator pair (currently Sonnet + Opus) gating writes by surprise magnitude; three retrieval tiers each tuned to a different cognitive analog; surfacing-aware decay with optional arousal pinning; an opt-in mutation/reconsolidation pathway; archive-don't-delete so contradictions can resurrect old traces. Tokens cost something — it's deliberately token-heavy, and the curator runs on your Claude Code subscription (Max/Pro quota, not a metered API bill) — but less than the friction of repeating yourself.
 
 Ultan watches your conversations as you work, learns your preferences and conventions, and surfaces them when they matter. It's the "remember when you told me to always use uv" that you wish Claude already did natively, except organised, deduplicated, validated, and proactively consulted before the agent interrupts you to ask something you've already answered.
 
@@ -214,11 +214,11 @@ flowchart TD
 
 Design discipline that survived live testing:
 
-- **Path guard at the SDK layer.** A `can_use_tool` callback rejects any tool call whose path resolves outside the knowledge directory. Doesn't trust the prompt to behave; enforces in infrastructure.
+- **The model writes nothing.** The curator's tools are read-only (read · grep · BM25 · embedding); the LLM returns a typed, validated *set of actions* and a deterministic executor is the only thing that touches disk. Paths are checked at the boundary, never trusted from the prompt.
 - **No silent fix-ups.** The Scholar can only approve-and-execute or veto-and-drop. If the Librarian got the path wrong, the proposal is lost — recurs next session if real. Forces the Librarian to be careful.
-- **Schema as single source of truth.** All prompt instructions describing the JSON the LLM should emit are generated from Pydantic models at prompt-assembly time. Change the schema, the prompt updates automatically.
+- **Schema as single source of truth.** The output models (`ScholarDecisions` / `LibrarianProposal`) *are* the tool schema the model fills in and the validators it must satisfy. Change the schema and both the model's contract and the boundary checks move with it.
 - **Auto-reconciled READMEs.** Every folder's README has a `<!-- ULTAN:children (auto) -->` marker block. The LLM writes prose above; the daemon keeps the listing in sync after every batch. No drift.
-- **Streaming-mode SDK calls** so `can_use_tool` works, with a final-`{...}`-block JSON extractor that's robust against tool-call markers preceding the response.
+- **Typed output over the subscription SDK.** The curator runs on your Claude Code subscription via `claude-agent-sdk` — never the metered API — yet still gets Pydantic-AI-style discipline, through a small in-house shim (`typed_agent.run_typed`). The model "returns" by calling a `submit_result` tool whose input schema *is* the Pydantic output model; a validator runs at that boundary, and anything malformed (an unresolvable wikilink, an over-cap directory, unparseable frontmatter) is handed straight back as the tool result so the model self-corrects in-band. No JSON scraped from free text, no post-hoc repair — bad data never crosses the boundary. Pydantic-AI itself only speaks the metered API, so we kept its ergonomics without its billing.
 - **Persistent tailer offset** so daemon restarts resume mid-stream instead of seeking to EOF and losing the events that arrived during downtime.
 - **No literal secrets in the library.** Both curator prompts are explicit: the Librarian must not quote credentials in any field of a proposal (API keys, OAuth secrets, GitHub PATs, AWS keys, `sk-*` keys, private-key blocks, connection strings with passwords, JWTs); the Scholar treats the same as a hard-veto invariant. Memory is plain markdown on disk and often git-tracked — defence in depth at both stages.
 
@@ -282,15 +282,15 @@ Storage on disk:
 
 ## A note on cost
 
-**Ultan is token-heavy by design.** It trades tokens for richer memory and lower friction. Expect roughly:
+**Ultan is token-heavy by design, and it runs on your Claude Code subscription.** The curator (Librarian + Scholar) calls models through `claude-agent-sdk` — the same auth your Claude Code session already uses — so on Max/Pro the usage counts against your plan's limits, **not** a metered per-token bill. It trades a generous slice of that quota for richer memory and lower friction. Expect roughly:
 
 - **Librarian (Sonnet)** runs after each session's quiet period (per-session debounce, default 30s). With moderate activity that's ~10-30 invocations per working day per project. Each is a few thousand input tokens (prompt + library snapshot + buffer) plus a few hundred output tokens.
-- **Scholar (Opus)** runs in batches — every 3 Librarian packets or 60s, whichever first. Each batch is one Opus call: prompt + accumulated proposals, ~30s wall time, ~$0.20-0.50 per batch on pay-as-you-go pricing.
+- **Scholar (Opus)** runs in batches — every 3 Librarian packets or 60s, whichever first. Each batch is one Opus call: prompt + accumulated proposals, ~30s wall time, a few thousand input + a few hundred output tokens.
 - **Ambient priming (Tier 1)** is daemon-side BM25 + embeddings + cross-encoder rerank, **no LLM cost**, but it injects up to 1500 chars into every UserPromptSubmit — call it ~400 tokens of prompt overhead per turn.
-- **Advisor (`/ultan-advisor`)** is one Sonnet call (Librarian step) + one Opus call (Scholar synthesis) per invocation. ~$0.30-0.50 each.
+- **Advisor (`/ultan-advisor`)** is one Sonnet call (Librarian step) + one Opus call (Scholar synthesis) per invocation.
 - **PreToolUse Tier 3** is pure deterministic regex match, **no LLM cost**, sub-100ms.
 
-For pay-as-you-go API users this adds up — easily $5-20/day for active dogfooding. **If you're on Max/Pro**, the cost lands against your quota rather than your card; the latency cost remains.
+On a Max/Pro plan this is real quota: active dogfooding across projects can chew through a meaningful slice of your usage window, and on a busy day you may hit your plan's rate limit. When that happens the affected batch is simply dropped and its lessons recur next session — the daemon never silently falls back to a paid API. (If you've instead pointed the Claude Code CLI at a metered `ANTHROPIC_API_KEY`, the same volume runs roughly $5-20/day pay-as-you-go.)
 
 If that's too rich for your workflow: turn off the daemon entirely and use just the slash commands (`/ultan`, `/ultan-advisor`) — the curator stops running, but the explicit-write and explicit-query paths still work. You lose ambient priming, automatic extraction, and proactive nudges, but you keep the markdown library and the on-demand advisor.
 
@@ -405,7 +405,7 @@ Prior art worth borrowing from: **MemoryBank** (Zhong et al., 2024) applies the 
 
 ## Status
 
-516 daemon + 174 search + 68 hooks tests passing (758 total). Live-tested end-to-end against real Sonnet + Opus calls including the three retrieval tiers, the curator's salience-signal classification, README reconciler, wikilink validator, and the PreToolUse advisory/block hook. Currently a personal dogfood project — not packaged for `pip install`. Expect to clone, `uv sync`, and tune the prompts to your own preferences.
+582 daemon + 174 search + 68 hooks tests passing (824 total). Live-tested end-to-end against real Sonnet + Opus calls — now driven through the typed-output shim over the subscription SDK — including the three retrieval tiers, the curator's salience-signal classification, README reconciler, wikilink validator, and the PreToolUse advisory/block hook. Currently a personal dogfood project — not packaged for `pip install`. Expect to clone, `uv sync`, and tune the prompts to your own preferences.
 
 ## License
 

@@ -1,13 +1,18 @@
-"""Tests for the Scholar prompt assembly + JSON parsing + nudge writing
-+ hierarchy invariants checker."""
+"""Tests for the Scholar prompt assembly + decision accounting + nudge
+writing + hierarchy invariants checker.
+
+The Scholar now returns a typed, validated ``ScholarDecisions`` (no JSON
+scrape), so the parsing tests are gone; ``summarise_decisions`` and
+``append_nudges_from_response`` consume that model directly."""
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Dict, List
 
 from agent_mem_daemon import scholar_prompt
+from agent_mem_daemon._schemas import ScholarDecisions
 
 # ── prompt assembly ───────────────────────────────────────────────────
 
@@ -36,17 +41,14 @@ def test_build_prompt_includes_proposals_and_library_snapshot():
     assert "global/tooling/uv-basics.md" in prompt
     assert "2026-05-19T15:00:00" in prompt
     assert "## Tree" in prompt
-    # Veto language and final-output language must survive into the rendered prompt.
+    # Veto language and the typed-output language must survive into the prompt.
     assert "VETO" in prompt
-    assert "FINAL OUTPUT" in prompt
-    # Action vocabulary must be present.
+    assert "ScholarDecisions" in prompt
+    # The action enumeration (Librarian's full vocabulary) is still inlined.
     for action in (
         "write_entry",
         "merge_entries",
-        "split_folder",
         "archive_entry",
-        "add_wikilink",
-        "update_readme",
         "move_entry",
         "update_entry",
     ):
@@ -54,8 +56,8 @@ def test_build_prompt_includes_proposals_and_library_snapshot():
 
 
 def test_build_prompt_annotates_action_indices():
-    """Each proposal in the rendered JSON carries an ``_action_index``
-    so the Scholar can reference them in its final response."""
+    """Each proposal in the rendered JSON carries an ``_action_index`` so the
+    Scholar can refer to the Librarian's proposals while verifying them."""
     packets = [
         {
             "session_id": "s1",
@@ -89,101 +91,46 @@ def test_build_prompt_handles_empty_proposals():
     assert "s1" in prompt
 
 
-# ── response parsing ──────────────────────────────────────────────────
-
-
-def test_parse_response_plain_json():
-    text = json.dumps(
-        {
-            "decisions": [
-                {"action_index": 0, "decision": "approve", "veto_reason": ""},
-                {"action_index": 1, "decision": "veto", "veto_reason": "thin evidence"},
-            ],
-            "interrupts_processed": [],
-        }
+def test_build_prompt_embeds_scholar_decisions_schema():
+    """The output schema inlined into the prompt is the ScholarDecisions
+    model's JSON Schema (actions + interrupts_processed), not the old
+    approve/veto ScholarReview shape."""
+    prompt = scholar_prompt.build_prompt(
+        [{"session_id": "s1", "proposals": [], "interrupts": []}],
+        library_snapshot="(empty)",
     )
-    parsed, ok = scholar_prompt.parse_response(text)
-    assert ok is True
-    assert parsed is not None
-    assert parsed["decisions"][0]["decision"] == "approve"
-    assert parsed["decisions"][1]["decision"] == "veto"
-    assert parsed["decisions"][1]["veto_reason"] == "thin evidence"
+    assert "interrupts_processed" in prompt
+    assert '"actions"' in prompt
 
 
-def test_parse_response_fenced_json():
-    payload = {"decisions": [], "interrupts_processed": []}
-    text = "Some reasoning here.\n\n```json\n" + json.dumps(payload) + "\n```"
-    parsed, ok = scholar_prompt.parse_response(text)
-    assert ok is True
-    assert parsed == payload
+# ── decision accounting (typed-output era) ────────────────────────────
 
 
-def test_parse_response_trailing_object_fallback():
-    text = 'Prose blathering ...\n{"decisions": [], "interrupts_processed": []}'
-    parsed, ok = scholar_prompt.parse_response(text)
-    assert ok is True
-    assert parsed is not None
-    assert parsed["decisions"] == []
+def _decisions(actions: List[Dict[str, Any]], interrupts: List[Dict[str, Any]]) -> ScholarDecisions:
+    return ScholarDecisions.model_validate({"actions": actions, "interrupts_processed": interrupts})
 
 
-def test_parse_response_malformed():
-    parsed, ok = scholar_prompt.parse_response("definitely not json {oops")
-    assert ok is False
-    assert parsed is None
-
-
-def test_parse_response_empty():
-    parsed, ok = scholar_prompt.parse_response("")
-    assert ok is False
-    assert parsed is None
-
-
-def test_parse_response_unknown_decision_rejected_via_default():
-    """Pydantic literal: any decision other than 'approve'/'veto' falls
-    back to the default ('veto'). Better to drop than to silently
-    approve."""
-    text = json.dumps(
-        {
-            "decisions": [{"action_index": 0, "decision": "maybe"}],
-            "interrupts_processed": [],
-        }
-    )
-    parsed, ok = scholar_prompt.parse_response(text)
-    # Should reject because Literal["approve","veto"] doesn't accept
-    # "maybe" — Pydantic raises ValidationError.
-    assert ok is False
-
-
-# ── decisions summary ────────────────────────────────────────────────
-
-
-def test_summarise_decisions_counts_actions():
-    parsed = {
-        "decisions": [
-            {"action_index": 0, "decision": "approve"},
-            {"action_index": 1, "decision": "approve"},
-            {"action_index": 2, "decision": "veto"},
-            {"action_index": 3, "decision": "veto"},
+def test_summarise_decisions_counts_actions_and_interrupts():
+    decisions = _decisions(
+        [
+            {"action": "archive_entry", "path": "a.md", "reasoning": "r"},
+            {"action": "archive_entry", "path": "b.md", "reasoning": "r"},
         ],
-        "interrupts_processed": [
-            {"action": "approve"},
+        [
+            {"action": "approve", "lesson_path": "l/a", "text": "t"},
             {"action": "veto"},
             {"action": "veto"},
         ],
-    }
-    counters = scholar_prompt.summarise_decisions(parsed)
-    assert counters == {
-        "approve": 2,
-        "veto": 2,
-        "nudge": 1,
-        "interrupt-veto": 2,
-    }
+    )
+    counters = scholar_prompt.summarise_decisions(decisions)
+    assert counters["actions_applied"] == 2
+    assert counters["archive_entry"] == 2
+    assert counters["nudge"] == 1
+    assert counters["interrupt-veto"] == 2
 
 
-def test_summarise_decisions_handles_none_and_garbage():
-    assert scholar_prompt.summarise_decisions(None) == {}
-    assert scholar_prompt.summarise_decisions({"decisions": "nope"}) == {}
-    assert scholar_prompt.summarise_decisions({}) == {}
+def test_summarise_decisions_empty():
+    assert scholar_prompt.summarise_decisions(_decisions([], [])) == {}
 
 
 # ── nudge file writing + round-trip ──────────────────────────────────
@@ -191,9 +138,9 @@ def test_summarise_decisions_handles_none_and_garbage():
 
 def test_append_nudges_writes_blocks(tmp_path: Path):
     target = tmp_path / "pending-nudges.md"
-    parsed = {
-        "decisions": [],
-        "interrupts_processed": [
+    decisions = _decisions(
+        [],
+        [
             {
                 "lesson_id": "factory-pattern-for-apis",
                 "lesson_path": "global/tooling/factory-pattern-for-apis",
@@ -215,9 +162,9 @@ def test_append_nudges_writes_blocks(tmp_path: Path):
                 "reason": "ok",
             },
         ],
-    }
+    )
     written = scholar_prompt.append_nudges_from_response(
-        parsed,
+        decisions,
         now=datetime(2026, 5, 19, 15, 0, 0, tzinfo=timezone.utc),
         path=target,
     )
@@ -236,11 +183,13 @@ def test_append_nudges_writes_blocks(tmp_path: Path):
 def test_append_nudges_appends_not_overwrites(tmp_path: Path):
     target = tmp_path / "pending-nudges.md"
     target.write_text(
-        "---\nid: pre\ncreated: 2026-01-01T00:00:00+00:00\nlesson: pre/lesson\n---\nPre-existing nudge.\n",
+        "---\nid: pre\ncreated: 2026-01-01T00:00:00+00:00\nlesson: pre/lesson\n"
+        "---\nPre-existing nudge.\n",
         encoding="utf-8",
     )
-    parsed = {
-        "interrupts_processed": [
+    decisions = _decisions(
+        [],
+        [
             {
                 "lesson_id": "x",
                 "lesson_path": "x/path",
@@ -248,8 +197,8 @@ def test_append_nudges_appends_not_overwrites(tmp_path: Path):
                 "text": "Newly written nudge.",
             }
         ],
-    }
-    scholar_prompt.append_nudges_from_response(parsed, path=target)
+    )
+    scholar_prompt.append_nudges_from_response(decisions, path=target)
     body = target.read_text(encoding="utf-8")
     assert "Pre-existing nudge." in body
     assert "Newly written nudge." in body
@@ -257,25 +206,25 @@ def test_append_nudges_appends_not_overwrites(tmp_path: Path):
 
 def test_append_nudges_skips_malformed_approval(tmp_path: Path):
     target = tmp_path / "pending-nudges.md"
-    parsed = {
-        "interrupts_processed": [
+    decisions = _decisions(
+        [],
+        [
             {"lesson_id": "x", "action": "approve"},
             {"lesson_id": "y", "lesson_path": "y/path", "action": "approve"},
         ],
-    }
-    written = scholar_prompt.append_nudges_from_response(parsed, path=target)
+    )
+    written = scholar_prompt.append_nudges_from_response(decisions, path=target)
     assert written == []
     assert not target.exists() or target.read_text(encoding="utf-8") == ""
 
 
 def test_append_nudges_with_no_approvals_writes_nothing(tmp_path: Path):
     target = tmp_path / "pending-nudges.md"
-    parsed = {
-        "interrupts_processed": [
-            {"lesson_id": "x", "lesson_path": "x", "action": "veto", "reason": "nope"},
-        ],
-    }
-    written = scholar_prompt.append_nudges_from_response(parsed, path=target)
+    decisions = _decisions(
+        [],
+        [{"lesson_id": "x", "lesson_path": "x", "action": "veto", "reason": "nope"}],
+    )
+    written = scholar_prompt.append_nudges_from_response(decisions, path=target)
     assert written == []
     assert not target.exists()
 
@@ -864,7 +813,7 @@ def test_build_prompt_exempts_repair_proposals_from_novelty():
     prompt = scholar_prompt.build_prompt([], library_snapshot="(empty)")
     assert "INTEGRITY-REPAIR PROPOSALS" in prompt
     assert "repair_fingerprints" in prompt
-    assert "VERIFY-AND-EXECUTE" in prompt
+    assert "VERIFY-AND-RETURN" in prompt
     # The salience filter must tell the Scholar to skip repair proposals.
     assert "SKIP it" in prompt or "SKIP this section" in prompt or "bypass this filter" in prompt
     # And it must spell out that "not novel"/"duplicate" are not valid veto

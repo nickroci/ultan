@@ -18,7 +18,6 @@ dependencies = [
   "rank-bm25>=0.2.2",
   "pyyaml>=6.0",
   "pydantic>=2.6",
-  "json-repair>=0.25",
   "agent-mem-search",
   "opentelemetry-api>=1.42.0",
   # Markdown AST parsing for wikilink validation (skip code spans / code
@@ -46,6 +45,7 @@ agent-mem-search = { path = "../tools/search", editable = true }
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --cov --cov-report=term-missing"
+asyncio_mode = "auto"
 
 [tool.coverage.run]
 source = ["agent_mem_daemon"]
@@ -102,4 +102,5 @@ dev = [
     "ruff>=0.15.14",
     "pytest-cov>=7.1.0",
     "pylint>=3.3",
+    "pytest-asyncio>=1.4.0",
 ]

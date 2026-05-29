@@ -1,12 +1,18 @@
 """End-to-end tests for librarian.scan — orchestration only.
 
-The LLM call is monkey-patched. We pin:
-- Empty buffer → empty packet, no LLM call.
-- Mocked LLM → populated EvidencePacket with the new ``proposals`` shape.
-- Malformed JSON → empty packet, parsed_ok=False on the audit record.
-- Exceptions from the SDK → empty packet, never propagated.
+The typed agent run is monkey-patched (we stub
+``librarian.run_librarian_agent`` to return a typed
+``LibrarianProposal`` + cost). We pin:
+- Empty buffer → empty packet, no agent run.
+- Stubbed agent → populated EvidencePacket with the ``proposals`` shape.
+- Agent timeout / exception → empty packet, never propagated.
 - The audit transcript ends up in the AGENT_MEM_HOME tmp dir.
 - User-asserted payload flag propagates through the prompt.
+- Integrity-repair tasks drain into the prompt + fingerprints ride out.
+
+The agent wiring itself (typed output, ModelRetry on malformed proposals,
+read-only tools) is exercised in ``test_librarian_validation.py`` and
+``test_agent_research.py``.
 """
 
 from __future__ import annotations
@@ -16,7 +22,9 @@ from pathlib import Path
 
 import pytest
 
-from agent_mem_daemon import librarian, llm, repair_queue
+from agent_mem_daemon import librarian, repair_queue
+from agent_mem_daemon._schemas import LibrarianProposal
+from agent_mem_daemon.llm import LLMTimeout
 
 
 @pytest.fixture
@@ -34,6 +42,24 @@ def _fresh_repair_queue():
     repair_queue.reset_queue()
     yield
     repair_queue.reset_queue()
+
+
+def _proposal(obj: dict) -> LibrarianProposal:
+    """Build a validated LibrarianProposal from a plain dict."""
+    return LibrarianProposal.model_validate(obj)
+
+
+def _stub_agent(monkeypatch, *, proposal: LibrarianProposal, cost: float = 0.0, captured=None):
+    """Patch the agent runner to return ``(proposal, cost)`` and capture the
+    prompt + knowledge_dir it was called with."""
+
+    def _run(prompt, knowledge_dir, *, timeout_s=600.0):
+        if captured is not None:
+            captured["prompt"] = prompt
+            captured["knowledge_dir"] = knowledge_dir
+        return proposal, cost
+
+    monkeypatch.setattr(librarian, "run_librarian_agent", _run)
 
 
 def _payload_snap(session_id: str, exchanges: list[tuple[str, str]]):
@@ -68,11 +94,11 @@ def _payload_snap(session_id: str, exchanges: list[tuple[str, str]]):
 def test_scan_empty_buffer_returns_empty_packet_no_llm(home, monkeypatch):
     called = {"n": 0}
 
-    def fake_llm(prompt, *, cwd=None, timeout_s=60.0):
+    def _run(prompt, knowledge_dir, *, timeout_s=600.0):
         called["n"] += 1
-        return ('{"proposals": [], "interrupts": []}', 0.0)
+        return _proposal({"proposals": [], "interrupts": []}), 0.0
 
-    monkeypatch.setattr(llm, "run_librarian_call", fake_llm)
+    monkeypatch.setattr(librarian, "run_librarian_agent", _run)
 
     packet = librarian.scan({"session_id": "s1", "turns": []})
     assert packet["session_id"] == "s1"
@@ -81,7 +107,7 @@ def test_scan_empty_buffer_returns_empty_packet_no_llm(home, monkeypatch):
     assert called["n"] == 0
 
 
-# ── happy path: mocked LLM → populated packet ─────────────────────────
+# ── happy path: stubbed agent → populated packet ──────────────────────
 
 
 def _seed_knowledge(home: Path):
@@ -116,46 +142,46 @@ def _seed_knowledge(home: Path):
 def test_scan_happy_path_proposals_and_interrupts(home, monkeypatch):
     _seed_knowledge(home)
 
-    captured = {"prompt": None, "cwd": None}
+    captured = {}
 
-    fake_response = {
-        "proposals": [
-            {
-                "action": "write_entry",
-                "path": "global/tooling/stub-the-factory.md",
-                "body": (
-                    "---\nid: stub-the-factory\ntype: lesson\nscope: global\n"
-                    "status: provisional\nconfidence: 0.7\n"
-                    "applies-when: |\n  writing tests against a service that has a factory\n"
-                    "keywords: [testing, stub, factory]\n"
-                    'title: "Stub the factory not the service"\n'
-                    "created: 2026-05-19\nupdated: 2026-05-19\n"
-                    "fired: 0\nfired-helpful: 0\nsources:\n  - daily/2026-05-19.md\n"
-                    "---\n\n# Stub the factory\nBody.\n"
-                ),
-                "reasoning": "buffer turn [2] said 'Stub the factory, not the service.'",
-            }
-        ],
-        "interrupts": [
-            {
-                "lesson_id": "factory-pattern-for-apis",
-                "lesson_path": "global/tooling/factory-pattern-for-apis.md",
-                "matching_applies_when": "designing or building any new API",
-                "evidence": [
-                    {"turn_id": 1, "role": "user", "quote": "wiring up the new ReportingService"}
-                ],
-                "match_score": 0.92,
-                "librarian_confidence": 0.88,
-            }
-        ],
-    }
-
-    def fake_llm(prompt, *, cwd=None, timeout_s=60.0):
-        captured["prompt"] = prompt
-        captured["cwd"] = cwd
-        return (json.dumps(fake_response), 0.0012)
-
-    monkeypatch.setattr(llm, "run_librarian_call", fake_llm)
+    proposal = _proposal(
+        {
+            "proposals": [
+                {
+                    "action": "write_entry",
+                    "path": "global/tooling/stub-the-factory.md",
+                    "body": (
+                        "---\nid: stub-the-factory\ntype: lesson\nscope: global\n"
+                        "status: provisional\nconfidence: 0.7\n"
+                        "applies-when: |\n  writing tests against a service that has a factory\n"
+                        "keywords: [testing, stub, factory]\n"
+                        'title: "Stub the factory not the service"\n'
+                        "created: 2026-05-19\nupdated: 2026-05-19\n"
+                        "fired: 0\nfired-helpful: 0\nsources:\n  - daily/2026-05-19.md\n"
+                        "---\n\n# Stub the factory\nBody.\n"
+                    ),
+                    "reasoning": "buffer turn [2] said 'Stub the factory, not the service.'",
+                }
+            ],
+            "interrupts": [
+                {
+                    "lesson_id": "factory-pattern-for-apis",
+                    "lesson_path": "global/tooling/factory-pattern-for-apis.md",
+                    "matching_applies_when": "designing or building any new API",
+                    "evidence": [
+                        {
+                            "turn_id": 1,
+                            "role": "user",
+                            "quote": "wiring up the new ReportingService",
+                        }
+                    ],
+                    "match_score": 0.92,
+                    "librarian_confidence": 0.88,
+                }
+            ],
+        }
+    )
+    _stub_agent(monkeypatch, proposal=proposal, cost=0.0012, captured=captured)
 
     snap = _payload_snap(
         "sess-123",
@@ -176,11 +202,11 @@ def test_scan_happy_path_proposals_and_interrupts(home, monkeypatch):
     assert len(packet["interrupts"]) == 1
     assert packet["interrupts"][0]["lesson_id"] == "factory-pattern-for-apis"
 
-    # The Librarian's cwd must be the knowledge directory.
-    assert captured["cwd"] == home / "knowledge"
+    # The Librarian's knowledge_dir must be the knowledge directory.
+    assert captured["knowledge_dir"] == home / "knowledge"
 
     # Prompt contents: project slug, buffer text, library snapshot tree,
-    # applies-when row, BM25 seeds.
+    # applies-when row, the in-process research tools.
     p = captured["prompt"]
     assert p is not None
     assert "acme-widget-svc" in p
@@ -189,20 +215,17 @@ def test_scan_happy_path_proposals_and_interrupts(home, monkeypatch):
     assert "global/" in p
     assert "tooling/" in p
     assert "factory-pattern-for-apis | global | designing or building any new API" in p
-    # Regex seed pre-pass is gone — the Librarian calls bm25_search itself.
+    # The Librarian researches dedup with its own bm25_search tool.
     assert "bm25_search" in p
 
 
 def test_scan_user_asserted_event_propagates_to_prompt(home, monkeypatch):
     """A user-asserted payload (from /ultan) must show up in the prompt
     with the [USER-ASSERTED] marker."""
-    captured = {"prompt": None}
-
-    def fake_llm(prompt, *, cwd=None, timeout_s=60.0):
-        captured["prompt"] = prompt
-        return ('{"proposals": [], "interrupts": []}', 0.0)
-
-    monkeypatch.setattr(llm, "run_librarian_call", fake_llm)
+    captured = {}
+    _stub_agent(
+        monkeypatch, proposal=_proposal({"proposals": [], "interrupts": []}), captured=captured
+    )
 
     snap = {
         "session_id": "ultan-abc",
@@ -235,14 +258,7 @@ def test_scan_user_asserted_event_propagates_to_prompt(home, monkeypatch):
 
 
 def test_scan_writes_audit_jsonl(home, monkeypatch):
-    monkeypatch.setattr(
-        llm,
-        "run_librarian_call",
-        lambda prompt, *, cwd=None, timeout_s=60.0: (
-            '{"proposals": [], "interrupts": []}',
-            0.0,
-        ),
-    )
+    _stub_agent(monkeypatch, proposal=_proposal({"proposals": [], "interrupts": []}))
     snap = _payload_snap("sess-audit", [("user", "Always wrap upstream errors.")])
     librarian.scan(snap)
 
@@ -261,45 +277,29 @@ def test_scan_writes_audit_jsonl(home, monkeypatch):
     assert "seeds_proposed" not in row["decisions"]
 
 
-# ── malformed JSON → empty packet, no crash ───────────────────────────
+# ── agent exception → empty packet, never propagates ──────────────────
 
 
-def test_scan_malformed_json_returns_empty_packet(home, monkeypatch):
-    monkeypatch.setattr(
-        llm,
-        "run_librarian_call",
-        lambda prompt, *, cwd=None, timeout_s=60.0: ("not valid json at all", 0.0),
-    )
-    snap = _payload_snap("s-bad", [("user", "Always wrap upstream errors.")])
-    packet = librarian.scan(snap)
-    assert packet["proposals"] == []
-    assert packet["interrupts"] == []
-    assert packet["session_id"] == "s-bad"
+def test_scan_agent_exception_swallowed(home, monkeypatch):
+    def boom(prompt, knowledge_dir, *, timeout_s=600.0):
+        raise RuntimeError("provider down")
 
-    row = json.loads((home / "runs").glob("*.jsonl").__next__().read_text().strip())
-    assert row["parsed_ok"] is False
-    assert row["decisions"].get("parse_failed") == 1
-
-
-# ── SDK exception → empty packet, never propagates ────────────────────
-
-
-def test_scan_sdk_exception_swallowed(home, monkeypatch):
-    def boom(prompt, *, cwd=None, timeout_s=60.0):
-        raise RuntimeError("network down")
-
-    monkeypatch.setattr(llm, "run_librarian_call", boom)
+    monkeypatch.setattr(librarian, "run_librarian_agent", boom)
     snap = _payload_snap("s-err", [("user", "Always wrap upstream errors.")])
     packet = librarian.scan(snap)
     assert packet["proposals"] == []
     assert packet["interrupts"] == []
 
+    row = json.loads((home / "runs").glob("*.jsonl").__next__().read_text().strip())
+    assert row["parsed_ok"] is False
+    assert row["decisions"].get("llm_error") == 1
 
-def test_scan_sdk_timeout_swallowed(home, monkeypatch):
-    def slow(prompt, *, cwd=None, timeout_s=60.0):
-        raise llm.LLMTimeout("exceeded 60s")
 
-    monkeypatch.setattr(llm, "run_librarian_call", slow)
+def test_scan_agent_timeout_swallowed(home, monkeypatch):
+    def slow(prompt, knowledge_dir, *, timeout_s=600.0):
+        raise LLMTimeout("exceeded 600s")
+
+    monkeypatch.setattr(librarian, "run_librarian_agent", slow)
     snap = _payload_snap("s-to", [("user", "Always wrap upstream errors.")])
     packet = librarian.scan(snap)
     assert packet["proposals"] == []
@@ -314,12 +314,15 @@ def test_scan_sdk_timeout_swallowed(home, monkeypatch):
 def test_evidence_packet_has_only_expected_top_level_keys(home, monkeypatch):
     """The packet's top-level keys must be exactly the TypedDict's set,
     so the scheduler can rely on the contract."""
-    monkeypatch.setattr(
-        llm,
-        "run_librarian_call",
-        lambda prompt, *, cwd=None, timeout_s=60.0: (
-            '{"proposals": [{"action": "archive_entry", "path": "x.md", "reasoning": "old"}], "interrupts": []}',
-            0.0,
+    _stub_agent(
+        monkeypatch,
+        proposal=_proposal(
+            {
+                "proposals": [
+                    {"action": "archive_entry", "path": "global/x/old.md", "reasoning": "old"}
+                ],
+                "interrupts": [],
+            }
         ),
     )
     snap = _payload_snap("sess-shape", [("user", "Always X.")])
@@ -346,13 +349,11 @@ def test_scan_drains_repair_task_into_prompt_and_attaches_fingerprint(home, monk
     fingerprint is attached to the emitted packet so the Scholar can later
     release the in-flight marker."""
     fp = _queue_task()
-    captured = {"prompt": None}
+    captured = {}
+    _stub_agent(
+        monkeypatch, proposal=_proposal({"proposals": [], "interrupts": []}), captured=captured
+    )
 
-    def fake_llm(prompt, *, cwd=None, timeout_s=60.0):
-        captured["prompt"] = prompt
-        return ('{"proposals": [], "interrupts": []}', 0.0)
-
-    monkeypatch.setattr(llm, "run_librarian_call", fake_llm)
     snap = _payload_snap("s-rep", [("user", "Always X.")])
     packet = librarian.scan(snap)
 
@@ -366,16 +367,16 @@ def test_scan_drains_repair_task_into_prompt_and_attaches_fingerprint(home, monk
     assert repair_queue.get_queue().inflight_count() == 1
 
 
-def test_scan_attaches_fingerprints_even_on_sdk_error(home, monkeypatch):
+def test_scan_attaches_fingerprints_even_on_agent_error(home, monkeypatch):
     """Leak fix: a Librarian that drained a task but then errored must STILL
     hand the fingerprint to the Scholar (on the error/empty packet) so the
     marker can be released — otherwise it stays in-flight forever."""
     fp = _queue_task()
 
-    def boom(prompt, *, cwd=None, timeout_s=60.0):
-        raise RuntimeError("network down")
+    def boom(prompt, knowledge_dir, *, timeout_s=600.0):
+        raise RuntimeError("provider down")
 
-    monkeypatch.setattr(llm, "run_librarian_call", boom)
+    monkeypatch.setattr(librarian, "run_librarian_agent", boom)
     snap = _payload_snap("s-rep-err", [("user", "Always X.")])
     packet = librarian.scan(snap)
 
@@ -383,29 +384,25 @@ def test_scan_attaches_fingerprints_even_on_sdk_error(home, monkeypatch):
     assert packet.get("repair_fingerprints") == [fp]
 
 
-def test_scan_runs_llm_for_repair_task_even_with_empty_buffer(home, monkeypatch):
-    """A pending repair task is itself a reason to invoke the LLM — the
+def test_scan_runs_agent_for_repair_task_even_with_empty_buffer(home, monkeypatch):
+    """A pending repair task is itself a reason to invoke the agent — the
     empty-buffer short-circuit must NOT skip it."""
     fp = _queue_task()
     called = {"n": 0}
 
-    def fake_llm(prompt, *, cwd=None, timeout_s=60.0):
+    def _run(prompt, knowledge_dir, *, timeout_s=600.0):
         called["n"] += 1
-        return ('{"proposals": [], "interrupts": []}', 0.0)
+        return _proposal({"proposals": [], "interrupts": []}), 0.0
 
-    monkeypatch.setattr(llm, "run_librarian_call", fake_llm)
+    monkeypatch.setattr(librarian, "run_librarian_agent", _run)
     packet = librarian.scan({"session_id": "s-empty", "turns": []})
 
-    assert called["n"] == 1  # LLM ran despite empty buffer
+    assert called["n"] == 1  # agent ran despite empty buffer
     assert packet.get("repair_fingerprints") == [fp]
 
 
 def test_scan_no_repair_tasks_attaches_no_fingerprints(home, monkeypatch):
-    monkeypatch.setattr(
-        llm,
-        "run_librarian_call",
-        lambda prompt, *, cwd=None, timeout_s=60.0: ('{"proposals": [], "interrupts": []}', 0.0),
-    )
+    _stub_agent(monkeypatch, proposal=_proposal({"proposals": [], "interrupts": []}))
     snap = _payload_snap("s-clean", [("user", "Always X.")])
     packet = librarian.scan(snap)
     assert "repair_fingerprints" not in packet
