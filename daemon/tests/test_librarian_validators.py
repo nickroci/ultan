@@ -152,6 +152,68 @@ def test_validate_proposal_covers_all_entry_path_kinds(tmp_path: Path) -> None:
     librarian.validate_proposal(_deps(k), p)  # all well-formed → no raise
 
 
+# ── abstract_entries: parent + child path validation, parent body ────────────
+
+
+def test_validate_proposal_abstract_entries_wellformed(tmp_path: Path) -> None:
+    """A well-formed abstraction (parent .md, child .md paths, parseable
+    parent body) passes the Librarian boundary."""
+    k = seed_scholar_tree(tmp_path)
+    p = _proposal(
+        [
+            {
+                "action": "abstract_entries",
+                "child_paths": ["global/python/a.md", "global/js/b.md"],
+                "parent_path": "global/conventions/likes-tooling.md",
+                "parent_title": "Likes tooling",
+                "parent_body": _wf_body(),
+                "reasoning": "r",
+            }
+        ]
+    )
+    librarian.validate_proposal(_deps(k), p)  # no raise
+
+
+def test_validate_proposal_abstract_entries_rejects_bad_child_path(tmp_path: Path) -> None:
+    k = seed_scholar_tree(tmp_path)
+    p = _proposal(
+        [
+            {
+                "action": "abstract_entries",
+                "child_paths": ["global/python/a.md", "global/js/b"],  # no .md
+                "parent_path": "global/conventions/likes-tooling.md",
+                "parent_title": "Likes tooling",
+                "parent_body": "",
+                "reasoning": "r",
+            }
+        ]
+    )
+    with pytest.raises(ModelRetry) as exc:
+        librarian.validate_proposal(_deps(k), p)
+    assert "child_paths" in str(exc.value) and "must end in '.md'" in str(exc.value)
+
+
+def test_validate_proposal_abstract_entries_rejects_unparseable_parent_body(
+    tmp_path: Path,
+) -> None:
+    k = seed_scholar_tree(tmp_path)
+    p = _proposal(
+        [
+            {
+                "action": "abstract_entries",
+                "child_paths": ["global/python/a.md", "global/js/b.md"],
+                "parent_path": "global/conventions/likes-tooling.md",
+                "parent_title": "Likes tooling",
+                "parent_body": "just prose, no frontmatter",
+                "reasoning": "r",
+            }
+        ]
+    )
+    with pytest.raises(ModelRetry) as exc:
+        librarian.validate_proposal(_deps(k), p)
+    assert "frontmatter" in str(exc.value)
+
+
 # ── run_librarian_agent (stub run_typed; no model call) ──────────────────────
 
 

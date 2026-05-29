@@ -227,6 +227,174 @@ def test_deprecate_missing_entry_recorded_as_failure(tmp_path: Path):
     assert res.counts.get("actions_failed") == 1
 
 
+# ── abstract_entries ──────────────────────────────────────────────────
+
+
+def _abstraction_body(id_: str, *, scope: str = "global") -> str:
+    """A valid parent-abstraction body — ``type: abstraction`` + child links."""
+    return _body(id_, scope=scope).replace("type: lesson", "type: abstraction") + (
+        "\n## Related\n\n- [[global/python/use-uv]]\n- [[global/python/lint]]\n"
+    )
+
+
+def _seed_two_children(tmp_path: Path) -> Path:
+    k = _seed(tmp_path)
+    (k / "global" / "python" / "lint.md").write_text(_body("lint"), encoding="utf-8")
+    return k
+
+
+def test_abstract_entries_writes_parent_backlinks_children_and_index(tmp_path: Path):
+    k = _seed_two_children(tmp_path)
+    res = _apply(
+        k,
+        {
+            "action": "abstract_entries",
+            "child_paths": ["global/python/use-uv.md", "global/python/lint.md"],
+            "parent_path": "global/conventions/likes-tooling.md",
+            "parent_title": "Likes tooling",
+            "parent_body": _abstraction_body("likes-tooling"),
+            "reasoning": "r",
+        },
+    )
+    assert res.counts["actions_applied"] == 1
+    assert res.counts["abstract_entries"] == 1
+    # Parent written with type: abstraction.
+    parent = (k / "global" / "conventions" / "likes-tooling.md").read_text(encoding="utf-8")
+    assert "type: abstraction" in parent
+    # Index row for the parent.
+    index_md = (k / "index.md").read_text(encoding="utf-8")
+    assert "[[global/conventions/likes-tooling]]" in index_md
+    # Reverse backlink added into each child; children otherwise intact.
+    for child in ("use-uv", "lint"):
+        text = (k / "global" / "python" / f"{child}.md").read_text(encoding="utf-8")
+        assert "[[global/conventions/likes-tooling]]" in text
+        assert "A real body sentence." in text  # original body preserved
+    # Children NOT archived or moved — still in place.
+    assert (k / "global" / "python" / "use-uv.md").exists()
+    assert (k / "global" / "python" / "lint.md").exists()
+    assert not (k / "_archive" / "global" / "python" / "use-uv.md").exists()
+    # Log appended.
+    log_md = (k / "log.md").read_text(encoding="utf-8")
+    assert "abstract_entries | global/conventions/likes-tooling.md" in log_md
+
+
+def test_abstract_entries_backlink_idempotent(tmp_path: Path):
+    """Re-running the same abstraction does not pile up duplicate backlinks."""
+    k = _seed_two_children(tmp_path)
+    action = {
+        "action": "abstract_entries",
+        "child_paths": ["global/python/use-uv.md", "global/python/lint.md"],
+        "parent_path": "global/conventions/likes-tooling.md",
+        "parent_title": "Likes tooling",
+        "parent_body": _abstraction_body("likes-tooling"),
+        "reasoning": "r",
+    }
+    _apply(k, action)
+    _apply(k, action)
+    text = (k / "global" / "python" / "use-uv.md").read_text(encoding="utf-8")
+    assert text.count("[[global/conventions/likes-tooling]]") == 1
+
+
+def test_abstract_entries_appends_related_when_absent(tmp_path: Path):
+    """A child without a Related section gets a fresh one appended."""
+    k = _seed_two_children(tmp_path)
+    # use-uv.md (from seed) has no Related section.
+    _apply(
+        k,
+        {
+            "action": "abstract_entries",
+            "child_paths": ["global/python/use-uv.md", "global/python/lint.md"],
+            "parent_path": "global/conventions/likes-tooling.md",
+            "parent_title": "Likes tooling",
+            "parent_body": _abstraction_body("likes-tooling"),
+            "reasoning": "r",
+        },
+    )
+    text = (k / "global" / "python" / "use-uv.md").read_text(encoding="utf-8")
+    assert "## Related" in text
+    assert "[[global/conventions/likes-tooling]]" in text
+
+
+def test_abstract_entries_appends_to_existing_related(tmp_path: Path):
+    """A child that already has a Related section gets the new bullet under it
+    (the existing link is preserved)."""
+    k = _seed_two_children(tmp_path)
+    child = k / "global" / "python" / "use-uv.md"
+    child.write_text(
+        _body("use-uv") + "\n## Related\n\n- [[global/python/lint]] — sibling\n",
+        encoding="utf-8",
+    )
+    _apply(
+        k,
+        {
+            "action": "abstract_entries",
+            "child_paths": ["global/python/use-uv.md", "global/python/lint.md"],
+            "parent_path": "global/conventions/likes-tooling.md",
+            "parent_title": "Likes tooling",
+            "parent_body": _abstraction_body("likes-tooling"),
+            "reasoning": "r",
+        },
+    )
+    text = child.read_text(encoding="utf-8")
+    assert text.count("## Related") == 1  # not a second section
+    assert "[[global/python/lint]] — sibling" in text  # existing bullet kept
+    assert "[[global/conventions/likes-tooling]]" in text  # new backlink added
+
+
+def test_abstract_entries_unreadable_child_recorded_not_fatal(tmp_path: Path):
+    """A missing child is noted but the parent + readable backlinks still apply."""
+    k = _seed_two_children(tmp_path)
+    res = _apply(
+        k,
+        {
+            "action": "abstract_entries",
+            "child_paths": ["global/python/use-uv.md", "global/python/ghost.md"],
+            "parent_path": "global/conventions/likes-tooling.md",
+            "parent_title": "Likes tooling",
+            "parent_body": _abstraction_body("likes-tooling"),
+            "reasoning": "r",
+        },
+    )
+    # The action still succeeds (parent written) — integrity-first.
+    assert res.counts["abstract_entries"] == 1
+    assert (k / "global" / "conventions" / "likes-tooling.md").exists()
+    assert any("ghost.md" in n and "unreadable" in n for n in res.notes)
+    # Readable child still backlinked.
+    text = (k / "global" / "python" / "use-uv.md").read_text(encoding="utf-8")
+    assert "[[global/conventions/likes-tooling]]" in text
+
+
+# ── _add_parent_backlink (helper edge cases) ──────────────────────────
+
+
+def test_add_parent_backlink_inserts_before_following_heading():
+    """Bullet lands at the end of the Related section, before a later
+    heading — and a trailing blank line inside the section is trimmed."""
+    body = (
+        "# Title\n\nProse.\n\n## Related\n\n- [[global/python/lint]]\n\n## Notes\n\nMore prose.\n"
+    )
+    out = scholar_executor._add_parent_backlink(body, "global/conventions/parent")
+    related = out.index("## Related")
+    notes = out.index("## Notes")
+    link = out.index("[[global/conventions/parent]]")
+    # New bullet sits inside the Related section (after the heading, before Notes).
+    assert related < link < notes
+    assert out.count("## Related") == 1
+
+
+def test_add_parent_backlink_body_without_trailing_newline():
+    """A body that does not end in a newline still gets a Related section."""
+    body = "# Title\n\nProse with no trailing newline."
+    out = scholar_executor._add_parent_backlink(body, "global/conventions/parent")
+    assert "## Related" in out
+    assert "[[global/conventions/parent]]" in out
+
+
+def test_add_parent_backlink_idempotent_helper():
+    body = "# Title\n\n## Related\n\n- [[global/conventions/parent]]\n"
+    assert scholar_executor._add_parent_backlink(body, "global/conventions/parent") == body
+
+
 # ── batch behaviour ───────────────────────────────────────────────────
 
 
