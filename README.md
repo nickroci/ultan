@@ -214,11 +214,11 @@ flowchart TD
 
 Design discipline that survived live testing:
 
-- **Path guard at the SDK layer.** A `can_use_tool` callback rejects any tool call whose path resolves outside the knowledge directory. Doesn't trust the prompt to behave; enforces in infrastructure.
+- **The model writes nothing.** The curator's tools are read-only (read · grep · BM25 · embedding); the LLM returns a typed, validated *set of actions* and a deterministic executor is the only thing that touches disk. Paths are checked at the boundary, never trusted from the prompt.
 - **No silent fix-ups.** The Scholar can only approve-and-execute or veto-and-drop. If the Librarian got the path wrong, the proposal is lost — recurs next session if real. Forces the Librarian to be careful.
-- **Schema as single source of truth.** All prompt instructions describing the JSON the LLM should emit are generated from Pydantic models at prompt-assembly time. Change the schema, the prompt updates automatically.
+- **Schema as single source of truth.** The output models (`ScholarDecisions` / `LibrarianProposal`) *are* the tool schema the model fills in and the validators it must satisfy. Change the schema and both the model's contract and the boundary checks move with it.
 - **Auto-reconciled READMEs.** Every folder's README has a `<!-- ULTAN:children (auto) -->` marker block. The LLM writes prose above; the daemon keeps the listing in sync after every batch. No drift.
-- **Streaming-mode SDK calls** so `can_use_tool` works, with a final-`{...}`-block JSON extractor that's robust against tool-call markers preceding the response.
+- **Typed output over the subscription SDK.** The curator runs on your Claude Code subscription via `claude-agent-sdk` — never the metered API — yet still gets Pydantic-AI-style discipline, through a small in-house shim (`typed_agent.run_typed`). The model "returns" by calling a `submit_result` tool whose input schema *is* the Pydantic output model; a validator runs at that boundary, and anything malformed (an unresolvable wikilink, an over-cap directory, unparseable frontmatter) is handed straight back as the tool result so the model self-corrects in-band. No JSON scraped from free text, no post-hoc repair — bad data never crosses the boundary. Pydantic-AI itself only speaks the metered API, so we kept its ergonomics without its billing.
 - **Persistent tailer offset** so daemon restarts resume mid-stream instead of seeking to EOF and losing the events that arrived during downtime.
 - **No literal secrets in the library.** Both curator prompts are explicit: the Librarian must not quote credentials in any field of a proposal (API keys, OAuth secrets, GitHub PATs, AWS keys, `sk-*` keys, private-key blocks, connection strings with passwords, JWTs); the Scholar treats the same as a hard-veto invariant. Memory is plain markdown on disk and often git-tracked — defence in depth at both stages.
 
