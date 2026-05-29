@@ -24,7 +24,10 @@ def _snap(turns_events):
         "session_id": "s1",
         "cwd": "/repo/acme-widget-svc",
         "ended": False,
-        "turns": [{"events": evs, "started_at": 0.0, "sealed_at": 1.0} for evs in turns_events],
+        "turns": [
+            {"events": evs, "started_at": 0.0, "sealed_at": 1.0, "turn_seq": i}
+            for i, evs in enumerate(turns_events, start=1)
+        ],
     }
 
 
@@ -41,24 +44,39 @@ def test_flatten_buffer_assigns_monotonic_turn_ids_and_skips_seal_events():
     )
     flat = lp.flatten_buffer(snap)
     # Stop / SessionEnd dropped; PostToolUse synthesised to "Read(path)".
-    assert [t for t, _r, _x, _u in flat] == [1, 2, 3]
-    roles = [r for _t, r, _x, _u in flat]
+    assert [t for t, _s, _r, _x, _u in flat] == [1, 2, 3]
+    # turn_seq is the OWNING turn's stable id: the two events in turn 1
+    # share seq 1; the single event in turn 2 has seq 2.
+    assert [s for _t, s, _r, _x, _u in flat] == [1, 1, 2]
+    roles = [r for _t, _s, r, _x, _u in flat]
     assert roles[0] == "user"
     assert roles[1] == "assistant"
     assert roles[2] == "user"
-    texts = [x for _t, _r, x, _u in flat]
+    texts = [x for _t, _s, _r, x, _u in flat]
     assert "hello" in texts
     assert "follow up" in texts
     assert any("Read(" in t for t in texts)
     # None are user-asserted in this snapshot.
-    assert all(not u for _t, _r, _x, u in flat)
+    assert all(not u for _t, _s, _r, _x, u in flat)
+
+
+def test_flatten_buffer_turn_seq_defaults_to_zero_when_absent():
+    # Legacy snapshots / fixtures without a turn_seq field must not crash;
+    # the seq falls back to 0 (the un-citable sentinel).
+    snap = {
+        "session_id": "s1",
+        "turns": [{"events": [_ev("UserPromptSubmit", {"text": "hi"})], "sealed_at": 1.0}],
+    }
+    flat = lp.flatten_buffer(snap)
+    assert len(flat) == 1
+    assert flat[0][1] == 0
 
 
 def test_flatten_buffer_user_asserted_flag_propagates():
     snap = _snap([[_ev("UserPromptSubmit", {"text": "always wrap errors", "user_asserted": True})]])
     flat = lp.flatten_buffer(snap)
     assert len(flat) == 1
-    assert flat[0][3] is True
+    assert flat[0][4] is True
 
 
 def test_flatten_buffer_empty_when_no_turns():
@@ -68,27 +86,27 @@ def test_flatten_buffer_empty_when_no_turns():
 
 def test_format_rolling_buffer_renders_expected_format():
     flat = [
-        (1, "user", "wire up the new ReportingService", False),
-        (2, "assistant", "use a factory", False),
+        (1, 1, "user", "wire up the new ReportingService", False),
+        (2, 2, "assistant", "use a factory", False),
     ]
     s = lp.format_rolling_buffer(flat)
     assert s.splitlines() == [
-        "[1] [user] wire up the new ReportingService",
-        "[2] [assistant] use a factory",
+        "[1] (turn_seq=1) [user] wire up the new ReportingService",
+        "[2] (turn_seq=2) [assistant] use a factory",
     ]
 
 
 def test_format_rolling_buffer_marks_user_asserted():
-    flat = [(1, "user", "always wrap errors", True)]
+    flat = [(1, 4, "user", "always wrap errors", True)]
     s = lp.format_rolling_buffer(flat)
     assert "[USER-ASSERTED]" in s
-    assert "[1] [user] [USER-ASSERTED] always wrap errors" == s
+    assert "[1] (turn_seq=4) [user] [USER-ASSERTED] always wrap errors" == s
 
 
 def test_format_rolling_buffer_compacts_whitespace():
-    flat = [(1, "user", "line\nbreak  with\tspaces", False)]
+    flat = [(1, 1, "user", "line\nbreak  with\tspaces", False)]
     s = lp.format_rolling_buffer(flat)
-    assert s == "[1] [user] line break with spaces"
+    assert s == "[1] (turn_seq=1) [user] line break with spaces"
 
 
 def test_format_rolling_buffer_empty():
@@ -99,7 +117,7 @@ def test_format_rolling_buffer_empty():
 
 
 def test_cap_buffer_keeps_all_when_under_budget():
-    flat = [(i, "user", f"turn {i}", False) for i in range(1, 6)]
+    flat = [(i, i, "user", f"turn {i}", False) for i in range(1, 6)]
     capped = lp.cap_buffer_to_recent(flat, max_chars=10_000)
     assert capped == flat
 
@@ -107,11 +125,11 @@ def test_cap_buffer_keeps_all_when_under_budget():
 def test_cap_buffer_drops_oldest_turns_over_budget():
     # 10 turns of ~50 chars of text each. A 200-char budget should keep
     # only the most-recent few and drop the oldest.
-    flat = [(i, "user", "x" * 50, False) for i in range(1, 11)]
+    flat = [(i, i, "user", "x" * 50, False) for i in range(1, 11)]
     capped = lp.cap_buffer_to_recent(flat, max_chars=200)
     assert len(capped) < len(flat)
     # The kept turns are the MOST RECENT, in original (oldest-first) order.
-    ids = [t for t, _r, _x, _u in capped]
+    ids = [t for t, _s, _r, _x, _u in capped]
     assert ids == sorted(ids)
     assert ids[-1] == 10  # newest turn always retained
     assert ids[0] > 1  # at least the oldest turn was dropped
@@ -120,7 +138,7 @@ def test_cap_buffer_drops_oldest_turns_over_budget():
 def test_cap_buffer_always_keeps_at_least_most_recent_turn():
     # A single turn far larger than the budget must still survive — an
     # empty buffer would defeat the Librarian entirely.
-    flat = [(1, "user", "x" * 1000, False)]
+    flat = [(1, 1, "user", "x" * 1000, False)]
     capped = lp.cap_buffer_to_recent(flat, max_chars=10)
     assert capped == flat
 
@@ -130,14 +148,14 @@ def test_cap_buffer_empty_input():
 
 
 def test_cap_buffer_logs_dropped_count(caplog):
-    flat = [(i, "user", "x" * 50, False) for i in range(1, 11)]
+    flat = [(i, i, "user", "x" * 50, False) for i in range(1, 11)]
     with caplog.at_level("INFO", logger="agent_mem_daemon.librarian_prompt"):
         lp.cap_buffer_to_recent(flat, max_chars=200)
     assert any("truncated to recency budget" in r.message for r in caplog.records)
 
 
 def test_cap_buffer_no_log_when_nothing_dropped(caplog):
-    flat = [(1, "user", "short", False)]
+    flat = [(1, 1, "user", "short", False)]
     with caplog.at_level("INFO", logger="agent_mem_daemon.librarian_prompt"):
         lp.cap_buffer_to_recent(flat, max_chars=10_000)
     assert not any("truncated" in r.message for r in caplog.records)

@@ -141,7 +141,7 @@ def test_ultan_event_flows_through_librarian_flatten(tmp_path: Path):
 
     flat = lp.flatten_buffer(snap)
     assert len(flat) == 1
-    _tid, role, text, user_asserted = flat[0]
+    _tid, _turn_seq, role, text, user_asserted = flat[0]
     assert role == "user"
     assert text == "always use uv to install deps"
     assert user_asserted is True

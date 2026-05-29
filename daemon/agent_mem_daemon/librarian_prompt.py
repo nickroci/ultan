@@ -141,19 +141,30 @@ def _payload_text(ev: Mapping[str, Any]) -> str:
     return ""
 
 
-def flatten_buffer(snapshot: Mapping[str, Any]) -> List[Tuple[int, str, str, bool]]:
+def flatten_buffer(snapshot: Mapping[str, Any]) -> List[Tuple[int, int, str, str, bool]]:
     """Materialise a buffer snapshot as a list of
-    ``(turn_id, role, text, user_asserted)``.
+    ``(turn_id, turn_seq, role, text, user_asserted)``.
 
-    The optional 4-tuple form is new: ``/ultan`` events get
-    ``user_asserted=True``. The Librarian treats those as user-stated
-    rules and is told to file them rather than veto.
+    ``turn_id`` is a 1-based monotonic counter across all quotable events
+    in all sealed turns. It is recomputed FRESH on every scan, so it is
+    NOT stable across scans — as old turns age out of the deque, the same
+    physical event's ``turn_id`` shifts down. It is the human-readable line
+    label the Librarian quotes in free-text ``reasoning``.
 
-    The turn_id is a 1-based monotonic counter across all events in all
-    sealed turns. Stop / SessionEnd marker events are skipped — they
-    carry no dialogue.
+    ``turn_seq`` is the owning turn's STABLE per-session id (assigned by
+    the buffer at seal time; see ``buffer.Turn.turn_seq``). It does NOT
+    shift across scans, so it is the id the Librarian cites structurally in
+    ``cited_turn_seq`` on a ``used_helpfully`` proposal — the fired-helpful
+    counter dedups on it (see ``scholar_prompt.apply_fired_helpful_
+    counters``). Events in the same turn share a ``turn_seq``. Older
+    snapshots / test fixtures without a ``turn_seq`` field yield 0.
+
+    ``user_asserted`` marks ``/ultan`` events — the Librarian treats those
+    as user-stated rules and is told to file them rather than veto.
+
+    Stop / SessionEnd marker events are skipped — they carry no dialogue.
     """
-    out: List[Tuple[int, str, str, bool]] = []
+    out: List[Tuple[int, int, str, str, bool]] = []
     counter = 0
     raw_turns_obj: object = snapshot.get("turns") or []
     if not isinstance(raw_turns_obj, list):
@@ -163,6 +174,8 @@ def flatten_buffer(snapshot: Mapping[str, Any]) -> List[Tuple[int, str, str, boo
         turn_map = _as_str_map(turn_obj)
         if not turn_map:
             continue
+        raw_seq: object = turn_map.get("turn_seq")
+        turn_seq = raw_seq if isinstance(raw_seq, int) and not isinstance(raw_seq, bool) else 0
         raw_events_obj: object = turn_map.get("events") or []
         if not isinstance(raw_events_obj, list):
             continue
@@ -180,25 +193,32 @@ def flatten_buffer(snapshot: Mapping[str, Any]) -> List[Tuple[int, str, str, boo
             pl = _as_str_map(ev_map.get("payload"))
             user_asserted = bool(pl.get("user_asserted"))
             counter += 1
-            out.append((counter, _payload_role(ev_map), text, user_asserted))
+            out.append((counter, turn_seq, _payload_role(ev_map), text, user_asserted))
     return out
 
 
-def _render_turn_line(tid: int, role: str, text: str, user_asserted: bool) -> str:
-    """Render one (turn_id, role, text, user_asserted) tuple as the single
-    ``[id] [role] [USER-ASSERTED?] <squashed text>`` line the Librarian
-    sees. Shared by the formatter and the recency-cap char accounting so
-    the cap is measured against the EXACT bytes that land in the prompt."""
+def _render_turn_line(tid: int, turn_seq: int, role: str, text: str, user_asserted: bool) -> str:
+    """Render one ``(turn_id, turn_seq, role, text, user_asserted)`` tuple
+    as the single ``[id] (turn_seq=S) [role] [USER-ASSERTED?] <squashed
+    text>`` line the Librarian sees. Shared by the formatter and the
+    recency-cap char accounting so the cap is measured against the EXACT
+    bytes that land in the prompt.
+
+    ``[id]`` is the scan-local label the Librarian quotes in prose;
+    ``(turn_seq=S)`` is the STABLE id it must echo in ``cited_turn_seq``
+    on a ``used_helpfully`` proposal. ``turn_seq=0`` (unsealed / legacy
+    fixtures with no seq) is rendered too so the token is always present
+    and parsing stays uniform."""
     squashed = " ".join(text.split())
     prefix = "[USER-ASSERTED] " if user_asserted else ""
-    return f"[{tid}] [{role}] {prefix}{squashed}"
+    return f"[{tid}] (turn_seq={turn_seq}) [{role}] {prefix}{squashed}"
 
 
 def cap_buffer_to_recent(
-    flat: Sequence[Tuple[int, str, str, bool]],
+    flat: Sequence[Tuple[int, int, str, str, bool]],
     *,
     max_chars: int = ROLLING_BUFFER_MAX_CHARS,
-) -> List[Tuple[int, str, str, bool]]:
+) -> List[Tuple[int, int, str, str, bool]]:
     """Trim ``flat`` to the most-recent turns that fit within ``max_chars``.
 
     The rendered ``<rolling_buffer>`` block is the dominant, unbounded
@@ -216,17 +236,17 @@ def cap_buffer_to_recent(
     """
     if not flat:
         return []
-    kept_rev: List[Tuple[int, str, str, bool]] = []
+    kept_rev: List[Tuple[int, int, str, str, bool]] = []
     used = 0
-    for tid, role, text, user_asserted in reversed(flat):
-        line_len = len(_render_turn_line(tid, role, text, user_asserted))
+    for tid, turn_seq, role, text, user_asserted in reversed(flat):
+        line_len = len(_render_turn_line(tid, turn_seq, role, text, user_asserted))
         # +1 for the newline join cost between lines (the very first kept
         # line has no separator, but over-counting by one is harmless and
         # keeps the accounting a strict upper bound on the joined output).
         cost = line_len + 1
         if kept_rev and used + cost > max_chars:
             break
-        kept_rev.append((tid, role, text, user_asserted))
+        kept_rev.append((tid, turn_seq, role, text, user_asserted))
         used += cost
     kept_rev.reverse()
     dropped = len(flat) - len(kept_rev)
@@ -242,9 +262,9 @@ def cap_buffer_to_recent(
     return kept_rev
 
 
-def format_rolling_buffer(flat: Sequence[Tuple[int, str, str, bool]]) -> str:
-    """Render the (turn_id, role, text, user_asserted) list as the
-    ``<rolling_buffer>`` body.
+def format_rolling_buffer(flat: Sequence[Tuple[int, int, str, str, bool]]) -> str:
+    """Render the ``(turn_id, turn_seq, role, text, user_asserted)`` list
+    as the ``<rolling_buffer>`` body.
 
     User-asserted turns get a ``[USER-ASSERTED]`` prefix so the
     Librarian knows the user explicitly named the rule (treat with
@@ -253,7 +273,8 @@ def format_rolling_buffer(flat: Sequence[Tuple[int, str, str, bool]]) -> str:
     if not flat:
         return "(empty — no turns with quotable text)"
     lines = [
-        _render_turn_line(tid, role, text, user_asserted) for tid, role, text, user_asserted in flat
+        _render_turn_line(tid, turn_seq, role, text, user_asserted)
+        for tid, turn_seq, role, text, user_asserted in flat
     ]
     return "\n".join(lines)
 
@@ -653,6 +674,34 @@ the new phrasing meaningfully strengthens or extends the entry, propose \
 ``update_entry`` with ``salience_signal: "reinforces"`` and cite \
 ``existing_entry``. Otherwise omit.
 
+  **USED-HELPFULLY — the assistant relied on a surfaced entry** (count \
+the hit; do NOT rewrite the entry)
+    The assistant actually USED an existing library entry to answer THIS \
+turn — it agreed with it and applied its content, or explicitly cited it \
+("yes, as the memory on X says…", "per our convention, I'll use uv"). \
+This is a *positive reliance* signal — the entry earned its keep by \
+firing usefully in real work.
+    Examples:
+      - Library has "use uv for python"; the assistant says "I'll set this \
+up with uv as per your convention" and does so → used_helpfully.
+      - A surfaced entry's rule shaped the assistant's answer and it acted \
+on it.
+    NOT used-helpfully:
+      - The assistant merely MENTIONED the entry without relying on it.
+      - The assistant DISAGREED with or corrected the entry — that is \
+``contradicts`` (which routes to fixing the entry), never this. These are \
+mutually exclusive: ``used_helpfully`` = the entry was right and helped; \
+``contradicts`` = the entry is wrong.
+    Action: propose ``update_entry`` (or, if no edit is warranted, the \
+lightest action you can) with ``salience_signal: "used_helpfully"``, cite \
+the relied-upon entry in ``existing_entry``, AND set ``cited_turn_seq`` to \
+the STABLE ``(turn_seq=S)`` value rendered on the buffer line where the \
+reliance happened. The daemon bumps that entry's ``fired-helpful`` \
+counter once per cited turn — it does NOT rewrite the entry unless your \
+proposal also carries substantive new content the Scholar approves. \
+Cite the turn precisely: re-seeing the same turn on a later scan must not \
+double-count, which only works if you give the stable ``turn_seq``.
+
   **REDUNDANT / no signal** (skip silently — no proposal)
     Things every competent assistant would already produce or that don't carry information:
       - Code-as-code: "added a for loop", "created a class", "fixed indentation"
@@ -798,9 +847,13 @@ slug: {{PROJECT_SLUG}}
 {{ROLLING_BUFFER}}
 </rolling_buffer>
 
-Each turn is ``[turn_id] [role] <text>``. ``[USER-ASSERTED]`` marks turns \
-that arrived via the user's /ultan command — file these by default \
-unless they are nonsensical.
+Each turn is ``[turn_id] (turn_seq=S) [role] <text>``. ``[turn_id]`` is a \
+scan-local label you may quote in ``reasoning``; ``(turn_seq=S)`` is a \
+STABLE id you MUST echo in ``cited_turn_seq`` when emitting a \
+``used_helpfully`` signal (it is how the daemon avoids double-counting a \
+re-seen turn). ``[USER-ASSERTED]`` marks turns that arrived via the \
+user's /ultan command — file these by default unless they are \
+nonsensical.
 
 <library_snapshot>
 {{LIBRARY_SNAPSHOT}}
@@ -1185,9 +1238,9 @@ def buffer_to_prompt_text(
     snapshot: Mapping[str, Any],
     *,
     max_chars: int = ROLLING_BUFFER_MAX_CHARS,
-) -> Tuple[str, List[Tuple[int, str, str, bool]]]:
+) -> Tuple[str, List[Tuple[int, int, str, str, bool]]]:
     """Flatten a snapshot and return both the formatted block and the
-    raw 4-tuples (turn_id, role, text, user_asserted).
+    raw 5-tuples ``(turn_id, turn_seq, role, text, user_asserted)``.
 
     The flattened turns are capped to the most-recent ones that fit
     within ``max_chars`` (see :func:`cap_buffer_to_recent`) before
@@ -1200,7 +1253,7 @@ def buffer_to_prompt_text(
 
 
 def concatenated_buffer_text(
-    flat: Iterable[Tuple[int, str, str, bool]],
+    flat: Iterable[Tuple[int, int, str, str, bool]],
 ) -> str:
     """Plain text of all turns, newline-joined. Used as seed-regex input."""
-    return "\n".join(text for _tid, _role, text, _u in flat)
+    return "\n".join(text for _tid, _seq, _role, text, _u in flat)

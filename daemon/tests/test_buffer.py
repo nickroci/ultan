@@ -149,9 +149,53 @@ def test_snapshot_shape():
     assert len(snap["turns"]) == 1
     t = snap["turns"][0]
     assert "events" in t
+    # Stable per-session turn id rides in the snapshot for fired-helpful dedup.
+    assert t["turn_seq"] == 1
     assert all(isinstance(e, dict) for e in t["events"])
     # No SessionState / Turn dataclasses in the snapshot.
     assert all(not hasattr(e, "__dataclass_fields__") for e in t["events"])
+
+
+def test_turn_seq_monotonic_per_session():
+    """Each sealed turn gets a strictly-increasing per-session turn_seq."""
+    buf = RollingBuffer(max_turns=20)
+    for i in range(3):
+        buf.ingest(_ev(float(i), "s1", "PostToolUse"))
+        buf.ingest(_ev(float(i) + 0.5, "s1", "Stop"))
+    sess = buf.session("s1")
+    assert sess is not None
+    assert [t.turn_seq for t in sess.turns] == [1, 2, 3]
+
+
+def test_turn_seq_stable_across_eviction():
+    """The double-count fix hinges on turn_seq NOT shifting when older
+    turns age out of the deque. After eviction, the surviving turns keep
+    their original ids — the allocator never resets."""
+    buf = RollingBuffer(max_turns=3)
+    for i in range(5):
+        buf.ingest(_ev(float(i), "s1", "PostToolUse"))
+        buf.ingest(_ev(float(i) + 0.5, "s1", "Stop"))
+    sess = buf.session("s1")
+    assert sess is not None
+    # 5 turns sealed, only the last 3 retained — but their ids are the
+    # original 3, 4, 5 (NOT renumbered 1, 2, 3).
+    assert [t.turn_seq for t in sess.turns] == [3, 4, 5]
+
+
+def test_turn_seq_independent_per_session():
+    """turn_seq allocators are per-session and do not bleed across sessions."""
+    buf = RollingBuffer(max_turns=20)
+    buf.ingest(_ev(1.0, "s1", "PostToolUse"))
+    buf.ingest(_ev(1.5, "s1", "Stop"))
+    buf.ingest(_ev(2.0, "s2", "PostToolUse"))
+    buf.ingest(_ev(2.5, "s2", "Stop"))
+    buf.ingest(_ev(3.0, "s1", "PostToolUse"))
+    buf.ingest(_ev(3.5, "s1", "Stop"))
+    s1 = buf.session("s1")
+    s2 = buf.session("s2")
+    assert s1 is not None and s2 is not None
+    assert [t.turn_seq for t in s1.turns] == [1, 2]
+    assert [t.turn_seq for t in s2.turns] == [1]
 
 
 def test_cwd_back_fills_from_first_event_that_has_it():
