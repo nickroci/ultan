@@ -22,13 +22,13 @@ module replaces that with four concurrent components, all stdlib
   ``LibrarianPool``      :class:`concurrent.futures.ThreadPoolExecutor`
                          of size ``librarian_concurrency`` (default 2).
                          Pulls snapshots from the librarian queue and
-                         calls :func:`llm.run_librarian_call` (via the
-                         injected ``librarian`` callable). Emits
+                         calls :func:`librarian.scan` (via the injected
+                         ``librarian`` callable). Emits
                          :class:`librarian.EvidencePacket`s onto the
                          scholar queue.
   ``ScholarWorker``      one thread. Batches packets from the scholar
-                         queue. Fires :func:`llm.run_scholar_call` (via
-                         the injected ``scholar`` callable) when batch
+                         queue. Fires :func:`scholar.review` (via the
+                         injected ``scholar`` callable) when batch
                          threshold hit (K packets) OR T seconds elapsed
                          since last drain.
 

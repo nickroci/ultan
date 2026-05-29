@@ -1,14 +1,29 @@
 """Scholar — gatekeeper + executor for the two-tier curator.
 
-New architecture (vs. the old "Scholar picks the action" design):
+Architecture (typed-output era):
 
   - The Librarian PROPOSES a list of structural actions (write, update,
     merge, move, archive, update-readme, add-wikilink, split-folder).
-  - The Scholar APPROVES (and executes via Write/Edit) or VETOES (drops
-    with a one-sentence reason). No fix-ups — drop-only behaviour.
-  - After execution, a deterministic post-write validation pass runs
-    (``scholar_prompt.check_invariants``) to catch anything the Scholar
-    missed.
+  - The Scholar VERIFIES each proposal with read-only research tools and
+    RETURNS the actions it approves as a typed, boundary-validated
+    ``ScholarDecisions`` (vetoed proposals are simply omitted). It WRITES
+    NOTHING to disk.
+  - A deterministic executor (``scholar_executor.apply_decisions``) applies
+    the returned actions and maintains index.md / log.md / READMEs / the
+    wikilink graph.
+  - After execution, deterministic post-write passes run (README
+    reconciliation, wikilink repair, invariants check) to catch anything
+    the Scholar missed, escalating unfixable issues back into the
+    Librarian→Scholar pipeline.
+
+The model is driven through ``typed_agent.run_typed`` over
+``claude_agent_sdk`` (the subscription backend — never the metered API).
+The shim hands the model the role's read-only research tools plus a
+``submit_result`` tool whose schema is ``ScholarDecisions``; the
+per-action Pydantic validators and the ``validate_decisions`` whole-batch
+validator below reject malformed output, bouncing it back to the model via
+:class:`typed_agent.ModelRetry` until it self-corrects or the retry budget
+is exhausted (then the batch is dropped, exactly like a failed run).
 
 The Scholar still owns the nudge pipeline (approved interrupts are
 appended to ``~/.agent-mem/pending-nudges.md``) — that path is
@@ -19,16 +34,56 @@ orthogonal and unchanged.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Sequence, Set, Tuple
 
-from . import decay, priming, repair_queue, runs, scholar_prompt
-from .llm import SCHOLAR_TIMEOUT_S, LLMTimeout, run_scholar_call
+from . import (
+    _agent_research,
+    _validation,
+    decay,
+    priming,
+    repair_queue,
+    runs,
+    scholar_executor,
+    scholar_prompt,
+)
+from .llm import LLMTimeout
 from .paths import ensure_home, hot_context_path, knowledge_dir
+from .typed_agent import ModelRetry, TypedAgentError, run_typed
+
+if TYPE_CHECKING:
+    from ._schemas import ScholarAction, ScholarDecisions
 
 log = logging.getLogger("agent_mem_daemon.scholar")
+
+
+# The Scholar is the precision gatekeeper — Opus tier.
+SCHOLAR_MODEL = "claude-opus-4-7"
+
+# Wall-clock budget for one Scholar agent run (matches the old SDK timeout).
+SCHOLAR_TIMEOUT_S = 600.0
+
+# Output-validation retry budget. Each ModelRetry from a validator (or a
+# per-action Pydantic ValidationError) consumes one; after this many the run
+# raises ``TypedAgentError`` and the daemon drops the batch (lessons recur).
+OUTPUT_RETRIES = 4
+
+# Concise framing for the model; the heavy role instructions live in the
+# user prompt built by ``scholar_prompt.build_prompt`` (single source of
+# truth). The shim wires ``submit_result`` whose schema is ScholarDecisions.
+_SYSTEM_PROMPT = (
+    "You are the Scholar, the precision gatekeeper of a two-tier memory curator. "
+    "Use the read-only research tools (read_entry, grep_library, bm25_search, "
+    "embedding_search) to verify the Librarian's proposals against the real "
+    "library — never trust its summary. You write nothing to disk: when you have "
+    "decided which proposals to approve, call submit_result EXACTLY ONCE with a "
+    "ScholarDecisions object holding the approved actions. A deterministic "
+    "executor applies them. Follow the detailed instructions in the user message."
+)
 
 
 _HETEROGENEOUS_SESSION_ID = "batch"
@@ -58,6 +113,155 @@ def _count_inputs(
     n_props = sum(len(p.get("proposals") or []) for p in packets)
     n_ints = sum(len(p.get("interrupts") or []) for p in packets)
     return len(packets), n_props, n_ints
+
+
+# ── Deps + boundary validation (whole-batch checks) ──────────────────────────
+
+
+@dataclass
+class ScholarDeps:
+    """Dependencies the Scholar's output validator reads — the pinned
+    knowledge-store root."""
+
+    knowledge_dir: Path
+
+
+def validate_decisions(deps: ScholarDeps, output: "ScholarDecisions") -> "ScholarDecisions":
+    """Whole-batch checks the per-action Pydantic validators can't do in
+    isolation. Raises :class:`ModelRetry` with a specific message on the first
+    failure so the model fixes it and re-emits. Ported verbatim from the
+    reverted Pydantic-AI migration's ``@output_validator`` (``ctx.deps`` →
+    ``deps``)."""
+    root = deps.knowledge_dir.resolve()
+    _validate_wikilinks(output, root)
+    _validate_flat_dir_caps(output, root)
+    return output
+
+
+def _action_body_and_path(action: "ScholarAction") -> Tuple[str, str]:
+    """Return ``(body, path)`` for the body-carrying actions, or
+    ``("", "")`` for the rest."""
+    kind = str(action.action)
+    if kind == "write_entry":
+        return getattr(action, "body", ""), getattr(action, "path", "")
+    if kind == "update_entry":
+        return getattr(action, "new_body", ""), getattr(action, "path", "")
+    if kind == "merge_entries":
+        return getattr(action, "target_body", ""), getattr(action, "target_path", "")
+    return "", ""
+
+
+def _strip_md(path: str) -> str:
+    return path[:-3] if path.endswith(".md") else path
+
+
+def _created_paths(output: "ScholarDecisions") -> Set[str]:
+    """The set of entry wikilink targets (no ``.md``) that this batch will
+    create or relocate-to — so a body may legitimately link to a sibling
+    action's output."""
+    created: Set[str] = set()
+    for action in output.actions:
+        kind = str(action.action)
+        if kind in ("write_entry", "update_entry"):
+            created.add(_strip_md(getattr(action, "path", "")))
+        elif kind == "merge_entries":
+            created.add(_strip_md(getattr(action, "target_path", "")))
+        elif kind == "move_entry":
+            created.add(_strip_md(getattr(action, "to_path", "")))
+    created.discard("")
+    return created
+
+
+def _validate_wikilinks(output: "ScholarDecisions", root: Path) -> None:
+    """Every ``[[wikilink]]`` in a returned body must resolve to an existing
+    entry OR to a path another action in the same batch creates. Raises
+    :class:`ModelRetry` naming the first offending link."""
+    created = _created_paths(output)
+    for action in output.actions:
+        body, path = _action_body_and_path(action)
+        if not body:
+            continue
+        parent = (root / path).parent
+        for link in _validation.body_wikilinks(body):
+            if _strip_md(link) in created:
+                continue
+            if _validation.wikilink_resolves(link, parent, root):
+                continue
+            raise ModelRetry(
+                f"action {action.action} for {path!r} contains an unresolvable "
+                f"wikilink [[{link}]] — it points at neither an existing entry "
+                f"nor a path created by another action in this batch. Fix the "
+                f"target (full path from the knowledge root, no .md), add the "
+                f"action that creates it, or remove the link, then re-emit."
+            )
+
+
+def _current_dir_counts(root: Path) -> Dict[str, int]:
+    """Count entry .md files (excluding README/index/log and _archive) per
+    directory, keyed by the directory's knowledge-relative posix path."""
+    counts: Dict[str, int] = {}
+    if not root.exists():
+        return counts
+    for md in root.rglob("*.md"):
+        if "_archive" in md.parts:
+            continue
+        if md.name in ("README.md", "index.md", "log.md"):
+            continue
+        rel_dir = md.parent.relative_to(root).as_posix()
+        counts[rel_dir] = counts.get(rel_dir, 0) + 1
+    return counts
+
+
+def _dir_of(path: str) -> str:
+    return path.rsplit("/", 1)[0] if "/" in path else "."
+
+
+def _apply_count_deltas(counts: Dict[str, int], output: "ScholarDecisions") -> None:
+    """Mutate ``counts`` with the per-directory deltas this batch would cause
+    (new writes add to their dir; moves shift between dirs; merges add the
+    target and drop archived sources)."""
+    for action in output.actions:
+        kind = str(action.action)
+        if kind == "write_entry":
+            counts[_dir_of(getattr(action, "path", ""))] = (
+                counts.get(_dir_of(getattr(action, "path", "")), 0) + 1
+            )
+        elif kind == "move_entry":
+            counts[_dir_of(getattr(action, "to_path", ""))] = (
+                counts.get(_dir_of(getattr(action, "to_path", "")), 0) + 1
+            )
+            src_dir = _dir_of(getattr(action, "from_path", ""))
+            counts[src_dir] = max(0, counts.get(src_dir, 0) - 1)
+        elif kind == "merge_entries":
+            counts[_dir_of(getattr(action, "target_path", ""))] = (
+                counts.get(_dir_of(getattr(action, "target_path", "")), 0) + 1
+            )
+            for src in getattr(action, "source_paths", []):
+                if src == getattr(action, "target_path", ""):
+                    continue
+                d = _dir_of(src)
+                counts[d] = max(0, counts.get(d, 0) - 1)
+        elif kind == "archive_entry":
+            d = _dir_of(getattr(action, "path", ""))
+            counts[d] = max(0, counts.get(d, 0) - 1)
+
+
+def _validate_flat_dir_caps(output: "ScholarDecisions", root: Path) -> None:
+    """No directory may exceed ``MAX_FLAT_DIR_ENTRIES`` after this batch is
+    applied. Raises :class:`ModelRetry` naming the first over-cap directory."""
+    counts = _current_dir_counts(root)
+    _apply_count_deltas(counts, output)
+    for rel_dir, n in sorted(counts.items()):
+        if n > _validation.MAX_FLAT_DIR_ENTRIES:
+            raise ModelRetry(
+                f"applying these actions would leave {n} entries in "
+                f"{rel_dir}/ (cap is {_validation.MAX_FLAT_DIR_ENTRIES}). Add "
+                f"move_entry action(s) to rebalance into a subfolder, or drop "
+                f"the write that pushes it over, then re-emit."
+            )
+
+
+# ── Side-effect passes (unchanged safety net) ────────────────────────────────
 
 
 def _refresh_priming_safe(packets: Sequence[Mapping[str, Any]], log_label: str) -> None:
@@ -100,7 +304,7 @@ def _bump_reinforcement_counters(
     packets: Sequence[Mapping[str, Any]],
     record: runs.InvocationRecord,
 ) -> None:
-    """Empirical reinforcement bump. Run BEFORE the SDK call — it's a
+    """Empirical reinforcement bump. Run BEFORE the model call — it's a
     fact (the user mentioned this again), not a judgment call, so we
     don't need to wait for the Scholar's deliberation."""
     try:
@@ -116,44 +320,93 @@ def _bump_reinforcement_counters(
         log.exception("scholar.review: reinforcement-counter pass raised")
 
 
-def _invoke_scholar_sdk(
+def _invoke_scholar_agent(
     prompt: str,
     knowledge_root: Path,
     record: runs.InvocationRecord,
-) -> tuple[str, float] | None:
-    """Run the SDK call. Returns ``(response_text, cost_usd)`` on success
-    or ``None`` if the call timed out / raised (record is marked errored
-    in that case)."""
+) -> "tuple[ScholarDecisions, float] | None":
+    """Run the typed Scholar agent over the SDK. Returns ``(decisions,
+    cost_usd)`` on success or ``None`` if the run timed out / raised / never
+    produced a valid result (record is marked errored in that case). The
+    returned ``ScholarDecisions`` is already boundary-validated by the
+    per-action validators + ``validate_decisions`` (the model was re-prompted
+    on any ModelRetry up to ``OUTPUT_RETRIES``)."""
+    from ._schemas import ScholarDecisions  # noqa: PLC0415 — runtime output type
+
+    mcp_servers, allowed_tools = _agent_research.research_server_and_tools(knowledge_root)
+    deps = ScholarDeps(knowledge_dir=knowledge_root.resolve())
+
+    async def _run() -> "tuple[ScholarDecisions, float]":
+        try:
+            res = await asyncio.wait_for(
+                run_typed(
+                    prompt,
+                    ScholarDecisions,
+                    deps=deps,
+                    system_prompt=_SYSTEM_PROMPT,
+                    model=SCHOLAR_MODEL,
+                    mcp_servers=mcp_servers,
+                    allowed_tools=allowed_tools,
+                    validators=[validate_decisions],
+                    max_retries=OUTPUT_RETRIES,
+                    cwd=knowledge_root,
+                ),
+                timeout=SCHOLAR_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError as e:
+            raise LLMTimeout(f"Scholar agent exceeded {SCHOLAR_TIMEOUT_S}s") from e
+        return res.output, res.cost_usd
+
     try:
-        return run_scholar_call(
-            prompt,
-            cwd=knowledge_root,
-            timeout_s=SCHOLAR_TIMEOUT_S,
-        )
+        return asyncio.run(_run())
+    except TypedAgentError as e:
+        # No valid result within the retry budget (or the model never
+        # submitted): drop the batch exactly as a failed run.
+        log.warning("scholar.review: agent produced no valid result (%s); batch dropped", e)
+        record.mark_error(e)
+        record.output_raw = ""
+        return None
     except LLMTimeout as e:
-        log.warning("scholar.review: SDK timeout (%s); batch dropped", e)
+        log.warning("scholar.review: agent timeout (%s); batch dropped", e)
         record.mark_error(e)
         record.output_raw = ""
         return None
     except Exception as e:
-        log.exception("scholar.review: SDK raised; batch dropped")
+        log.exception("scholar.review: agent raised; batch dropped")
         record.mark_error(e)
         record.output_raw = ""
         return None
 
 
-def _apply_parsed_response(
-    parsed: Any,
+def _apply_decisions(
+    decisions: "ScholarDecisions",
+    session_id: str,
     record: runs.InvocationRecord,
 ) -> None:
-    """Roll the Scholar's parsed JSON into the run record and append any
-    approved nudges to the pending-nudges file."""
-    decisions = scholar_prompt.summarise_decisions(parsed)
-    for k, v in decisions.items():
-        record.decisions[k] = record.decisions.get(k, 0) + v
+    """Apply the validated decisions to disk via the deterministic executor,
+    roll the resulting counters into the run record, and append any approved
+    nudges to the pending-nudges file."""
+    try:
+        exec_result = scholar_executor.apply_decisions(
+            decisions,
+            knowledge_dir(),
+            session_id=session_id,
+        )
+        for k, v in exec_result.counts.items():
+            record.decisions[k] = record.decisions.get(k, 0) + v
+        for note in exec_result.notes:
+            log.info("scholar.review: executor: %s", note)
+    except Exception:
+        log.exception("scholar.review: executor raised")
+
+    for k, v in scholar_prompt.summarise_decisions(decisions).items():
+        # Interrupt counters (nudge / interrupt-veto) come from here; the
+        # executor owns the per-action counts, so don't double-count those.
+        if k in ("nudge", "interrupt-veto"):
+            record.decisions[k] = record.decisions.get(k, 0) + v
 
     try:
-        written = scholar_prompt.append_nudges_from_response(parsed)
+        written = scholar_prompt.append_nudges_from_response(decisions)
         if written:
             record.decisions["nudges_written"] = record.decisions.get("nudges_written", 0) + len(
                 written
@@ -358,7 +611,7 @@ def _review_inner(packets: Sequence[Mapping[str, Any]]) -> None:
     if _all_empty(packets):
         log.debug(
             "scholar.review: all %d packets empty (no proposals, no interrupts); "
-            "skipping SDK call but still refreshing priming",
+            "skipping agent call but still refreshing priming",
             n_packets,
         )
         # Tier 1: still refresh hot-context from the buffer text even
@@ -369,7 +622,8 @@ def _review_inner(packets: Sequence[Mapping[str, Any]]) -> None:
         return
 
     session_id = _batch_session_id(packets)
-    knowledge_root = ensure_home()
+    ensure_home()  # create ~/.agent-mem/ if missing (side effect only)
+    knowledge_root = knowledge_dir()
     prompt = scholar_prompt.build_prompt(packets)
 
     record = runs.InvocationRecord(
@@ -388,7 +642,7 @@ def _review_inner(packets: Sequence[Mapping[str, Any]]) -> None:
     _bump_reinforcement_counters(packets, record)
 
     log.info(
-        "scholar.review: invoking SDK (session=%s packets=%d proposals=%d interrupts=%d)",
+        "scholar.review: invoking agent (session=%s packets=%d proposals=%d interrupts=%d)",
         session_id,
         n_packets,
         n_props,
@@ -396,25 +650,20 @@ def _review_inner(packets: Sequence[Mapping[str, Any]]) -> None:
     )
 
     try:
-        result = _invoke_scholar_sdk(prompt, knowledge_root, record)
+        result = _invoke_scholar_agent(prompt, knowledge_root, record)
         if result is None:
             return
-        response_text, cost_usd = result
+        decisions, cost_usd = result
 
-        record.output_raw = response_text or ""
+        # The agent returned a typed, boundary-validated ScholarDecisions —
+        # there is no fragile JSON-scrape step. ``parsed_ok`` now means "the
+        # agent produced a validated decisions object", which by construction
+        # it did if we got here.
+        record.parsed_ok = True
         record.cost_usd = float(cost_usd or 0.0)
+        record.output_raw = decisions.model_dump_json(indent=2)
 
-        parsed, ok = scholar_prompt.parse_response(record.output_raw)
-        record.parsed_ok = ok
-        if not ok:
-            log.warning(
-                "scholar.review: final-JSON parse failed "
-                "(session=%s response_chars=%d); continuing without counters",
-                session_id,
-                len(record.output_raw),
-            )
-        else:
-            _apply_parsed_response(parsed, record)
+        _apply_decisions(decisions, session_id, record)
 
         _reconcile_readmes_safe(record)
         _repair_wikilinks_safe(record)
