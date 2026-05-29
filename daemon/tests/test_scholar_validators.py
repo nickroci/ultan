@@ -234,3 +234,21 @@ def test_validators_exercise_all_action_kinds(tmp_path: Path) -> None:
         ]
     )
     scholar.validate_decisions(ScholarDeps(knowledge_dir=k), d)  # no raise
+
+
+def test_run_scholar_agent_sets_recursion_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every curator SDK call MUST carry CLAUDE_INVOKED_BY in its env, so the
+    Claude process the SDK spawns sees it and its hooks bail — otherwise the
+    daemon ingests its own model calls and loops. Regression guard for that."""
+    k = seed_scholar_tree(tmp_path)
+    captured: dict[str, Any] = {}
+
+    async def fake_run_typed(*_a: Any, **kw: Any) -> TypedResult:
+        captured.update(kw)
+        return TypedResult(output=_decisions([]), cost_usd=0.0, attempts=1)
+
+    monkeypatch.setattr(scholar, "run_typed", fake_run_typed)
+    scholar.run_scholar_agent("p", k, timeout_s=5.0)
+    assert captured.get("env", {}).get("CLAUDE_INVOKED_BY") == "agent_mem_daemon"

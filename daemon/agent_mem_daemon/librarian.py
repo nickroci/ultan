@@ -42,7 +42,7 @@ from typing_extensions import NotRequired
 from . import _agent_research, _validation, repair_queue, runs
 from . import librarian_prompt as lp
 from ._schemas import MergeEntries, ProposedActionT, UpdateEntry, WriteEntry
-from .llm import LLMTimeout
+from .llm import LLMTimeout, recursion_guard_env
 from .paths import ensure_home, knowledge_dir
 from .typed_agent import ModelRetry, TypedAgentError, run_typed
 
@@ -259,6 +259,7 @@ def run_librarian_agent(
                     validators=[validate_proposal],
                     max_retries=OUTPUT_RETRIES,
                     cwd=knowledge_dir,
+                    env=recursion_guard_env(),
                 ),
                 timeout=timeout_s,
             )

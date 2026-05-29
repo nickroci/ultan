@@ -51,7 +51,7 @@ from . import (
     scholar_executor,
     scholar_prompt,
 )
-from .llm import LLMTimeout
+from .llm import LLMTimeout, recursion_guard_env
 from .paths import ensure_home, hot_context_path, knowledge_dir
 from .typed_agent import ModelRetry, TypedAgentError, run_typed
 
@@ -355,6 +355,7 @@ def run_scholar_agent(
                     validators=[validate_decisions],
                     max_retries=OUTPUT_RETRIES,
                     cwd=knowledge_dir,
+                    env=recursion_guard_env(),
                 ),
                 timeout=timeout_s,
             )

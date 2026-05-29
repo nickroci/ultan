@@ -8,6 +8,10 @@ modules still import:
 
 - :class:`LLMTimeout` — raised when a role's wall-clock budget is exceeded;
   the caller logs and drops the batch.
+- :func:`recursion_guard_env` — the env every curator SDK call MUST run with,
+  so the hooks of any Claude process the SDK spawns bail out instead of
+  appending more events (otherwise the daemon ingests its own model calls and
+  loops). Both run-wrappers pass this into ``typed_agent.run_typed``.
 - the model + timeout constants the roles pin.
 
 The old ``run_librarian_call`` / ``run_scholar_call`` SDK wrappers, the
@@ -18,6 +22,8 @@ SDK call.
 """
 
 from __future__ import annotations
+
+import os
 
 # Models. The Librarian is the recall tier — Sonnet (Haiku under-extracted
 # even textbook user preferences in live testing). The Scholar is the
@@ -34,3 +40,17 @@ SCHOLAR_TIMEOUT_S = 600.0
 
 class LLMTimeout(RuntimeError):
     """A role's model call exceeded its wall-clock budget."""
+
+
+# Marker the hook layer checks to skip its work — without it, the Claude
+# process the SDK spawns runs the user's UserPromptSubmit/PostToolUse/Stop/
+# SessionEnd hooks normally, which append to events.jsonl, which the daemon
+# then ingests as new work: an infinite curator→hooks→curator loop that burns
+# subscription quota and CPU. EVERY curator SDK call must carry this. We pass
+# the full inherited environment (the SDK replaces, not merges, the child env)
+# plus the marker. Mirrors ``src/scripts/flush.py``.
+def recursion_guard_env() -> dict[str, str]:
+    """Inherited environment + ``CLAUDE_INVOKED_BY=agent_mem_daemon``."""
+    env: dict[str, str] = dict(os.environ)
+    env["CLAUDE_INVOKED_BY"] = "agent_mem_daemon"
+    return env

@@ -182,3 +182,20 @@ def test_run_librarian_agent_timeout_maps_to_llmtimeout(
     monkeypatch.setattr(librarian, "run_typed", slow_run_typed)
     with pytest.raises(librarian.LLMTimeout):
         librarian.run_librarian_agent("prompt", k, timeout_s=0.05)
+
+
+def test_run_librarian_agent_sets_recursion_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Curator SDK calls MUST carry CLAUDE_INVOKED_BY so the spawned Claude's
+    hooks bail — otherwise the daemon ingests its own calls and loops."""
+    k = seed_scholar_tree(tmp_path)
+    captured: Dict[str, Any] = {}
+
+    async def fake_run_typed(*_a: Any, **kw: Any) -> TypedResult:
+        captured.update(kw)
+        return TypedResult(output=_proposal([]), cost_usd=0.0, attempts=1)
+
+    monkeypatch.setattr(librarian, "run_typed", fake_run_typed)
+    librarian.run_librarian_agent("prompt", k, timeout_s=5.0)
+    assert captured.get("env", {}).get("CLAUDE_INVOKED_BY") == "agent_mem_daemon"
