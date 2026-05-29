@@ -267,6 +267,67 @@ class SplitFolder(_BaseAction):
     )
 
 
+class AbstractEntries(_BaseAction):
+    """Synthesise a higher-order PARENT abstraction over ≥2 related leaf
+    entries (reflective abstraction — bottom-up schema formation).
+
+    The children STAY in place (each remains individually retrievable and
+    subject to normal decay); a new parent entry is created at
+    ``parent_path`` whose ``parent_body`` states a single general rule
+    abstracted FROM them and links to each via ``[[wikilink]]``. The
+    executor also writes a reverse ``[[parent]]`` backlink into each child.
+
+    This is NOT dedup (``merge_entries`` archives its sources) and NOT
+    reorg (``split_folder``/``move_entry`` relocate without synthesising):
+    nothing is archived or moved. Propose ONLY for a genuine "aha" — a
+    surprising, non-obvious, PREDICTIVE rule that connects leaves from
+    DIFFERENT domains and would let a competent assistant make a confident
+    call on an unseen case no single child supports. ``parent_body`` is
+    full markdown including YAML frontmatter and MUST use ``type:
+    abstraction``."""
+
+    action: Literal["abstract_entries"] = "abstract_entries"
+    child_paths: List[str] = Field(
+        default_factory=list,
+        description=(
+            "≥2 existing leaf entry paths (relative to knowledge/) the "
+            "parent abstracts. Must contain at least two; an abstraction "
+            "over a single entry is not an abstraction."
+        ),
+    )
+    parent_path: str = Field(
+        default="",
+        description=(
+            "Where the synthesised parent entry should live, relative to knowledge/, ending in .md."
+        ),
+    )
+    parent_title: str = Field(
+        default="",
+        description="Human-readable title of the parent abstraction.",
+    )
+    parent_body: str = Field(
+        default="",
+        description=(
+            "Full markdown body of the parent entry, including YAML "
+            "frontmatter with ``type: abstraction`` and ``[[wikilink]]``s "
+            "to each child."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _require_two_children(self) -> "AbstractEntries":
+        """An abstraction needs ≥2 children. The Librarian sometimes emits
+        partial JSON, but a single-child (or empty) ``child_paths`` is never
+        a valid abstraction — reject it at parse time so neither the Scholar
+        nor the executor sees a degenerate action."""
+        if len(self.child_paths) < 2:
+            raise ValueError(
+                "abstract_entries requires at least two child_paths "
+                "(an abstraction over fewer than two leaves is not an abstraction)"
+            )
+        return self
+
+
 # The bare union of proposed-action classes — usable as a type annotation
 # and for ``isinstance`` in the Librarian's boundary validator. The
 # discriminated alias below adds Pydantic's ``action`` dispatch on top.
@@ -280,6 +341,7 @@ ProposedActionT = Union[
     UpdateReadme,
     AddWikilink,
     SplitFolder,
+    AbstractEntries,
 ]
 
 # Discriminated union — Pydantic dispatches on the ``action`` literal.
@@ -641,6 +703,29 @@ class ScholarDeprecateEntry(DeprecateEntry):
         return self
 
 
+class ScholarAbstractEntries(AbstractEntries):
+    """Scholar-validated ``abstract_entries`` — ``parent_body`` held to the
+    same frontmatter bar as a fresh write (parseable, required fields, id
+    matches the filename slug, scope agrees with the path) against
+    ``parent_path``. The ≥2-children rule is inherited from
+    ``AbstractEntries``; per-child existence is a whole-batch check the
+    executor cannot do in isolation, so it lives in ``scholar`` /
+    ``librarian`` validators that see the knowledge root, not here."""
+
+    @model_validator(mode="after")
+    def _validate_body(self) -> "ScholarAbstractEntries":
+        errors = _frontmatter_field_errors(self.parent_body, path=self.parent_path)
+        if not self.parent_path.strip():
+            errors.append("abstract_entries requires a non-empty `parent_path`")
+        if not self.parent_body.strip():
+            errors.append(
+                f"abstract_entries for {self.parent_path!r} requires a non-empty `parent_body`"
+            )
+        if errors:
+            raise ValueError("; ".join(errors))
+        return self
+
+
 # Discriminated union of the Scholar's validated actions. Same
 # ``action`` discriminator keys as ``ProposedAction`` so the prompt
 # enumeration generated from those models still matches.
@@ -652,6 +737,7 @@ ScholarAction = Annotated[
         ScholarMoveEntry,
         ScholarArchiveEntry,
         ScholarDeprecateEntry,
+        ScholarAbstractEntries,
     ],
     Field(discriminator="action"),
 ]
@@ -727,6 +813,7 @@ _ACTION_CLASSES = [
     UpdateReadme,
     AddWikilink,
     SplitFolder,
+    AbstractEntries,
 ]
 
 

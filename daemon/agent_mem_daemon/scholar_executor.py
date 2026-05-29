@@ -34,6 +34,7 @@ from . import _validation, library_tools
 
 if TYPE_CHECKING:
     from ._schemas import (
+        ScholarAbstractEntries,
         ScholarAction,
         ScholarArchiveEntry,
         ScholarDecisions,
@@ -405,7 +406,95 @@ def _do_deprecate(
     result.record_ok("deprecate_entry", f"deprecate_entry: {a.path} → {a.superseded_by}")
 
 
+def _do_abstract(
+    kd: Path, a: "ScholarAbstractEntries", *, session_id: str, now: datetime, result: ExecResult
+) -> None:
+    """Reflective abstraction: write the synthesised PARENT entry, sync its
+    index row, then add a reverse ``[[parent]]`` backlink into each child.
+
+    Children stay in place (not archived, not moved) — they remain
+    individually retrievable; only a backlink is added so the parent↔child
+    relationship is navigable in both directions. A child that cannot be
+    read is recorded as a per-child miss but does not abort the action; the
+    parent and the readable backlinks are still applied (integrity-first)."""
+    parent_abs = (kd / a.parent_path).resolve()
+    _atomic_write(parent_abs, a.parent_body)
+    fm, fm_body = _split_body(a.parent_body)
+    _upsert_index_row(
+        kd, a.parent_path, _index_row(a.parent_path, fm, fm_body, session_id=session_id)
+    )
+
+    parent_link = _wikilink_for(a.parent_path)
+    linked: List[str] = []
+    for child in a.child_paths:
+        child_abs = (kd / child).resolve()
+        text = _safe_read(child_abs)
+        if not text:
+            result.notes.append(f"abstract_entries: could not backlink child {child} (unreadable)")
+            continue
+        new_text = _add_parent_backlink(text, parent_link)
+        if new_text != text:
+            _atomic_write(child_abs, new_text)
+            linked.append(child)
+    _append_log(
+        kd,
+        action="abstract_entries",
+        target=a.parent_path,
+        session_id=session_id,
+        note=f"abstracted {len(a.child_paths)} child(ren) → {a.parent_path}; backlinked {linked}",
+        now=now,
+    )
+    result.record_ok(
+        "abstract_entries", f"abstract_entries: {a.parent_path} (children {a.child_paths})"
+    )
+
+
 # ── Small shared helpers ─────────────────────────────────────────────────
+
+
+def _add_parent_backlink(child_text: str, parent_link: str) -> str:
+    """Insert a reverse ``[[parent_link]]`` link into a child entry's
+    ``## Related`` section (mirrors the ``add_wikilink`` Related-section
+    intent). Idempotent: if the parent link is already present anywhere in
+    the body, return the text unchanged. If a ``## Related`` heading exists,
+    append a bullet under it; otherwise append a fresh ``## Related`` section
+    at the end. Frontmatter is left untouched."""
+    bullet = f"- [[{parent_link}]] — abstracted into this higher-order rule"
+    fm_text = ""
+    body = child_text
+    m = _validation.FRONTMATTER_HEAD_RE.match(child_text)
+    if m:
+        fm_text = child_text[: m.end()]
+        body = child_text[m.end() :]
+    # Already linked (anywhere in the body) → no-op so re-runs don't pile up
+    # duplicate bullets.
+    if f"[[{parent_link}]]" in body:
+        return child_text
+    lines = body.splitlines()
+    related_idx = next(
+        (i for i, ln in enumerate(lines) if ln.strip().lower().lstrip("#").strip() == "related"),
+        -1,
+    )
+    if related_idx >= 0:
+        # Insert the bullet at the end of the Related section (just before the
+        # next heading, or at the end of the body).
+        insert_at = len(lines)
+        for j in range(related_idx + 1, len(lines)):
+            if lines[j].lstrip().startswith("#"):
+                insert_at = j
+                break
+        # Trim a trailing blank line inside the section so the bullet sits
+        # tight under any existing bullets.
+        while insert_at > related_idx + 1 and not lines[insert_at - 1].strip():
+            insert_at -= 1
+        lines.insert(insert_at, bullet)
+        new_body = "\n".join(lines)
+        if body.endswith("\n"):
+            new_body += "\n"
+    else:
+        sep = "" if body.endswith("\n\n") else ("\n" if body.endswith("\n") else "\n\n")
+        new_body = f"{body}{sep}## Related\n\n{bullet}\n"
+    return fm_text + new_body
 
 
 def _safe_read(path: Path) -> str:
@@ -470,6 +559,7 @@ def _dispatch_one(
     typing; the import-time union guarantees exhaustiveness."""
     from ._schemas import (  # noqa: PLC0415 — runtime isinstance needs the classes
         ScholarArchiveEntry,
+        ScholarDeprecateEntry,
         ScholarMergeEntries,
         ScholarMoveEntry,
         ScholarUpdateEntry,
@@ -486,10 +576,12 @@ def _dispatch_one(
         _do_move(kd, action, session_id=session_id, now=now, result=result)
     elif isinstance(action, ScholarArchiveEntry):
         _do_archive(kd, action, session_id=session_id, now=now, result=result)
-    else:
-        # The only remaining union member is ScholarDeprecateEntry; pyright
-        # narrows it here without a redundant isinstance check.
+    elif isinstance(action, ScholarDeprecateEntry):
         _do_deprecate(kd, action, session_id=session_id, now=now, result=result)
+    else:
+        # The only remaining union member is ScholarAbstractEntries; pyright
+        # narrows it here without a redundant isinstance check.
+        _do_abstract(kd, action, session_id=session_id, now=now, result=result)
 
 
 def apply_decisions(

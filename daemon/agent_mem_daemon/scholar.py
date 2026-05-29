@@ -134,6 +134,7 @@ def validate_decisions(deps: ScholarDeps, output: "ScholarDecisions") -> "Schola
     root = deps.knowledge_dir.resolve()
     _validate_wikilinks(output, root)
     _validate_flat_dir_caps(output, root)
+    _validate_abstract_children_exist(output, root)
     return output
 
 
@@ -147,6 +148,8 @@ def _action_body_and_path(action: "ScholarAction") -> Tuple[str, str]:
         return getattr(action, "new_body", ""), getattr(action, "path", "")
     if kind == "merge_entries":
         return getattr(action, "target_body", ""), getattr(action, "target_path", "")
+    if kind == "abstract_entries":
+        return getattr(action, "parent_body", ""), getattr(action, "parent_path", "")
     return "", ""
 
 
@@ -167,6 +170,11 @@ def _created_paths(output: "ScholarDecisions") -> Set[str]:
             created.add(_strip_md(getattr(action, "target_path", "")))
         elif kind == "move_entry":
             created.add(_strip_md(getattr(action, "to_path", "")))
+        elif kind == "abstract_entries":
+            # The parent is created by this batch, so its own body may link
+            # to itself / siblings; children already exist on disk so they
+            # resolve without being listed here.
+            created.add(_strip_md(getattr(action, "parent_path", "")))
     created.discard("")
     return created
 
@@ -243,6 +251,33 @@ def _apply_count_deltas(counts: Dict[str, int], output: "ScholarDecisions") -> N
         elif kind == "archive_entry":
             d = _dir_of(getattr(action, "path", ""))
             counts[d] = max(0, counts.get(d, 0) - 1)
+        elif kind == "abstract_entries":
+            # The parent is a NEW entry in its own directory; children stay
+            # in place (not archived, not moved), so only the parent's dir
+            # gains one.
+            counts[_dir_of(getattr(action, "parent_path", ""))] = (
+                counts.get(_dir_of(getattr(action, "parent_path", "")), 0) + 1
+            )
+
+
+def _validate_abstract_children_exist(output: "ScholarDecisions", root: Path) -> None:
+    """Every ``child_path`` of an ``abstract_entries`` action must resolve to
+    an entry that ALREADY exists on disk — children are being abstracted, so
+    they must be there to link to and to receive a reverse backlink. Raises
+    :class:`ModelRetry` naming the first missing child. (The ≥2-children rule
+    is enforced by the action model itself; this is the whole-batch existence
+    check the per-action validator cannot do.)"""
+    for action in output.actions:
+        if str(action.action) != "abstract_entries":
+            continue
+        for child in getattr(action, "child_paths", []):
+            if not (root / child).resolve().exists():
+                raise ModelRetry(
+                    f"abstract_entries names child {child!r} which does not exist in "
+                    f"the library. Children are being abstracted, so each must be an "
+                    f"existing entry (full path from the knowledge root, ending in "
+                    f".md). Fix the child path or drop the abstraction, then re-emit."
+                )
 
 
 def _validate_flat_dir_caps(output: "ScholarDecisions", root: Path) -> None:
