@@ -278,6 +278,15 @@ async def run_typed(
         max_turns=max_turns,
         cwd=str(cwd) if cwd is not None else None,
         env=env or {},
+        # SDK isolation mode: load NO filesystem settings. Without this the SDK
+        # defaults to loading ~/.claude + project + local settings.json, so the
+        # curator would inherit the user's permissions, hooks, and project MCP
+        # servers — none of which a background memory curator should have. With
+        # ``[]`` it gets ONLY the read-only research tools + submit_result we
+        # pass explicitly here. Applies to both roles (both go through run_typed).
+        # Also a second layer against the recursion loop: the user's event-
+        # appending hooks aren't even loaded into the curator's own session.
+        setting_sources=[],
     )
 
     run = _query or query
