@@ -51,6 +51,7 @@ from . import (
     scholar_executor,
     scholar_prompt,
 )
+from .config import SCHOLAR_MODEL, SCHOLAR_TIMEOUT_S
 from .llm import LLMTimeout, recursion_guard_env
 from .paths import ensure_home, hot_context_path, knowledge_dir
 from .typed_agent import ModelRetry, TypedAgentError, run_typed
@@ -61,15 +62,13 @@ if TYPE_CHECKING:
 log = logging.getLogger("agent_mem_daemon.scholar")
 
 
-# The Scholar is the precision gatekeeper — Opus tier.
-SCHOLAR_MODEL = "claude-opus-4-7"
-
-# Wall-clock budget for one Scholar agent run (matches the old SDK timeout).
-SCHOLAR_TIMEOUT_S = 600.0
+# Model + wall-clock budget come from the shared config (single source of
+# truth; bump the model there). The Scholar is the precision gatekeeper — Opus.
 
 # Output-validation retry budget. Each ModelRetry from a validator (or a
 # per-action Pydantic ValidationError) consumes one; after this many the run
 # raises ``TypedAgentError`` and the daemon drops the batch (lessons recur).
+# Role-specific (higher than the Librarian's — precision over recall).
 OUTPUT_RETRIES = 4
 
 # Concise framing for the model; the heavy role instructions live in the
