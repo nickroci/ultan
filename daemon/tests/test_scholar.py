@@ -29,6 +29,7 @@ import pytest
 from agent_mem_daemon import scholar
 from agent_mem_daemon._schemas import ScholarDecisions
 from agent_mem_daemon.runs import InvocationRecord
+from agent_mem_daemon.typed_agent import TypedAgentError
 
 from .conftest import scholar_entry_body
 
@@ -1089,3 +1090,60 @@ def test_overcap_marker_released_then_reescalates(monkeypatch, tmp_path):
     scholar.review([_archive_packet()])
     assert q.inflight_count() == 1
     assert q.pending_count() == 1
+
+
+# ── Agent-failure handling: the batch is dropped, never crashes review ────────
+
+
+def _nonempty_packet():
+    return _packet(
+        "s1",
+        proposals=[
+            {
+                "action": "write_entry",
+                "path": "global/x.md",
+                "body": _valid_entry_body("x"),
+                "reasoning": "r",
+            }
+        ],
+    )
+
+
+def test_review_drops_batch_on_typed_agent_error(monkeypatch):
+    """No valid result within the retry budget → review swallows it and drops
+    the batch (lessons recur next session); it must not raise."""
+
+    def _raise(*_a, **_kw):
+        raise TypedAgentError("no valid result in budget", attempts=4)
+
+    monkeypatch.setattr(scholar, "run_scholar_agent", _raise)
+    scholar.review([_nonempty_packet()])  # must not raise
+
+
+def test_review_drops_batch_on_timeout(monkeypatch):
+    def _raise(*_a, **_kw):
+        raise scholar.LLMTimeout("exceeded wall-clock budget")
+
+    monkeypatch.setattr(scholar, "run_scholar_agent", _raise)
+    scholar.review([_nonempty_packet()])  # must not raise
+
+
+def test_review_swallows_executor_error(monkeypatch):
+    """A validated decision set whose executor blows up is logged, not fatal."""
+    decisions = _decisions(
+        actions=[
+            {
+                "action": "write_entry",
+                "path": "global/x.md",
+                "body": _valid_entry_body("x"),
+                "reasoning": "r",
+            }
+        ]
+    )
+    monkeypatch.setattr(scholar, "run_scholar_agent", _make_canned(decisions, cost=0.01))
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("executor blew up")
+
+    monkeypatch.setattr(scholar.scholar_executor, "apply_decisions", _boom)
+    scholar.review([_nonempty_packet()])  # must not raise
