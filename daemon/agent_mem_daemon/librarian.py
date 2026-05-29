@@ -41,7 +41,7 @@ from typing_extensions import NotRequired
 
 from . import _agent_research, _validation, repair_queue, runs
 from . import librarian_prompt as lp
-from ._schemas import MergeEntries, ProposedActionT, UpdateEntry, WriteEntry
+from ._schemas import AbstractEntries, MergeEntries, ProposedActionT, UpdateEntry, WriteEntry
 from .config import LIBRARIAN_MODEL, LIBRARIAN_TIMEOUT_S
 from .llm import LLMTimeout, recursion_guard_env
 from .paths import ensure_home, knowledge_dir
@@ -138,33 +138,39 @@ def validate_proposal(deps: LibrarianDeps, output: "LibrarianProposal") -> "Libr
     return output
 
 
+# Per-action-kind entry-file path fields. ``scalar`` names hold one path
+# each; ``listed`` names hold a list of paths (each element is one entry
+# target). Folder-only paths (``update_readme``/``split_folder`` folders) and
+# the loose ``existing_entry`` citation are deliberately absent — those are
+# not entry targets the executor writes a file to from this value.
+_SCALAR_PATH_FIELDS: Dict[str, Tuple[str, ...]] = {
+    "write_entry": ("path",),
+    "update_entry": ("path",),
+    "merge_entries": ("target_path",),
+    "move_entry": ("from_path", "to_path"),
+    "archive_entry": ("path",),
+    "deprecate_entry": ("path", "superseded_by"),
+    "add_wikilink": ("from_path", "to_path"),
+    "abstract_entries": ("parent_path",),
+}
+_LISTED_PATH_FIELDS: Dict[str, Tuple[str, ...]] = {
+    "merge_entries": ("source_paths",),
+    "abstract_entries": ("child_paths",),
+}
+
+
 def _entry_target_paths(proposal: "ProposedActionT") -> List[Tuple[str, str]]:
     """Return ``(field_name, path)`` pairs for every entry-file path a
-    proposal carries that must be a well-formed ``.md`` path. Folder-only
-    paths (``update_readme``/``split_folder`` folders) and the loose
-    ``existing_entry`` citation are excluded — those are not entry targets
-    the executor writes a file to from this value."""
+    proposal carries that must be a well-formed ``.md`` path. Driven by the
+    ``_SCALAR_PATH_FIELDS`` / ``_LISTED_PATH_FIELDS`` tables above so adding a
+    new action's path checks is a data edit, not another branch."""
     kind = str(proposal.action)
-    pairs: List[Tuple[str, str]] = []
-    if kind == "write_entry":
-        pairs.append(("path", getattr(proposal, "path", "")))
-    elif kind == "update_entry":
-        pairs.append(("path", getattr(proposal, "path", "")))
-    elif kind == "merge_entries":
-        pairs.append(("target_path", getattr(proposal, "target_path", "")))
-        for src in getattr(proposal, "source_paths", []) or []:
-            pairs.append(("source_paths", str(src)))
-    elif kind == "move_entry":
-        pairs.append(("from_path", getattr(proposal, "from_path", "")))
-        pairs.append(("to_path", getattr(proposal, "to_path", "")))
-    elif kind == "archive_entry":
-        pairs.append(("path", getattr(proposal, "path", "")))
-    elif kind == "deprecate_entry":
-        pairs.append(("path", getattr(proposal, "path", "")))
-        pairs.append(("superseded_by", getattr(proposal, "superseded_by", "")))
-    elif kind == "add_wikilink":
-        pairs.append(("from_path", getattr(proposal, "from_path", "")))
-        pairs.append(("to_path", getattr(proposal, "to_path", "")))
+    pairs: List[Tuple[str, str]] = [
+        (name, getattr(proposal, name, "")) for name in _SCALAR_PATH_FIELDS.get(kind, ())
+    ]
+    for name in _LISTED_PATH_FIELDS.get(kind, ()):
+        for value in getattr(proposal, name, []) or []:
+            pairs.append((name, str(value)))
     return [(name, path) for name, path in pairs if path]
 
 
@@ -207,6 +213,9 @@ def _validate_proposal_body(proposal: "ProposedActionT") -> None:
     elif isinstance(proposal, MergeEntries):
         body = proposal.target_body
         path = proposal.target_path
+    elif isinstance(proposal, AbstractEntries):
+        body = proposal.parent_body
+        path = proposal.parent_path
     else:
         return
     if not body.strip():

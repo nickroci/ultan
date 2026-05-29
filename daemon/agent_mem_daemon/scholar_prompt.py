@@ -85,10 +85,10 @@ mistakes, it will get sloppier. (Returning the action you approve is not a \
 action, applying only the small normalisations listed below.)
 
 **ACTION VOCABULARY (what you may RETURN):** Your ``actions`` list may \
-contain ONLY these six typed actions: ``write_entry``, ``update_entry``, \
-``merge_entries``, ``move_entry``, ``archive_entry``, ``deprecate_entry``. \
-The daemon's deterministic post-pass owns README prose-listing and the \
-wikilink graph, so:
+contain ONLY these seven typed actions: ``write_entry``, ``update_entry``, \
+``merge_entries``, ``move_entry``, ``archive_entry``, ``deprecate_entry``, \
+``abstract_entries``. The daemon's deterministic post-pass owns README \
+prose-listing and the wikilink graph, so:
   - A Librarian ``update_readme`` proposal: the daemon's reconciler already \
 maintains every folder's child listing automatically. Do NOT emit it — \
 just leave it out (an implicit veto).
@@ -259,9 +259,10 @@ last run. Each packet contains:
 
 Each Librarian ProposedAction has an ``action`` discriminator and the \
 corresponding fields. The Librarian may propose any action type below, but \
-YOU only RETURN the six core actions (write_entry / update_entry / \
-merge_entries / move_entry / archive_entry / deprecate_entry — see ACTION \
-VOCABULARY above). Action types the Librarian may propose:
+YOU only RETURN the seven core actions (write_entry / update_entry / \
+merge_entries / move_entry / archive_entry / deprecate_entry / \
+abstract_entries — see ACTION VOCABULARY above). Action types the Librarian \
+may propose:
 
 {{ACTION_TYPES}}
 
@@ -277,6 +278,45 @@ the entry under ``_archive/`` and stamps ``status: stale`` + \
   - ``move_entry`` / folder splits: you return one ``move_entry`` per \
 relocated entry; the daemon moves the file and rewrites every inbound \
 wikilink atomically.
+  - ``abstract_entries``: you return ``{child_paths, parent_path, \
+parent_title, parent_body, reasoning}``. The daemon writes the parent \
+entry, syncs its index row, and adds a reverse ``[[parent]]`` backlink \
+into each child — the children are NOT archived or moved (they stay \
+individually retrievable). The boundary validator REQUIRES ≥2 child_paths, \
+each child to EXIST on disk, and ``parent_body`` to carry valid frontmatter \
+(``type: abstraction``) whose id matches the filename slug and scope agrees \
+with ``parent_path``. See the ABSTRACTION GATE below for when to approve.
+
+═══════════════════════════════════════════════════════════════════
+ABSTRACTION GATE — abstract_entries is a PRECISION veto by default
+═══════════════════════════════════════════════════════════════════
+
+An ``abstract_entries`` proposal synthesises a higher-order PARENT rule \
+over related leaves (reflective abstraction). It is the easiest action to \
+get wrong — the Librarian is biased toward seeing patterns — so treat it as \
+a VETO by default and approve ONLY a genuine "aha". Verify ALL FOUR before \
+approving:
+
+  1. **Remote children** — ``read_entry`` each child and confirm they come \
+from DIFFERENT domains/contexts. Same-folder / same-surface groupings (all \
+about python, all "things the user likes") almost never clear the bar.
+  2. **Predictive lift** — the parent rule must let you make a CONFIDENT \
+call on an UNSEEN case no single child supports. If it predicts nothing, \
+VETO.
+  3. **Non-obvious** — would you have stated this rule unprompted from \
+baseline knowledge? If YES, VETO ("in-baseline knowledge — abstraction adds \
+nothing a capable assistant wouldn't produce").
+  4. **Compresses** — the rule is shorter than its children and regenerates \
+them. A parent that just enumerates the children is not an abstraction.
+
+GOOD (approve): "likes lint in python" + "likes lint in js" → **"user \
+likes linting across languages"** (predicts wanting lint in a new language \
+like Rust). MUST-VETO patterns: "all about yellow things" (no lift); "likes \
+uv + likes ruff → likes fast tools" (vague, predicts nothing); "likes lint \
++ likes types → likes good code" (true but worthless). Also VETO if the \
+abstraction is premature (only a coincidental keyword overlap), too narrow, \
+too generic, or duplicates an existing parent. When unsure, VETO — a real \
+cluster will recur and you'll see it again.
 
 ═══════════════════════════════════════════════════════════════════
 SALIENCE DELIBERATION — apply BEFORE invariant checks

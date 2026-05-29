@@ -1016,6 +1016,49 @@ OLDER with ``superseded_by`` pointing at the newer's path. Also propose \
 at [[old-path]]" sentence in its body so the history is preserved. \
 Prefer ``deprecate_entry`` over ``archive_entry`` here — the user may \
 want to see what they used to think.
+  - For ``abstract_entries`` (REFLECTIVE ABSTRACTION — propose RARELY): \
+synthesise a higher-order PARENT rule abstracted from ≥2 related LEAF \
+entries. The children STAY in place (still individually retrievable); the \
+new parent links to them and the daemon adds a reverse backlink into each. \
+This is NOT dedup (``merge_entries`` archives) and NOT reorg \
+(``split_folder``/``move_entry`` relocate) — nothing is archived or moved. \
+You supply ``child_paths`` (≥2 EXISTING entry paths), ``parent_path`` \
+(where the parent lives, ``.md``), ``parent_title``, and ``parent_body`` \
+(full markdown with YAML frontmatter using ``type: abstraction`` and a \
+``[[wikilink]]`` to each child). Use the bm25/embedding tools to find the \
+related leaves; read each before proposing.
+
+    **THE AHA GATE — propose ONLY when ALL FOUR hold (this is a high bar; \
+most clusters fail it):**
+      1. **Remote children** — the leaves come from DIFFERENT \
+domains/contexts (e.g. the python ecosystem vs the js ecosystem), so the \
+connection is non-obvious. Same-folder / same-surface groupings almost \
+never qualify.
+      2. **Predictive lift** — the parent rule lets you make a CONFIDENT \
+call on an UNSEEN case that no single child covers.
+      3. **Non-obvious** — a competent assistant would NOT have stated this \
+rule unprompted (the same surprise bar you use for leaf writes). If you'd \
+volunteer it from baseline knowledge, it's not an aha.
+      4. **Compresses** — the rule is SHORTER than its children and \
+regenerates them.
+
+    GOOD example: ``global/python/likes-lint`` (likes lint in python) + \
+``global/js/likes-lint`` (likes lint in js) → parent **"user likes \
+linting across languages"** — predicts they'll want lint configured in a \
+NEW language like Rust (predictive lift), connects two ecosystems (remote), \
+and isn't something you'd assert unprompted (non-obvious).
+
+    MUST-REJECT examples (do NOT propose these — they fail the gate):
+      - "these entries are all about yellow things" — same-surface \
+grouping, zero predictive lift.
+      - "likes uv + likes ruff → likes fast tools" — vague; predicts \
+nothing about an unseen case.
+      - "likes lint + likes types → likes good code" — true but worthless; \
+no actionable prediction.
+
+    When in doubt, DON'T propose. A premature or generic abstraction wastes \
+the Scholar's attention and clutters the library. One genuine aha is worth \
+more than ten plausible-sounding groupings.
 
 Path conventions:
   - All paths are RELATIVE to ``knowledge/``.

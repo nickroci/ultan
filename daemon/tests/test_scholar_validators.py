@@ -236,6 +236,119 @@ def test_validators_exercise_all_action_kinds(tmp_path: Path) -> None:
     scholar.validate_decisions(ScholarDeps(knowledge_dir=k), d)  # no raise
 
 
+def _abstraction_body(id_: str) -> str:
+    """A valid parent-abstraction body (``type: abstraction``) linking the
+    two seeded children, for the validator tests."""
+    return scholar_entry_body(id_).replace("type: lesson", "type: abstraction") + (
+        "\n## Related\n\n- [[global/python/use-uv]]\n- [[global/python/lint]]\n"
+    )
+
+
+def _seed_two_children(tmp_path: Path) -> Path:
+    """seed_scholar_tree + a second python leaf so an abstraction has ≥2
+    existing children to link."""
+    k = seed_scholar_tree(tmp_path)
+    (k / "global" / "python" / "lint.md").write_text(scholar_entry_body("lint"), encoding="utf-8")
+    return k
+
+
+# ── abstract_entries validators ──────────────────────────────────────────────
+
+
+def test_abstract_entries_passes_when_children_exist(tmp_path: Path) -> None:
+    """Children exist, parent body links resolve, parent counts as created —
+    exercises the abstract_entries branches of ``_action_body_and_path``,
+    ``_created_paths``, ``_apply_count_deltas``, and the children-exist
+    whole-batch check, with no raise."""
+    k = _seed_two_children(tmp_path)
+    d = _decisions(
+        [
+            {
+                "action": "abstract_entries",
+                "child_paths": ["global/python/use-uv.md", "global/python/lint.md"],
+                "parent_path": "global/conventions/likes-tooling.md",
+                "parent_title": "Likes tooling",
+                "parent_body": _abstraction_body("likes-tooling"),
+                "reasoning": "r",
+            }
+        ]
+    )
+    scholar.validate_decisions(ScholarDeps(knowledge_dir=k), d)  # no raise
+
+
+def test_abstract_entries_raises_when_child_missing(tmp_path: Path) -> None:
+    k = _seed_two_children(tmp_path)
+    d = _decisions(
+        [
+            {
+                "action": "abstract_entries",
+                "child_paths": ["global/python/use-uv.md", "global/python/ghost.md"],
+                "parent_path": "global/conventions/likes-tooling.md",
+                "parent_title": "Likes tooling",
+                "parent_body": _abstraction_body("likes-tooling"),
+                "reasoning": "r",
+            }
+        ]
+    )
+    with pytest.raises(ModelRetry) as exc:
+        scholar.validate_decisions(ScholarDeps(knowledge_dir=k), d)
+    assert "global/python/ghost.md" in str(exc.value)
+
+
+def test_abstract_entries_parent_is_created_path(tmp_path: Path) -> None:
+    """A sibling action may link to the parent the abstraction creates —
+    confirms ``parent_path`` is registered in ``_created_paths``."""
+    k = _seed_two_children(tmp_path)
+    d = _decisions(
+        [
+            {
+                "action": "abstract_entries",
+                "child_paths": ["global/python/use-uv.md", "global/python/lint.md"],
+                "parent_path": "global/conventions/likes-tooling.md",
+                "parent_title": "Likes tooling",
+                "parent_body": _abstraction_body("likes-tooling"),
+                "reasoning": "r",
+            },
+            {
+                "action": "write_entry",
+                "path": "global/conventions/sees-parent.md",
+                "body": _body("sees-parent", extra=" See [[global/conventions/likes-tooling]]."),
+                "reasoning": "r",
+            },
+        ]
+    )
+    scholar.validate_decisions(ScholarDeps(knowledge_dir=k), d)  # no raise
+
+
+def test_abstract_entries_parent_counts_toward_cap(tmp_path: Path) -> None:
+    """The parent adds +1 to its own directory's count (children unchanged):
+    five existing entries + a parent in the same dir trips the cap."""
+    k = tmp_path / "knowledge"
+    (k / "global" / "abs").mkdir(parents=True)
+    for i in range(5):
+        (k / "global" / "abs" / f"e{i}.md").write_text(_body(f"e{i}"), encoding="utf-8")
+    (k / "global" / "python").mkdir(parents=True)
+    for name in ("use-uv", "lint"):
+        (k / "global" / "python" / f"{name}.md").write_text(
+            scholar_entry_body(name), encoding="utf-8"
+        )
+    d = _decisions(
+        [
+            {
+                "action": "abstract_entries",
+                "child_paths": ["global/python/use-uv.md", "global/python/lint.md"],
+                "parent_path": "global/abs/parent.md",
+                "parent_title": "Parent",
+                "parent_body": _abstraction_body("parent"),
+                "reasoning": "r",
+            }
+        ]
+    )
+    with pytest.raises(ModelRetry) as exc:
+        scholar._validate_flat_dir_caps(d, k.resolve())
+    assert "global/abs" in str(exc.value)
+
+
 def test_run_scholar_agent_sets_recursion_guard(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -103,6 +103,19 @@ def test_build_prompt_embeds_scholar_decisions_schema():
     assert '"actions"' in prompt
 
 
+def test_build_prompt_documents_abstract_entries_gate():
+    """The Scholar prompt names abstract_entries in its vocabulary and carries
+    the aha/abstraction gate with its GOOD + MUST-VETO examples."""
+    prompt = scholar_prompt.build_prompt(
+        [{"session_id": "s1", "proposals": [], "interrupts": []}],
+        library_snapshot="(empty)",
+    )
+    assert "abstract_entries" in prompt
+    assert "ABSTRACTION GATE" in prompt
+    assert "linting across languages" in prompt  # the GOOD example
+    assert "likes good code" in prompt  # a MUST-VETO example
+
+
 # ── decision accounting (typed-output era) ────────────────────────────
 
 
