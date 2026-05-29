@@ -144,6 +144,34 @@ async def test_run_typed_happy_path_returns_typed_result_and_cost() -> None:
     assert res.attempts == 1
 
 
+async def test_run_typed_runs_in_sdk_isolation_mode() -> None:
+    """The curator must NOT inherit the user's filesystem settings (permissions,
+    hooks, project MCP servers). run_typed must pass setting_sources=[] so both
+    roles get only the research + submit tools handed to them — regression guard
+    for the isolation property."""
+    shared: _RunState[Decision] = _RunState()
+    captured: dict[str, object] = {}
+
+    async def fake_query(*, prompt: object, options: object):  # noqa: ARG001
+        captured["options"] = options
+        evaluate_submission({"n": 1, "label": "x"}, Decision, None, [], shared, 4)
+        yield _assistant_calling_submit()
+        yield _result(0.0)
+
+    await run_typed(
+        "p",
+        Decision,
+        deps=None,
+        system_prompt="s",
+        model="m",
+        mcp_servers={},
+        allowed_tools=[],
+        _query=fake_query,
+        _state=shared,
+    )
+    assert captured["options"].setting_sources == []  # type: ignore[attr-defined]
+
+
 async def test_run_typed_never_submitted_raises_typed_agent_error() -> None:
     shared: _RunState[Decision] = _RunState()
 
