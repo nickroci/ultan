@@ -224,23 +224,26 @@ def _validate_proposal_body(proposal: "ProposedActionT") -> None:
 # ── Agent invocation ─────────────────────────────────────────────────────────
 
 
-def _run_librarian_agent(
+def run_librarian_agent(
     prompt: str,
-    kdir: Path,
+    knowledge_dir: Path,
+    *,
+    timeout_s: float = LIBRARIAN_TIMEOUT_S,
 ) -> "Tuple[LibrarianProposal, float]":
     """Run the typed Librarian agent over the SDK and return
     ``(validated_proposal, cost_usd)``.
 
-    The model emits a typed ``LibrarianProposal``; the per-action validators
-    and ``validate_proposal`` reject malformed output (re-prompting on any
-    ModelRetry up to ``OUTPUT_RETRIES``) before this returns. Raises
-    :class:`LLMTimeout` if the wall-clock budget is exceeded,
-    :class:`TypedAgentError` if no valid result is produced, and propagates
-    any other agent/model error for the caller to log."""
+    The model emits a typed ``LibrarianProposal`` via the shim's
+    ``submit_result`` tool; the per-action validators and ``validate_proposal``
+    reject malformed output (re-prompting on any :class:`ModelRetry` up to
+    ``OUTPUT_RETRIES``) before this returns. Raises :class:`LLMTimeout` if the
+    wall-clock budget is exceeded, :class:`TypedAgentError` if no valid result
+    is produced in budget, and propagates any other agent/model error for the
+    caller to log. This is the seam the daemon (and the tests) drive."""
     from ._schemas import LibrarianProposal  # noqa: PLC0415 — runtime output type
 
-    mcp_servers, allowed_tools = _agent_research.research_server_and_tools(kdir)
-    deps = LibrarianDeps(knowledge_dir=kdir.resolve())
+    mcp_servers, allowed_tools = _agent_research.research_server_and_tools(knowledge_dir)
+    deps = LibrarianDeps(knowledge_dir=knowledge_dir.resolve())
 
     async def _run() -> "Tuple[LibrarianProposal, float]":
         try:
@@ -255,12 +258,12 @@ def _run_librarian_agent(
                     allowed_tools=allowed_tools,
                     validators=[validate_proposal],
                     max_retries=OUTPUT_RETRIES,
-                    cwd=kdir,
+                    cwd=knowledge_dir,
                 ),
-                timeout=LIBRARIAN_TIMEOUT_S,
+                timeout=timeout_s,
             )
         except asyncio.TimeoutError as e:
-            raise LLMTimeout(f"Librarian agent exceeded {LIBRARIAN_TIMEOUT_S}s") from e
+            raise LLMTimeout(f"Librarian agent exceeded {timeout_s}s") from e
         return res.output, res.cost_usd
 
     return asyncio.run(_run())
@@ -369,7 +372,7 @@ def _scan_for_packet(
         # dir if missing so we never pass a nonexistent path.
         ensure_home()
         try:
-            proposal, cost_usd = _run_librarian_agent(prompt, kdir)
+            proposal, cost_usd = run_librarian_agent(prompt, kdir, timeout_s=LIBRARIAN_TIMEOUT_S)
         except LLMTimeout as e:
             log.warning("librarian agent timeout for session=%s: %s", session_id, e)
             record.mark_error(e)

@@ -320,21 +320,26 @@ def _bump_reinforcement_counters(
         log.exception("scholar.review: reinforcement-counter pass raised")
 
 
-def _invoke_scholar_agent(
+def run_scholar_agent(
     prompt: str,
-    knowledge_root: Path,
-    record: runs.InvocationRecord,
-) -> "tuple[ScholarDecisions, float] | None":
-    """Run the typed Scholar agent over the SDK. Returns ``(decisions,
-    cost_usd)`` on success or ``None`` if the run timed out / raised / never
-    produced a valid result (record is marked errored in that case). The
-    returned ``ScholarDecisions`` is already boundary-validated by the
-    per-action validators + ``validate_decisions`` (the model was re-prompted
-    on any ModelRetry up to ``OUTPUT_RETRIES``)."""
+    knowledge_dir: Path,
+    *,
+    timeout_s: float = SCHOLAR_TIMEOUT_S,
+) -> "tuple[ScholarDecisions, float]":
+    """Run the typed Scholar agent over the SDK and return ``(decisions,
+    cost_usd)``.
+
+    The model emits a typed ``ScholarDecisions`` via the shim's
+    ``submit_result`` tool; the per-action validators and ``validate_decisions``
+    reject malformed output (re-prompting on any :class:`ModelRetry` up to
+    ``OUTPUT_RETRIES``) before this returns. Raises :class:`LLMTimeout` if the
+    wall-clock budget is exceeded, :class:`TypedAgentError` if no valid result
+    is produced in budget, and propagates any other agent/model error. This is
+    the seam the daemon (and the tests) drive."""
     from ._schemas import ScholarDecisions  # noqa: PLC0415 — runtime output type
 
-    mcp_servers, allowed_tools = _agent_research.research_server_and_tools(knowledge_root)
-    deps = ScholarDeps(knowledge_dir=knowledge_root.resolve())
+    mcp_servers, allowed_tools = _agent_research.research_server_and_tools(knowledge_dir)
+    deps = ScholarDeps(knowledge_dir=knowledge_dir.resolve())
 
     async def _run() -> "tuple[ScholarDecisions, float]":
         try:
@@ -349,16 +354,28 @@ def _invoke_scholar_agent(
                     allowed_tools=allowed_tools,
                     validators=[validate_decisions],
                     max_retries=OUTPUT_RETRIES,
-                    cwd=knowledge_root,
+                    cwd=knowledge_dir,
                 ),
-                timeout=SCHOLAR_TIMEOUT_S,
+                timeout=timeout_s,
             )
         except asyncio.TimeoutError as e:
-            raise LLMTimeout(f"Scholar agent exceeded {SCHOLAR_TIMEOUT_S}s") from e
+            raise LLMTimeout(f"Scholar agent exceeded {timeout_s}s") from e
         return res.output, res.cost_usd
 
+    return asyncio.run(_run())
+
+
+def _invoke_scholar_agent(
+    prompt: str,
+    knowledge_root: Path,
+    record: runs.InvocationRecord,
+) -> "tuple[ScholarDecisions, float] | None":
+    """Run :func:`run_scholar_agent` and adapt its outcome for the review
+    pipeline. Returns ``(decisions, cost_usd)`` on success or ``None`` if the
+    run timed out / raised / never produced a valid result (record is marked
+    errored in that case — the batch is dropped exactly like a failed run)."""
     try:
-        return asyncio.run(_run())
+        return run_scholar_agent(prompt, knowledge_root, timeout_s=SCHOLAR_TIMEOUT_S)
     except TypedAgentError as e:
         # No valid result within the retry budget (or the model never
         # submitted): drop the batch exactly as a failed run.

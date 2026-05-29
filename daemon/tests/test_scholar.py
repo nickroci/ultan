@@ -1,21 +1,20 @@
-"""Scholar orchestration tests for the new gatekeeper architecture.
+"""Scholar orchestration tests for the Pydantic-AI gatekeeper architecture.
 
-No real LLM calls — we monkeypatch ``llm.run_scholar_call`` to return
-canned responses. ``AGENT_MEM_HOME`` is redirected to a tmp dir per
-test so the InvocationRecord audit writes don't leak.
+No real LLM calls — we monkeypatch ``scholar.run_scholar_agent`` to return
+a canned, already-validated ``ScholarDecisions`` (the agent's typed output),
+mirroring what the live agent returns after its validators pass.
+``AGENT_MEM_HOME`` is redirected to a tmp dir per test so the
+InvocationRecord audit writes don't leak.
 
 Coverage:
   - Empty packet list → no-op.
-  - All-empty packets → no SDK call.
-  - Happy path: approval flow populates decisions counters and
-    propagates nudges to pending-nudges.md.
-  - Veto path: SDK returns all vetoes → no files written, decisions
-    counters reflect veto count.
-  - Malformed JSON → does not crash, parsed_ok=False.
-  - SDK exception / timeout → swallowed, batch dropped.
+  - All-empty packets → no agent call.
+  - Happy path: returned actions are applied by the executor (files land
+    on disk, index/log maintained) and nudges propagate.
+  - No-actions path → no files written.
+  - Agent exception / timeout → swallowed, batch dropped.
   - Heterogeneous session ids → session_id="batch" on the audit row.
-  - Invariants checker runs after the SDK call and surfaces violations
-    in the decisions counter.
+  - Invariants checker runs after the agent call and surfaces violations.
 """
 
 from __future__ import annotations
@@ -23,12 +22,15 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List, Optional
 
 import pytest
 
 from agent_mem_daemon import scholar
+from agent_mem_daemon._schemas import ScholarDecisions
 from agent_mem_daemon.runs import InvocationRecord
+
+from .conftest import scholar_entry_body
 
 
 @pytest.fixture(autouse=True)
@@ -52,11 +54,42 @@ def _packet(
     }
 
 
-def _make_canned(response_text: str, cost: float = 0.01):
-    def _stub(prompt, *, cwd, timeout_s):
-        return response_text, cost
+def _decisions(
+    actions: Optional[List[Dict[str, Any]]] = None,
+    interrupts: Optional[List[Dict[str, Any]]] = None,
+) -> ScholarDecisions:
+    """Build a validated ScholarDecisions the way the live agent would."""
+    return ScholarDecisions.model_validate(
+        {"actions": actions or [], "interrupts_processed": interrupts or []}
+    )
+
+
+def _make_canned(decisions: ScholarDecisions, cost: float = 0.01):
+    """Stub for ``run_scholar_agent`` — returns (decisions, cost)."""
+
+    def _stub(prompt, knowledge_dir, *, timeout_s):
+        return decisions, cost
 
     return _stub
+
+
+# ── Manual-parsing path is gone (whole daemon) ────────────────────────
+
+
+def test_scholar_path_has_no_json_repair_or_blob_extraction():
+    """Both curators migrated off the hand-scraped-JSON parser. No module in
+    the Scholar path may reference ``json_repair`` / ``extract_json_blob`` /
+    ``_response_parser``."""
+    import inspect
+
+    from agent_mem_daemon import _agent_research, scholar_executor, scholar_prompt
+    from agent_mem_daemon import scholar as scholar_mod
+
+    forbidden = ("json_repair", "extract_json_blob", "repair_json", "_response_parser")
+    for module in (scholar_mod, _agent_research, scholar_executor, scholar_prompt):
+        src = inspect.getsource(module)
+        for token in forbidden:
+            assert token not in src, f"{token!r} still present in {module.__name__}"
 
 
 # ── Pre-flight short-circuits ─────────────────────────────────────────
@@ -69,7 +102,7 @@ def test_review_empty_packet_list_is_noop(monkeypatch, caplog):
         calls.append(1)
         raise AssertionError("SDK must not be called")
 
-    monkeypatch.setattr(scholar, "run_scholar_call", _fail)
+    monkeypatch.setattr(scholar, "run_scholar_agent", _fail)
     scholar.review([])
     assert calls == []
 
@@ -81,7 +114,7 @@ def test_review_skips_when_all_packets_empty(monkeypatch):
         sdk_calls.append(1)
         raise AssertionError("SDK must not be called for empty batch")
 
-    monkeypatch.setattr(scholar, "run_scholar_call", _fail)
+    monkeypatch.setattr(scholar, "run_scholar_agent", _fail)
     scholar.review([_packet("s1"), _packet("s2"), _packet("s3")])
     assert sdk_calls == []
 
@@ -101,11 +134,11 @@ def test_review_runs_even_with_high_recorded_cost(monkeypatch):
 
     sdk_calls: List[int] = []
 
-    def _stub(prompt, *, cwd, timeout_s):
+    def _stub(prompt, knowledge_dir, *, timeout_s):
         sdk_calls.append(1)
-        return json.dumps({"decisions": [], "interrupts_processed": []}), 0.01
+        return _decisions(), 0.01
 
-    monkeypatch.setattr(scholar, "run_scholar_call", _stub)
+    monkeypatch.setattr(scholar, "run_scholar_agent", _stub)
     scholar.review(
         [
             _packet(
@@ -119,13 +152,23 @@ def test_review_runs_even_with_high_recorded_cost(monkeypatch):
 # ── Approve path ──────────────────────────────────────────────────────
 
 
-def test_review_happy_path_approve_populates_decisions(monkeypatch, tmp_path):
-    canned = {
-        "decisions": [
-            {"action_index": 0, "decision": "approve", "veto_reason": ""},
-            {"action_index": 1, "decision": "veto", "veto_reason": "thin evidence"},
+def _valid_entry_body(id_: str, *, scope: str = "global") -> str:
+    return scholar_entry_body(id_, scope=scope)
+
+
+def test_review_happy_path_applies_actions_and_nudges(monkeypatch, tmp_path):
+    # The agent APPROVED one of the two proposals (returns just that action),
+    # plus one approved + one vetoed interrupt.
+    decisions = _decisions(
+        actions=[
+            {
+                "action": "write_entry",
+                "path": "global/tooling/x.md",
+                "body": _valid_entry_body("x"),
+                "reasoning": "r1",
+            }
         ],
-        "interrupts_processed": [
+        interrupts=[
             {
                 "lesson_id": "factory-pattern-for-apis",
                 "lesson_path": "global/tooling/factory-pattern-for-apis",
@@ -140,12 +183,8 @@ def test_review_happy_path_approve_populates_decisions(monkeypatch, tmp_path):
                 "reason": "reading not writing",
             },
         ],
-    }
-    monkeypatch.setattr(
-        scholar,
-        "run_scholar_call",
-        _make_canned(json.dumps(canned), cost=0.03),
     )
+    monkeypatch.setattr(scholar, "run_scholar_agent", _make_canned(decisions, cost=0.03))
 
     records_finalised: List[InvocationRecord] = []
     orig_finalise = scholar.runs.InvocationRecord.finalise
@@ -163,13 +202,13 @@ def test_review_happy_path_approve_populates_decisions(monkeypatch, tmp_path):
                 {
                     "action": "write_entry",
                     "path": "global/tooling/x.md",
-                    "body": "x",
+                    "body": _valid_entry_body("x"),
                     "reasoning": "r1",
                 },
                 {
                     "action": "write_entry",
                     "path": "global/tooling/y.md",
-                    "body": "y",
+                    "body": _valid_entry_body("y"),
                     "reasoning": "r2",
                 },
             ],
@@ -190,11 +229,20 @@ def test_review_happy_path_approve_populates_decisions(monkeypatch, tmp_path):
     assert rec.decisions.get("packets_in") == 1
     assert rec.decisions.get("proposals_in") == 2
     assert rec.decisions.get("interrupts_in") == 2
-    assert rec.decisions.get("approve") == 1
-    assert rec.decisions.get("veto") == 1
+    # Executor applied exactly the one approved action.
+    assert rec.decisions.get("actions_applied") == 1
+    assert rec.decisions.get("write_entry") == 1
     assert rec.decisions.get("nudge") == 1
     assert rec.decisions.get("interrupt-veto") == 1
     assert rec.decisions.get("nudges_written") == 1
+
+    # The approved entry landed on disk and is catalogued in index.md.
+    written = tmp_path / "knowledge" / "global" / "tooling" / "x.md"
+    assert written.exists()
+    index_md = (tmp_path / "knowledge" / "index.md").read_text(encoding="utf-8")
+    assert "[[global/tooling/x]]" in index_md
+    # The vetoed proposal was NOT written.
+    assert not (tmp_path / "knowledge" / "global" / "tooling" / "y.md").exists()
 
     nudges_path = tmp_path / "pending-nudges.md"
     assert nudges_path.exists()
@@ -211,24 +259,13 @@ def test_review_happy_path_approve_populates_decisions(monkeypatch, tmp_path):
     assert parsed_line["parsed_ok"] is True
 
 
-# ── Veto-everything path ──────────────────────────────────────────────
+# ── Veto-everything path (no returned actions) ────────────────────────
 
 
-def test_review_all_vetoes_no_files_written(monkeypatch, tmp_path):
-    """Canned ScholarReview vetoes every proposal. No nudge file,
-    no entries written, and the audit row records veto counts."""
-    canned = {
-        "decisions": [
-            {"action_index": 0, "decision": "veto", "veto_reason": "thin evidence"},
-            {"action_index": 1, "decision": "veto", "veto_reason": "duplicate"},
-        ],
-        "interrupts_processed": [],
-    }
-    monkeypatch.setattr(
-        scholar,
-        "run_scholar_call",
-        _make_canned(json.dumps(canned), cost=0.02),
-    )
+def test_review_no_actions_nothing_written(monkeypatch, tmp_path):
+    """The agent vetoed every proposal → empty ``actions``. No nudge file,
+    no entries written, and no per-action counters on the audit row."""
+    monkeypatch.setattr(scholar, "run_scholar_agent", _make_canned(_decisions(), cost=0.02))
 
     records: List[InvocationRecord] = []
     orig = scholar.runs.InvocationRecord.finalise
@@ -243,19 +280,28 @@ def test_review_all_vetoes_no_files_written(monkeypatch, tmp_path):
         _packet(
             "s-veto",
             proposals=[
-                {"action": "write_entry", "path": "global/a.md", "body": "x", "reasoning": "r"},
-                {"action": "write_entry", "path": "global/b.md", "body": "y", "reasoning": "r"},
+                {
+                    "action": "write_entry",
+                    "path": "global/a.md",
+                    "body": _valid_entry_body("a"),
+                    "reasoning": "r",
+                },
+                {
+                    "action": "write_entry",
+                    "path": "global/b.md",
+                    "body": _valid_entry_body("b"),
+                    "reasoning": "r",
+                },
             ],
         )
     ]
     scholar.review(packets)
 
     rec = records[0]
-    assert rec.decisions.get("veto") == 2
-    assert rec.decisions.get("approve", 0) == 0
+    assert rec.decisions.get("actions_applied", 0) == 0
     # No nudge file.
     assert not (tmp_path / "pending-nudges.md").exists()
-    # No knowledge entries — the canned response did not invoke any Write tools.
+    # No knowledge entries — the agent returned no actions.
     assert not (tmp_path / "knowledge" / "global" / "a.md").exists()
     assert not (tmp_path / "knowledge" / "global" / "b.md").exists()
 
@@ -276,15 +322,7 @@ def test_review_runs_invariants_check_after_sdk(monkeypatch, tmp_path):
             encoding="utf-8",
         )
 
-    canned = {
-        "decisions": [{"action_index": 0, "decision": "veto", "veto_reason": "n/a"}],
-        "interrupts_processed": [],
-    }
-    monkeypatch.setattr(
-        scholar,
-        "run_scholar_call",
-        _make_canned(json.dumps(canned), cost=0.01),
-    )
+    monkeypatch.setattr(scholar, "run_scholar_agent", _make_canned(_decisions(), cost=0.01))
 
     records: List[InvocationRecord] = []
     orig = scholar.runs.InvocationRecord.finalise
@@ -329,12 +367,7 @@ def test_review_repairs_phantom_index_row(monkeypatch, tmp_path):
         encoding="utf-8",
     )
 
-    canned = {"decisions": [], "interrupts_processed": []}
-    monkeypatch.setattr(
-        scholar,
-        "run_scholar_call",
-        _make_canned(json.dumps(canned), cost=0.01),
-    )
+    monkeypatch.setattr(scholar, "run_scholar_agent", _make_canned(_decisions(), cost=0.01))
 
     records: List[InvocationRecord] = []
     orig = scholar.runs.InvocationRecord.finalise
@@ -363,12 +396,7 @@ def test_review_invariants_clean_does_not_log_violation(monkeypatch, tmp_path):
     k = tmp_path / "knowledge"
     k.mkdir()
     # Empty tree — invariants checker returns [].
-    canned = {"decisions": [], "interrupts_processed": []}
-    monkeypatch.setattr(
-        scholar,
-        "run_scholar_call",
-        _make_canned(json.dumps(canned), cost=0.01),
-    )
+    monkeypatch.setattr(scholar, "run_scholar_agent", _make_canned(_decisions(), cost=0.01))
 
     records: List[InvocationRecord] = []
     orig = scholar.runs.InvocationRecord.finalise
@@ -389,12 +417,7 @@ def test_review_invariants_clean_does_not_log_violation(monkeypatch, tmp_path):
 
 
 def test_review_heterogeneous_session_id_marked_batch(monkeypatch):
-    canned = {"decisions": [], "interrupts_processed": []}
-    monkeypatch.setattr(
-        scholar,
-        "run_scholar_call",
-        _make_canned(json.dumps(canned)),
-    )
+    monkeypatch.setattr(scholar, "run_scholar_agent", _make_canned(_decisions()))
     records: List[InvocationRecord] = []
     orig = scholar.runs.InvocationRecord.finalise
 
@@ -417,15 +440,18 @@ def test_review_heterogeneous_session_id_marked_batch(monkeypatch):
     assert records[0].session_id == "batch"
 
 
-# ── Malformed JSON ────────────────────────────────────────────────────
+# ── Agent failure paths ───────────────────────────────────────────────
 
 
-def test_review_malformed_json_does_not_crash(monkeypatch, tmp_path, caplog):
-    monkeypatch.setattr(
-        scholar,
-        "run_scholar_call",
-        _make_canned("definitely not json at all"),
-    )
+def test_review_agent_failure_marks_record_unparsed(monkeypatch, tmp_path, caplog):
+    """When the agent run raises (e.g. validators exhausted the retry budget
+    and Pydantic AI gave up), the batch is dropped: no files, parsed_ok stays
+    False, and the record is finalised with an error."""
+
+    def _raise(prompt, knowledge_dir, *, timeout_s):
+        raise RuntimeError("output retries exhausted")
+
+    monkeypatch.setattr(scholar, "run_scholar_agent", _raise)
     records: List[InvocationRecord] = []
     orig = scholar.runs.InvocationRecord.finalise
 
@@ -441,15 +467,15 @@ def test_review_malformed_json_does_not_crash(monkeypatch, tmp_path, caplog):
     )
     assert len(records) == 1
     assert records[0].parsed_ok is False
+    assert records[0].error is not None
     assert not (tmp_path / "pending-nudges.md").exists()
-    assert any("parse" in rec.message.lower() for rec in caplog.records)
 
 
 def test_review_sdk_exception_is_swallowed(monkeypatch, tmp_path, caplog):
     def _raise(*a, **kw):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(scholar, "run_scholar_call", _raise)
+    monkeypatch.setattr(scholar, "run_scholar_agent", _raise)
     caplog.set_level(logging.WARNING)
     scholar.review(
         [_packet("s1", proposals=[{"action": "archive_entry", "path": "a.md", "reasoning": "r"}])]
@@ -462,7 +488,7 @@ def test_review_sdk_timeout_is_swallowed(monkeypatch, tmp_path, caplog):
     def _timeout(*a, **kw):
         raise LLMTimeout("too slow")
 
-    monkeypatch.setattr(scholar, "run_scholar_call", _timeout)
+    monkeypatch.setattr(scholar, "run_scholar_agent", _timeout)
     caplog.set_level(logging.WARNING)
     scholar.review([_packet("s1", interrupts=[{"lesson_id": "x"}])])
     assert any("timeout" in rec.message.lower() for rec in caplog.records)
@@ -473,8 +499,7 @@ def test_review_sdk_timeout_is_swallowed(monkeypatch, tmp_path, caplog):
 
 def test_review_batch_session_with_no_session_ids_marked_batch(monkeypatch):
     """If all packets lack a session_id, the audit row gets ``session_id="batch"``."""
-    canned = {"decisions": [], "interrupts_processed": []}
-    monkeypatch.setattr(scholar, "run_scholar_call", _make_canned(json.dumps(canned)))
+    monkeypatch.setattr(scholar, "run_scholar_agent", _make_canned(_decisions()))
     records: List[InvocationRecord] = []
     orig = scholar.runs.InvocationRecord.finalise
 
@@ -508,8 +533,8 @@ def test_review_reinforcement_counter_pass_exception_is_swallowed(monkeypatch, c
     monkeypatch.setattr(scholar_prompt, "apply_reinforcement_counters", _boom)
     monkeypatch.setattr(
         scholar,
-        "run_scholar_call",
-        _make_canned(json.dumps({"decisions": [], "interrupts_processed": []})),
+        "run_scholar_agent",
+        _make_canned(_decisions()),
     )
 
     caplog.set_level(logging.WARNING)
@@ -530,8 +555,8 @@ def test_review_reinforcement_changes_logged(monkeypatch, tmp_path):
     monkeypatch.setattr(scholar_prompt, "apply_reinforcement_counters", _has_changes)
     monkeypatch.setattr(
         scholar,
-        "run_scholar_call",
-        _make_canned(json.dumps({"decisions": [], "interrupts_processed": []})),
+        "run_scholar_agent",
+        _make_canned(_decisions()),
     )
 
     records: List[InvocationRecord] = []
@@ -552,19 +577,10 @@ def test_review_reinforcement_changes_logged(monkeypatch, tmp_path):
 def test_review_nudge_file_append_exception_swallowed(monkeypatch, caplog):
     from agent_mem_daemon import scholar_prompt
 
-    canned = {
-        "decisions": [{"action_index": 0, "decision": "approve", "veto_reason": ""}],
-        "interrupts_processed": [
-            {
-                "lesson_id": "x",
-                "lesson_path": "x",
-                "action": "approve",
-                "text": "y",
-                "reason": "ok",
-            }
-        ],
-    }
-    monkeypatch.setattr(scholar, "run_scholar_call", _make_canned(json.dumps(canned)))
+    decisions = _decisions(
+        interrupts=[{"lesson_id": "x", "lesson_path": "x", "action": "approve", "text": "y"}]
+    )
+    monkeypatch.setattr(scholar, "run_scholar_agent", _make_canned(decisions))
 
     def _boom(parsed):
         raise RuntimeError("simulated nudge append failure")
@@ -590,8 +606,8 @@ def test_review_reconcile_readmes_exception_swallowed(monkeypatch, caplog):
 
     monkeypatch.setattr(
         scholar,
-        "run_scholar_call",
-        _make_canned(json.dumps({"decisions": [], "interrupts_processed": []})),
+        "run_scholar_agent",
+        _make_canned(_decisions()),
     )
 
     def _boom(kdir):
@@ -610,8 +626,8 @@ def test_review_reconcile_readmes_results_recorded(monkeypatch):
 
     monkeypatch.setattr(
         scholar,
-        "run_scholar_call",
-        _make_canned(json.dumps({"decisions": [], "interrupts_processed": []})),
+        "run_scholar_agent",
+        _make_canned(_decisions()),
     )
     monkeypatch.setattr(
         scholar_prompt, "reconcile_readmes", lambda kdir: ["a updated", "b updated"]
@@ -636,8 +652,8 @@ def test_review_priming_exception_swallowed(monkeypatch, caplog):
 
     monkeypatch.setattr(
         scholar,
-        "run_scholar_call",
-        _make_canned(json.dumps({"decisions": [], "interrupts_processed": []})),
+        "run_scholar_agent",
+        _make_canned(_decisions()),
     )
 
     def _boom(*a, **kw):
@@ -656,8 +672,8 @@ def test_review_invariants_exception_swallowed(monkeypatch, caplog):
 
     monkeypatch.setattr(
         scholar,
-        "run_scholar_call",
-        _make_canned(json.dumps({"decisions": [], "interrupts_processed": []})),
+        "run_scholar_agent",
+        _make_canned(_decisions()),
     )
 
     def _boom(kdir):
@@ -691,11 +707,10 @@ def test_end_to_end_proposal_approved_writes_entry_to_knowledge_dir(
     monkeypatch,
     tmp_path,
 ):
-    """Integration-flavoured: the Scholar's SDK call would normally use
-    the Write tool to create the file. We simulate that by writing the
-    file ourselves from the stub, then assert it survives review +
-    invariants. This pins the *control flow* — the file ends up where
-    we say it does and the audit row reflects an approve."""
+    """End-to-end: the agent returns a ``write_entry`` action; the daemon
+    EXECUTOR writes the file (the model no longer does). We assert the file
+    lands on disk, the audit row reflects the applied action, and the
+    invariants check stays clean."""
     target_path = tmp_path / "knowledge" / "global" / "tooling" / "stub-the-factory.md"
     target_path.parent.mkdir(parents=True)
     # README so the invariants checker stays clean.
@@ -714,19 +729,20 @@ def test_end_to_end_proposal_approved_writes_entry_to_knowledge_dir(
         'title: "Stub the factory"\n'
         "created: 2026-05-19\nupdated: 2026-05-19\n"
         "fired: 0\nfired-helpful: 0\nsources:\n  - manual\n"
-        "---\n\n# Stub the factory\nBody.\n"
+        "---\n\n# Stub the factory\n\nBody sentence long enough to pass.\n"
     )
 
-    def _stub_writes_file(prompt, *, cwd, timeout_s):
-        # Simulate the Scholar's Write tool call.
-        target_path.write_text(full_entry, encoding="utf-8")
-        canned = {
-            "decisions": [{"action_index": 0, "decision": "approve", "veto_reason": ""}],
-            "interrupts_processed": [],
-        }
-        return json.dumps(canned), 0.01
-
-    monkeypatch.setattr(scholar, "run_scholar_call", _stub_writes_file)
+    decisions = _decisions(
+        actions=[
+            {
+                "action": "write_entry",
+                "path": "global/tooling/stub-the-factory.md",
+                "body": full_entry,
+                "reasoning": "buffer turn [2]",
+            }
+        ]
+    )
+    monkeypatch.setattr(scholar, "run_scholar_agent", _make_canned(decisions, cost=0.01))
 
     records: List[InvocationRecord] = []
     orig = scholar.runs.InvocationRecord.finalise
@@ -753,8 +769,11 @@ def test_end_to_end_proposal_approved_writes_entry_to_knowledge_dir(
         ]
     )
 
+    # The executor — not the model — wrote the file.
     assert target_path.exists()
-    assert records[0].decisions.get("approve") == 1
+    assert target_path.read_text(encoding="utf-8") == full_entry
+    assert records[0].decisions.get("actions_applied") == 1
+    assert records[0].decisions.get("write_entry") == 1
     # No invariant violations introduced.
     assert records[0].decisions.get("invariant_violations", 0) == 0
 
@@ -793,8 +812,7 @@ def _fresh_repair_queue():
 
 
 def _canned_review(monkeypatch):
-    canned = {"decisions": [], "interrupts_processed": []}
-    monkeypatch.setattr(scholar, "run_scholar_call", _make_canned(json.dumps(canned), cost=0.01))
+    monkeypatch.setattr(scholar, "run_scholar_agent", _make_canned(_decisions(), cost=0.01))
 
 
 def test_review_escalates_unresolvable_wikilink(monkeypatch, tmp_path):
