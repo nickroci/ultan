@@ -45,6 +45,7 @@ agent-mem-search = { path = "../tools/search", editable = true }
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --cov --cov-report=term-missing"
+asyncio_mode = "auto"
 
 [tool.coverage.run]
 source = ["agent_mem_daemon"]
@@ -101,4 +102,5 @@ dev = [
     "ruff>=0.15.14",
     "pytest-cov>=7.1.0",
     "pylint>=3.3",
+    "pytest-asyncio>=1.4.0",
 ]

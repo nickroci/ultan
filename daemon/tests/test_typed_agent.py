@@ -9,12 +9,10 @@ Two layers:
     (cost extraction, submitted-detection, success vs. ``TypedAgentError``)
     without ever calling the subscription-billed model.
 
-No ``pytest-asyncio``: async entry points are driven with ``asyncio.run``.
+Async tests run under pytest-asyncio's auto mode (``asyncio_mode = "auto"``).
 """
 
 from __future__ import annotations
-
-import asyncio
 
 import pytest
 from claude_agent_sdk import AssistantMessage, ResultMessage, ToolUseBlock
@@ -122,7 +120,7 @@ def _result(cost: float) -> ResultMessage:
     )
 
 
-def test_run_typed_happy_path_returns_typed_result_and_cost() -> None:
+async def test_run_typed_happy_path_returns_typed_result_and_cost() -> None:
     shared: _RunState[Decision] = _RunState()
 
     async def fake_query(*, prompt: object, options: object):  # noqa: ARG001
@@ -130,8 +128,30 @@ def test_run_typed_happy_path_returns_typed_result_and_cost() -> None:
         yield _assistant_calling_submit()
         yield _result(0.02)
 
-    res = asyncio.run(
-        run_typed(
+    res = await run_typed(
+        "p",
+        Decision,
+        deps=None,
+        system_prompt="s",
+        model="m",
+        mcp_servers={},
+        allowed_tools=[],
+        _query=fake_query,
+        _state=shared,
+    )
+    assert res.output == Decision(n=7, label="ok")
+    assert res.cost_usd == 0.02
+    assert res.attempts == 1
+
+
+async def test_run_typed_never_submitted_raises_typed_agent_error() -> None:
+    shared: _RunState[Decision] = _RunState()
+
+    async def fake_query(*, prompt: object, options: object):  # noqa: ARG001
+        yield _result(0.0)  # model produced a text answer; never called submit
+
+    with pytest.raises(TypedAgentError) as exc:
+        await run_typed(
             "p",
             Decision,
             deps=None,
@@ -142,37 +162,11 @@ def test_run_typed_happy_path_returns_typed_result_and_cost() -> None:
             _query=fake_query,
             _state=shared,
         )
-    )
-    assert res.output == Decision(n=7, label="ok")
-    assert res.cost_usd == 0.02
-    assert res.attempts == 1
-
-
-def test_run_typed_never_submitted_raises_typed_agent_error() -> None:
-    shared: _RunState[Decision] = _RunState()
-
-    async def fake_query(*, prompt: object, options: object):  # noqa: ARG001
-        yield _result(0.0)  # model produced a text answer; never called submit
-
-    with pytest.raises(TypedAgentError) as exc:
-        asyncio.run(
-            run_typed(
-                "p",
-                Decision,
-                deps=None,
-                system_prompt="s",
-                model="m",
-                mcp_servers={},
-                allowed_tools=[],
-                _query=fake_query,
-                _state=shared,
-            )
-        )
     assert "never called submit_result" in str(exc.value)
     assert exc.value.attempts == 0
 
 
-def test_run_typed_submitted_but_invalid_reports_last_error() -> None:
+async def test_run_typed_submitted_but_invalid_reports_last_error() -> None:
     shared: _RunState[Decision] = _RunState()
 
     async def fake_query(*, prompt: object, options: object):  # noqa: ARG001
@@ -181,34 +175,7 @@ def test_run_typed_submitted_but_invalid_reports_last_error() -> None:
         yield _result(0.0)
 
     with pytest.raises(TypedAgentError) as exc:
-        asyncio.run(
-            run_typed(
-                "p",
-                Decision,
-                deps=None,
-                system_prompt="s",
-                model="m",
-                mcp_servers={},
-                allowed_tools=[],
-                _query=fake_query,
-                _state=shared,
-            )
-        )
-    assert exc.value.last_error is not None
-    assert "never called" not in str(exc.value)  # it DID submit, just invalid
-
-
-def test_run_typed_retry_then_succeed() -> None:
-    shared: _RunState[Decision] = _RunState()
-
-    async def fake_query(*, prompt: object, options: object):  # noqa: ARG001
-        evaluate_submission({"n": -1, "label": "x"}, Decision, None, [], shared, 4)  # rejected
-        evaluate_submission({"n": 1, "label": "x"}, Decision, None, [], shared, 4)  # accepted
-        yield _assistant_calling_submit()
-        yield _result(0.01)
-
-    res = asyncio.run(
-        run_typed(
+        await run_typed(
             "p",
             Decision,
             deps=None,
@@ -219,6 +186,29 @@ def test_run_typed_retry_then_succeed() -> None:
             _query=fake_query,
             _state=shared,
         )
+    assert exc.value.last_error is not None
+    assert "never called" not in str(exc.value)  # it DID submit, just invalid
+
+
+async def test_run_typed_retry_then_succeed() -> None:
+    shared: _RunState[Decision] = _RunState()
+
+    async def fake_query(*, prompt: object, options: object):  # noqa: ARG001
+        evaluate_submission({"n": -1, "label": "x"}, Decision, None, [], shared, 4)  # rejected
+        evaluate_submission({"n": 1, "label": "x"}, Decision, None, [], shared, 4)  # accepted
+        yield _assistant_calling_submit()
+        yield _result(0.01)
+
+    res = await run_typed(
+        "p",
+        Decision,
+        deps=None,
+        system_prompt="s",
+        model="m",
+        mcp_servers={},
+        allowed_tools=[],
+        _query=fake_query,
+        _state=shared,
     )
     assert res.output == Decision(n=1, label="x")
     assert res.attempts == 2
@@ -228,10 +218,6 @@ def test_submit_tool_ref_is_namespaced() -> None:
     assert submit_tool_ref() == "mcp__agent_mem_output__submit_result"
 
 
-def test_single_user_message_yields_one_streaming_user_message() -> None:
-    async def collect() -> list[dict[str, object]]:
-        return [m async for m in _single_user_message("hi")]
-
-    assert asyncio.run(collect()) == [
-        {"type": "user", "message": {"role": "user", "content": "hi"}}
-    ]
+async def test_single_user_message_yields_one_streaming_user_message() -> None:
+    msgs = [m async for m in _single_user_message("hi")]
+    assert msgs == [{"type": "user", "message": {"role": "user", "content": "hi"}}]
