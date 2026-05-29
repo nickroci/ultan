@@ -42,6 +42,7 @@ from typing_extensions import NotRequired
 from . import _agent_research, _validation, repair_queue, runs
 from . import librarian_prompt as lp
 from ._schemas import MergeEntries, ProposedActionT, UpdateEntry, WriteEntry
+from .config import LIBRARIAN_MODEL, LIBRARIAN_TIMEOUT_S
 from .llm import LLMTimeout, recursion_guard_env
 from .paths import ensure_home, knowledge_dir
 from .typed_agent import ModelRetry, TypedAgentError, run_typed
@@ -52,17 +53,14 @@ if TYPE_CHECKING:
 log = logging.getLogger("agent_mem_daemon.librarian")
 
 
-# The Librarian is the recall tier — Sonnet (Haiku under-extracted even
-# textbook user preferences in live testing).
-LIBRARIAN_MODEL = "claude-sonnet-4-6"
-
-# Wall-clock budget for one Librarian agent run (matches the old SDK timeout).
-LIBRARIAN_TIMEOUT_S = 600.0
+# Model + wall-clock budget come from the shared config (single source of
+# truth; bump the model there). The Librarian is the recall tier — Sonnet.
 
 # Output-validation retry budget. Each ModelRetry from the boundary validator
 # (or a per-action Pydantic ValidationError) consumes one; after this many the
 # run raises ``TypedAgentError`` and the daemon emits an empty packet (signal
-# recurs next session).
+# recurs next session). Role-specific (lower than the Scholar's — recall over
+# precision).
 OUTPUT_RETRIES = 3
 
 _SYSTEM_PROMPT = (

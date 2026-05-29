@@ -36,9 +36,14 @@ def knowledge_dir() -> Path:
     return home() / "knowledge"
 
 
+# Keep model names in sync with daemon/agent_mem_daemon/config.py — this is a
+# separate package coupled to the daemon only via a runtime sys.path shim, so
+# it carries its own copy rather than importing the daemon's config at load.
 LIBRARIAN_MODEL = "claude-sonnet-4-6"
-SCHOLAR_MODEL = "claude-opus-4-7"
+SCHOLAR_MODEL = "claude-opus-4-8"
 
+# Shorter than the daemon's 600s: the advisor is interactive (a user is
+# waiting on /ultan-advisor), not a background batch.
 LIBRARIAN_TIMEOUT_S = 300.0
 SCHOLAR_TIMEOUT_S = 300.0
 
