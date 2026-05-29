@@ -50,11 +50,23 @@ class Event:
 
 @dataclass
 class Turn:
-    """One sealed turn (a list of events between two Stops)."""
+    """One sealed turn (a list of events between two Stops).
+
+    ``turn_seq`` is a STABLE, monotonic per-session id assigned when the
+    turn is sealed (see :meth:`RollingBuffer._seal_turn`). Unlike the
+    Librarian's scan-local ``turn_id`` (a per-event counter recomputed on
+    every scan over whatever is currently in the deque), ``turn_seq`` does
+    NOT shift as older turns age out of the deque — it identifies the same
+    physical turn for the life of the session. The fired-helpful counter
+    relies on this stability to dedup a (turn, entry) citation event seen
+    across consecutive Librarian scans (see ``scholar_prompt.apply_fired_
+    helpful_counters``). 0 means "unsealed / unassigned".
+    """
 
     events: List[Event] = field(default_factory=list["Event"])
     started_at: float = 0.0
     sealed_at: float = 0.0
+    turn_seq: int = 0
 
     def is_empty(self) -> bool:
         return not self.events
@@ -78,6 +90,14 @@ class SessionState:
     # Librarian has consumed it. Lives here because it is per-session
     # state that survives across scheduler ticks.
     needs_librarian: bool = False
+    # Monotonic allocator for ``Turn.turn_seq``. Incremented (never reset)
+    # each time a turn is sealed, so every sealed turn gets a stable,
+    # strictly-increasing id even as old turns are evicted from the deque.
+    # In-memory only: a daemon restart rebuilds the buffer from the tailer
+    # offset (it does NOT replay old turns), so this resets to 0 on
+    # restart — which is fine, because the old turns it would clash with
+    # are gone too. See the fired-helpful dedup note in scholar_prompt.
+    next_turn_seq: int = 0
 
 
 class RollingBuffer:
@@ -147,6 +167,11 @@ class RollingBuffer:
             sess.open_turn.started_at = sealing_ev.ts
         sess.open_turn.events.append(sealing_ev)
         sess.open_turn.sealed_at = sealing_ev.ts
+        # Stamp a stable, monotonic per-session id. Allocated here (at
+        # seal time) so it never changes for this physical turn, even
+        # after older turns are evicted from the deque below.
+        sess.next_turn_seq += 1
+        sess.open_turn.turn_seq = sess.next_turn_seq
         sess.turns.append(sess.open_turn)
         while len(sess.turns) > self.max_turns:
             sess.turns.popleft()
@@ -205,6 +230,7 @@ class RollingBuffer:
                     {
                         "started_at": t.started_at,
                         "sealed_at": t.sealed_at,
+                        "turn_seq": t.turn_seq,
                         "events": [
                             {
                                 "ts": e.ts,

@@ -83,28 +83,50 @@ class _BaseAction(BaseModel):
         ),
     )
 
-    salience_signal: Optional[Literal["contradicts", "novel", "reinforces"]] = Field(
-        default=None,
-        description=(
-            "Why this is worth remembering, in cognitive-science "
-            "terms. 'contradicts': disagrees with an existing entry "
-            "(cite path in existing_entry); user has changed their "
-            "mind. 'novel': not in library AND not derivable from "
-            "the model's baseline knowledge. 'reinforces': restates "
-            "an existing entry's claim (cite path in existing_entry); "
-            "the daemon will bump that entry's reinforced counter "
-            "and the Scholar may veto the write. Null if unsure — "
-            "the Scholar will infer."
-        ),
+    salience_signal: Optional[Literal["contradicts", "novel", "reinforces", "used_helpfully"]] = (
+        Field(
+            default=None,
+            description=(
+                "Why this is worth remembering, in cognitive-science "
+                "terms. 'contradicts': disagrees with an existing entry "
+                "(cite path in existing_entry); user has changed their "
+                "mind. 'novel': not in library AND not derivable from "
+                "the model's baseline knowledge. 'reinforces': restates "
+                "an existing entry's claim (cite path in existing_entry); "
+                "the daemon will bump that entry's reinforced counter "
+                "and the Scholar may veto the write. 'used_helpfully': "
+                "the assistant actually RELIED ON / AGREED WITH a "
+                "surfaced or cited existing entry to answer THIS turn "
+                "(cite path in existing_entry AND the stable turn id in "
+                "cited_turn_seq); the daemon bumps that entry's "
+                "fired-helpful counter once per cited turn. A mere "
+                "mention is NOT use, and disagreement is 'contradicts', "
+                "not this. Null if unsure — the Scholar will infer."
+            ),
+        )
     )
 
     existing_entry: Optional[str] = Field(
         default=None,
         description=(
-            "For 'contradicts'/'reinforces' signals: path of the "
-            "existing library entry the candidate relates to, "
-            "relative to knowledge/. Required for those signals so "
+            "For 'contradicts'/'reinforces'/'used_helpfully' signals: "
+            "path of the existing library entry the candidate relates "
+            "to, relative to knowledge/. Required for those signals so "
             "the Scholar can verify the relationship."
+        ),
+    )
+
+    cited_turn_seq: Optional[int] = Field(
+        default=None,
+        description=(
+            "For the 'used_helpfully' signal ONLY: the STABLE turn id "
+            "(the `(turn_seq=S)` token rendered on the rolling-buffer "
+            "line — NOT the bracketed `[N]` scan-local label) of the "
+            "turn in which the assistant relied on `existing_entry`. The "
+            "daemon dedups fired-helpful bumps on (session, entry, "
+            "turn_seq) so re-seeing the same turn on a later scan does "
+            "not double-count. Required for 'used_helpfully'; ignored "
+            "for other signals."
         ),
     )
 
@@ -742,10 +764,10 @@ def _action_name(cls: type[BaseModel]) -> str:
 def _action_payload_fields(cls: type[BaseModel]) -> List[str]:
     """Non-discriminator, non-base field names for an action class, in
     declaration order. Excludes inherited fields (``action``,
-    ``reasoning``, ``salience_signal``, ``existing_entry``) — those
-    are documented once globally near the action table, not repeated
-    on every row."""
-    skip = {"action", "reasoning", "salience_signal", "existing_entry"}
+    ``reasoning``, ``salience_signal``, ``existing_entry``,
+    ``cited_turn_seq``) — those are documented once globally near the
+    action table, not repeated on every row."""
+    skip = {"action", "reasoning", "salience_signal", "existing_entry", "cited_turn_seq"}
     return [name for name in cls.model_fields if name not in skip]
 
 

@@ -38,7 +38,7 @@ from typing import (
 import yaml
 
 from . import _validation, markdown_utils, repair_queue
-from .paths import knowledge_dir, pending_nudges_path
+from .paths import fired_helpful_state_path, knowledge_dir, pending_nudges_path
 
 if TYPE_CHECKING:
     from ._schemas import ScholarDecisions
@@ -339,6 +339,18 @@ framing.
       - If it's the same claim in different words → VETO. The daemon \
 increments the existing's confidence/reinforcement counter separately; you \
 don't need to write anything.
+
+  ``salience_signal: "used_helpfully"``
+    The Librarian observed the assistant RELY ON a surfaced existing entry \
+this turn (cited in ``existing_entry``, with the stable turn id in \
+``cited_turn_seq``). **The daemon has ALREADY bumped that entry's \
+``fired-helpful`` counter server-side — you do not need to do anything for \
+the counter.** Judge the WRITE on its own merits: if the proposal also \
+carries substantively new content (an ``update_entry`` that adds nuance), \
+apply the usual self-test and approve/veto accordingly; if it is just \
+flagging the use with no real edit, VETO with "counter already bumped \
+server-side, no substantive new content." This is positive reliance — it \
+is NOT a contradiction, so never treat it as one.
 
   ``salience_signal: null`` (Librarian was unsure — and NOT a repair \
 proposal; repair proposals are also ``null`` but are handled above, not \
@@ -1111,6 +1123,239 @@ def apply_reinforcement_counters(
                 bumped_paths.add(candidate)
                 rel = candidate.relative_to(root)
                 changes.append(f"reinforced {rel}")
+    return changes
+
+
+# ── Deterministic fired-helpful counter bookkeeping ──────────────────
+#
+# ``fired-helpful`` is conceptually distinct from ``reinforced``:
+#   - ``reinforced``    = the conversation re-asserted the entry's CONTENT.
+#   - ``fired-helpful`` = the assistant USED a surfaced entry helpfully in
+#                         a turn (positive reliance).
+# When the Librarian flags a proposal with ``salience_signal:
+# "used_helpfully"`` it cites the relied-upon entry in ``existing_entry``
+# and the STABLE turn id in ``cited_turn_seq``. The Scholar bumps the
+# counter deterministically — like the reinforcement bump, this is an
+# empirical fact (the assistant relied on it), not a judgment call.
+#
+# DOUBLE-COUNT PROBLEM + FIX:
+# The Librarian's rolling buffer is never drained, so a given physical
+# turn is re-scanned on every subsequent Stop until it ages out — the
+# Librarian would re-emit ``used_helpfully`` for the same (turn, entry)
+# many times. We attribute a bump to a (session, entry, turn) citation
+# EVENT exactly once via a persisted per-(session, entry) HIGH-WATER mark
+# on ``cited_turn_seq`` (the buffer's stable, monotonic per-session turn
+# id — NOT the Librarian's scan-local ``turn_id``, which is recomputed per
+# scan and is not stable). Within one batch we count every DISTINCT cited
+# seq strictly greater than the stored mark (so coalesced Stops count the
+# whole gap rather than collapsing to one), then advance the mark to the
+# max counted seq. State persists across restarts via the offset-state
+# idiom (atomic tmp+rename JSON at ``fired_helpful_state_path()``).
+#
+# Restart edge: the in-memory buffer (and its ``turn_seq`` allocator) is
+# rebuilt empty on restart and the tailer resumes past old events, so the
+# old turns can never be re-seen — the over-count this guards against
+# cannot occur across a restart. A session that *continues* across a
+# restart restarts its ``turn_seq`` at 1, which could under-count at most
+# one bump per entry; benign and far rarer than the over-count we fix.
+
+# Shape: ``{session_id: {entry_rel_path: last_counted_turn_seq}}``.
+FiredHelpfulState = Dict[str, Dict[str, int]]
+
+
+def _load_fired_helpful_state(state_path: Path) -> FiredHelpfulState:
+    """Read the persisted high-water state. Returns ``{}`` on missing or
+    corrupt state (we re-validate every value before use, so a malformed
+    file just means we start from scratch — at worst one re-count)."""
+    try:
+        loaded: object = json.loads(state_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+    out: FiredHelpfulState = {}
+    for sid, entries in cast(Dict[Any, Any], loaded).items():
+        if not isinstance(sid, str) or not isinstance(entries, dict):
+            continue
+        per_entry: Dict[str, int] = {}
+        for path, seq in cast(Dict[Any, Any], entries).items():
+            if isinstance(path, str) and isinstance(seq, int) and not isinstance(seq, bool):
+                per_entry[path] = seq
+        if per_entry:
+            out[sid] = per_entry
+    return out
+
+
+def _save_fired_helpful_state(state_path: Path, state: FiredHelpfulState) -> None:
+    """Persist the high-water state atomically (tmp+rename). Swallows OS
+    errors — the counter is bookkeeping; a failed persist just risks one
+    future re-count, it must never break the review pipeline."""
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = state_path.with_suffix(state_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, state_path)
+    except OSError as e:
+        log.debug("could not persist fired-helpful state to %s: %s", state_path, e)
+
+
+def _bump_fired_helpful_counter(
+    entry_path: Path,
+    *,
+    by: int,
+    today_iso: Optional[str] = None,
+) -> bool:
+    """Increment ``fired-helpful`` by ``by`` in the entry's frontmatter;
+    stamp ``last_fired_helpful``. Returns True on success, False if the
+    file can't be read or has no parseable frontmatter. Mirrors
+    :func:`_bump_reinforced_counter`."""
+    if by <= 0:
+        return False
+    if today_iso is None:
+        today_iso = datetime.now(timezone.utc).date().isoformat()
+    try:
+        text = entry_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    m = _FRONTMATTER_HEAD_RE.match(text)
+    if not m:
+        return False
+    try:
+        loaded: object = yaml.safe_load(m.group(1)) or {}
+    except yaml.YAMLError:
+        return False
+    if not isinstance(loaded, dict):
+        return False
+    fm = cast(Dict[str, Any], loaded)
+    fm["fired-helpful"] = int(fm.get("fired-helpful") or 0) + by
+    fm["last_fired_helpful"] = today_iso
+    try:
+        new_fm = yaml.safe_dump(fm, sort_keys=False, default_flow_style=False).rstrip()
+    except yaml.YAMLError:
+        return False
+    rest = text[m.end() :]
+    new_text = f"---\n{new_fm}\n---\n{rest}"
+    try:
+        tmp = entry_path.with_suffix(entry_path.suffix + ".tmp")
+        tmp.write_text(new_text, encoding="utf-8")
+        os.replace(tmp, entry_path)
+    except OSError:
+        return False
+    return True
+
+
+def _resolve_used_helpfully(prop: object, root: Path) -> Optional[Tuple[Path, str, int]]:
+    """Return ``(abs_entry_path, rel_entry_path, cited_turn_seq)`` for a
+    well-formed ``used_helpfully`` proposal, or ``None`` if it is not one /
+    is malformed / cites a path outside the knowledge dir / omits a valid
+    ``cited_turn_seq``.
+
+    A missing or non-positive ``cited_turn_seq`` is rejected: without a
+    stable turn id we cannot dedup, and counting blindly would re-introduce
+    the over-count this whole mechanism exists to prevent. Better to drop a
+    bump than to inflate the counter."""
+    if not isinstance(prop, dict):
+        return None
+    prop_dict = cast(Dict[str, Any], prop)
+    if prop_dict.get("salience_signal") != "used_helpfully":
+        return None
+    cited = prop_dict.get("existing_entry")
+    if not isinstance(cited, str) or not cited:
+        return None
+    raw_seq = prop_dict.get("cited_turn_seq")
+    if not isinstance(raw_seq, int) or isinstance(raw_seq, bool) or raw_seq <= 0:
+        log.debug(
+            "apply_fired_helpful_counters: used_helpfully for %s missing a valid "
+            "cited_turn_seq (%r); skipping to avoid an un-dedupable bump",
+            cited,
+            raw_seq,
+        )
+        return None
+    candidate = (root / cited).resolve()
+    try:
+        rel = candidate.relative_to(root)
+    except ValueError:
+        log.warning(
+            "apply_fired_helpful_counters: rejected path outside knowledge dir: %s",
+            cited,
+        )
+        return None
+    return candidate, str(rel), raw_seq
+
+
+def apply_fired_helpful_counters(
+    packets: Sequence[Mapping[str, Any]],
+    knowledge_dir_path: Path,
+    *,
+    state_path: Optional[Path] = None,
+) -> List[str]:
+    """Walk all proposals across all packets; for each with
+    ``salience_signal == "used_helpfully"``, a valid ``existing_entry``
+    inside ``knowledge_dir_path``, and a valid ``cited_turn_seq``, bump the
+    entry's ``fired-helpful`` counter ONCE per distinct (session, entry,
+    turn) citation event and stamp ``last_fired_helpful``.
+
+    Double-counting is prevented by a persisted per-(session, entry)
+    high-water mark on ``cited_turn_seq``: only seqs strictly greater than
+    the stored mark are counted, then the mark advances to the max counted
+    seq. Distinct new seqs within a single batch each count (coalesced
+    Stops count the whole gap). The session id comes from each PACKET (a
+    batch may mix sessions), defaulting to ``"?"`` when absent so a
+    session-less packet still dedups against itself.
+
+    Returns a list of human-readable change messages. ``state_path``
+    defaults to :func:`fired_helpful_state_path` (overridable for tests).
+    """
+    if not knowledge_dir_path.exists():
+        return []
+    root = knowledge_dir_path.resolve()
+    today = datetime.now(timezone.utc).date().isoformat()
+    sp = state_path if state_path is not None else fired_helpful_state_path()
+    state = _load_fired_helpful_state(sp)
+
+    # Pass 1: gather distinct new (session, entry) -> set of seqs above the
+    # stored high-water, plus the resolved path for each entry. We resolve
+    # paths once and aggregate before touching any file so a single entry
+    # cited across multiple turns/packets is bumped by the right total.
+    pending: Dict[Tuple[str, str], set[int]] = {}
+    abs_paths: Dict[Tuple[str, str], Path] = {}
+    for packet in packets:
+        session_id = str(packet.get("session_id") or "?")
+        raw_proposals: object = packet.get("proposals") or []
+        proposals: Sequence[object] = (
+            cast(Sequence[object], raw_proposals) if isinstance(raw_proposals, list) else []
+        )
+        for prop in proposals:
+            resolved = _resolve_used_helpfully(prop, root)
+            if resolved is None:
+                continue
+            candidate, rel, seq = resolved
+            mark = state.get(session_id, {}).get(rel, 0)
+            if seq <= mark:
+                continue  # already counted (re-seen turn) or stale
+            key = (session_id, rel)
+            pending.setdefault(key, set()).add(seq)
+            abs_paths[key] = candidate
+
+    # Pass 2: apply. One file write per (session, entry) carrying the full
+    # count of newly-seen turns; advance the high-water to the max seq only
+    # if the on-disk bump actually succeeded (so a transient write failure
+    # re-counts next time rather than silently dropping the use).
+    changes: List[str] = []
+    dirty = False
+    for (session_id, rel), seqs in pending.items():
+        candidate = abs_paths[(session_id, rel)]
+        if not candidate.exists():
+            log.debug("apply_fired_helpful_counters: existing_entry not found: %s", rel)
+            continue
+        n = len(seqs)
+        if _bump_fired_helpful_counter(candidate, by=n, today_iso=today):
+            state.setdefault(session_id, {})[rel] = max(seqs)
+            dirty = True
+            changes.append(f"fired-helpful +{n} {rel}")
+
+    if dirty:
+        _save_fired_helpful_state(sp, state)
     return changes
 
 

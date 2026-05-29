@@ -793,6 +793,267 @@ def test_apply_reinforcement_skips_non_reinforces_signals(tmp_path: Path):
     assert "reinforced" not in entry.read_text(encoding="utf-8")
 
 
+# ── fired-helpful counter (used_helpfully signal) ─────────────────────
+
+
+def _used_helpfully_packet(
+    entry_rel: str,
+    cited_turn_seq: int,
+    *,
+    session_id: str = "s1",
+) -> Dict[str, Any]:
+    return {
+        "session_id": session_id,
+        "proposals": [
+            {
+                "action": "update_entry",
+                "salience_signal": "used_helpfully",
+                "existing_entry": entry_rel,
+                "cited_turn_seq": cited_turn_seq,
+                "path": entry_rel,
+                "new_body": "",
+                "reasoning": "assistant relied on this entry",
+            }
+        ],
+    }
+
+
+def _read_fm(entry: Path) -> Dict[str, Any]:
+    import yaml as _yaml
+
+    loaded = _yaml.safe_load(entry.read_text(encoding="utf-8").split("---", 2)[1])
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def test_apply_fired_helpful_bumps_counter_and_stamps_date(tmp_path: Path):
+    k = tmp_path / "knowledge"
+    (k / "global" / "tooling").mkdir(parents=True)
+    entry = k / "global" / "tooling" / "use-uv.md"
+    entry.write_text(_valid_frontmatter(id_="use-uv"), encoding="utf-8")
+    state = tmp_path / "fired.json"
+
+    packets = [_used_helpfully_packet("global/tooling/use-uv.md", 3)]
+    changes = scholar_prompt.apply_fired_helpful_counters(packets, k, state_path=state)
+
+    assert any("fired-helpful +1 global/tooling/use-uv.md" in c for c in changes)
+    fm = _read_fm(entry)
+    assert fm.get("fired-helpful") == 1
+    assert fm.get("last_fired_helpful")  # date stamped
+
+
+def test_apply_fired_helpful_skips_contradicts_signal(tmp_path: Path):
+    # A contradiction must NEVER bump fired-helpful — that path routes to
+    # correcting the entry, not rewarding it.
+    k = tmp_path / "knowledge"
+    (k / "global" / "tooling").mkdir(parents=True)
+    entry = k / "global" / "tooling" / "use-uv.md"
+    entry.write_text(_valid_frontmatter(id_="use-uv"), encoding="utf-8")
+    state = tmp_path / "fired.json"
+
+    packets = [
+        {
+            "session_id": "s1",
+            "proposals": [
+                {
+                    "action": "deprecate_entry",
+                    "salience_signal": "contradicts",
+                    "existing_entry": "global/tooling/use-uv.md",
+                    "cited_turn_seq": 5,
+                    "path": "global/tooling/use-uv.md",
+                    "superseded_by": "x",
+                    "reasoning": "user changed their mind",
+                }
+            ],
+        }
+    ]
+
+    changes = scholar_prompt.apply_fired_helpful_counters(packets, k, state_path=state)
+    assert changes == []
+    assert "fired-helpful: 0" in entry.read_text(encoding="utf-8")
+    assert "last_fired_helpful" not in entry.read_text(encoding="utf-8")
+
+
+def test_apply_fired_helpful_double_count_regression_same_turn_two_passes(tmp_path: Path):
+    # THE double-count regression: the SAME (session, entry, turn) is
+    # re-seen by the Librarian on a second Stop (the buffer is never
+    # drained). The persisted high-water must make it bump EXACTLY ONCE.
+    k = tmp_path / "knowledge"
+    (k / "global" / "tooling").mkdir(parents=True)
+    entry = k / "global" / "tooling" / "use-uv.md"
+    entry.write_text(_valid_frontmatter(id_="use-uv"), encoding="utf-8")
+    state = tmp_path / "fired.json"
+
+    # Pass 1 — turn_seq 3 cited.
+    changes1 = scholar_prompt.apply_fired_helpful_counters(
+        [_used_helpfully_packet("global/tooling/use-uv.md", 3)], k, state_path=state
+    )
+    assert len(changes1) == 1
+    assert _read_fm(entry).get("fired-helpful") == 1
+
+    # Pass 2 — SAME turn_seq 3 re-seen. Must NOT bump again.
+    changes2 = scholar_prompt.apply_fired_helpful_counters(
+        [_used_helpfully_packet("global/tooling/use-uv.md", 3)], k, state_path=state
+    )
+    assert changes2 == []
+    assert _read_fm(entry).get("fired-helpful") == 1  # still 1, not 2
+
+
+def test_apply_fired_helpful_counts_new_turn_after_high_water(tmp_path: Path):
+    # A genuinely NEW use (newer turn_seq) of the same entry in the same
+    # session SHOULD count — the high-water must not suppress real repeats.
+    k = tmp_path / "knowledge"
+    (k / "global" / "tooling").mkdir(parents=True)
+    entry = k / "global" / "tooling" / "use-uv.md"
+    entry.write_text(_valid_frontmatter(id_="use-uv"), encoding="utf-8")
+    state = tmp_path / "fired.json"
+
+    scholar_prompt.apply_fired_helpful_counters(
+        [_used_helpfully_packet("global/tooling/use-uv.md", 3)], k, state_path=state
+    )
+    # Later pass cites a NEWER turn (seq 7) — distinct real use → +1.
+    changes = scholar_prompt.apply_fired_helpful_counters(
+        [_used_helpfully_packet("global/tooling/use-uv.md", 7)], k, state_path=state
+    )
+    assert len(changes) == 1
+    assert _read_fm(entry).get("fired-helpful") == 2
+
+
+def test_apply_fired_helpful_coalesced_stops_count_whole_gap(tmp_path: Path):
+    # Coalesced Stops: one batch carries the same entry cited across two
+    # DISTINCT new turns (seq 4 and 5). Both count → +2 in one bump, the
+    # mark advances to the max (5).
+    k = tmp_path / "knowledge"
+    (k / "global" / "tooling").mkdir(parents=True)
+    entry = k / "global" / "tooling" / "use-uv.md"
+    entry.write_text(_valid_frontmatter(id_="use-uv"), encoding="utf-8")
+    state = tmp_path / "fired.json"
+
+    packets = [
+        _used_helpfully_packet("global/tooling/use-uv.md", 4),
+        _used_helpfully_packet("global/tooling/use-uv.md", 5),
+    ]
+    changes = scholar_prompt.apply_fired_helpful_counters(packets, k, state_path=state)
+    assert any("fired-helpful +2 global/tooling/use-uv.md" in c for c in changes)
+    assert _read_fm(entry).get("fired-helpful") == 2
+
+    # And a re-seen seq 5 afterwards must not bump again.
+    again = scholar_prompt.apply_fired_helpful_counters(
+        [_used_helpfully_packet("global/tooling/use-uv.md", 5)], k, state_path=state
+    )
+    assert again == []
+    assert _read_fm(entry).get("fired-helpful") == 2
+
+
+def test_apply_fired_helpful_dedupes_repeated_seq_within_batch(tmp_path: Path):
+    # The same turn_seq cited twice in one batch is one citation event.
+    k = tmp_path / "knowledge"
+    (k / "global" / "tooling").mkdir(parents=True)
+    entry = k / "global" / "tooling" / "use-uv.md"
+    entry.write_text(_valid_frontmatter(id_="use-uv"), encoding="utf-8")
+    state = tmp_path / "fired.json"
+
+    packets = [
+        _used_helpfully_packet("global/tooling/use-uv.md", 4),
+        _used_helpfully_packet("global/tooling/use-uv.md", 4),
+    ]
+    changes = scholar_prompt.apply_fired_helpful_counters(packets, k, state_path=state)
+    assert any("fired-helpful +1 " in c for c in changes)
+    assert _read_fm(entry).get("fired-helpful") == 1
+
+
+def test_apply_fired_helpful_high_water_is_per_session_entry(tmp_path: Path):
+    # A different SESSION citing a low turn_seq for the same entry must
+    # count — the high-water is keyed on (session, entry), not just entry.
+    k = tmp_path / "knowledge"
+    (k / "global" / "tooling").mkdir(parents=True)
+    entry = k / "global" / "tooling" / "use-uv.md"
+    entry.write_text(_valid_frontmatter(id_="use-uv"), encoding="utf-8")
+    state = tmp_path / "fired.json"
+
+    scholar_prompt.apply_fired_helpful_counters(
+        [_used_helpfully_packet("global/tooling/use-uv.md", 9, session_id="s1")],
+        k,
+        state_path=state,
+    )
+    # session s2 cites seq 1 (its own first turn) — fresh high-water → +1.
+    changes = scholar_prompt.apply_fired_helpful_counters(
+        [_used_helpfully_packet("global/tooling/use-uv.md", 1, session_id="s2")],
+        k,
+        state_path=state,
+    )
+    assert len(changes) == 1
+    assert _read_fm(entry).get("fired-helpful") == 2
+
+
+def test_apply_fired_helpful_skips_when_no_cited_turn_seq(tmp_path: Path):
+    # Without a stable cited_turn_seq we cannot dedup — drop the bump
+    # rather than risk an un-dedupable over-count.
+    k = tmp_path / "knowledge"
+    (k / "global" / "tooling").mkdir(parents=True)
+    entry = k / "global" / "tooling" / "use-uv.md"
+    entry.write_text(_valid_frontmatter(id_="use-uv"), encoding="utf-8")
+    state = tmp_path / "fired.json"
+
+    packets = [
+        {
+            "session_id": "s1",
+            "proposals": [
+                {
+                    "action": "update_entry",
+                    "salience_signal": "used_helpfully",
+                    "existing_entry": "global/tooling/use-uv.md",
+                    # cited_turn_seq omitted
+                    "path": "global/tooling/use-uv.md",
+                    "new_body": "",
+                    "reasoning": "",
+                }
+            ],
+        }
+    ]
+    changes = scholar_prompt.apply_fired_helpful_counters(packets, k, state_path=state)
+    assert changes == []
+    assert "fired-helpful: 0" in entry.read_text(encoding="utf-8")
+
+
+def test_apply_fired_helpful_rejects_path_traversal(tmp_path: Path):
+    k = tmp_path / "knowledge"
+    (k / "global").mkdir(parents=True)
+    outside = tmp_path / "outside.md"
+    outside.write_text("---\nid: x\nfired-helpful: 0\n---\n", encoding="utf-8")
+    state = tmp_path / "fired.json"
+
+    packets = [_used_helpfully_packet("../outside.md", 3)]
+    changes = scholar_prompt.apply_fired_helpful_counters(packets, k, state_path=state)
+    assert changes == []
+    assert outside.read_text(encoding="utf-8") == "---\nid: x\nfired-helpful: 0\n---\n"
+
+
+def test_apply_fired_helpful_persists_high_water_across_calls(tmp_path: Path):
+    # The dedup must survive a fresh load of the state file (simulating a
+    # daemon restart that resumes mid-session): re-citing seq 3 after the
+    # mark is on disk must not bump.
+    import json as _json
+
+    k = tmp_path / "knowledge"
+    (k / "global" / "tooling").mkdir(parents=True)
+    entry = k / "global" / "tooling" / "use-uv.md"
+    entry.write_text(_valid_frontmatter(id_="use-uv"), encoding="utf-8")
+    state = tmp_path / "fired.json"
+
+    scholar_prompt.apply_fired_helpful_counters(
+        [_used_helpfully_packet("global/tooling/use-uv.md", 3)], k, state_path=state
+    )
+    on_disk = _json.loads(state.read_text(encoding="utf-8"))
+    assert on_disk["s1"]["global/tooling/use-uv.md"] == 3
+
+    # Re-cite same seq with the state already on disk → no bump.
+    changes = scholar_prompt.apply_fired_helpful_counters(
+        [_used_helpfully_packet("global/tooling/use-uv.md", 3)], k, state_path=state
+    )
+    assert changes == []
+    assert _read_fm(entry).get("fired-helpful") == 1
+
+
 # ── Secrets-redaction invariant ──────────────────────────────────────
 
 

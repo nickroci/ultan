@@ -319,6 +319,30 @@ def _bump_reinforcement_counters(
         log.exception("scholar.review: reinforcement-counter pass raised")
 
 
+def _bump_fired_helpful_counters(
+    packets: Sequence[Mapping[str, Any]],
+    record: runs.InvocationRecord,
+) -> None:
+    """Empirical fired-helpful bump. Like the reinforcement bump, this is a
+    fact (the assistant relied on a surfaced entry), not a judgment call,
+    so it runs deterministically without waiting for the Scholar. Distinct
+    from ``reinforced``: this counts USE of an entry, not re-assertion of
+    its content. Double-counting across re-scanned turns is prevented by a
+    persisted per-(session, entry) high-water on the cited turn_seq inside
+    ``apply_fired_helpful_counters``."""
+    try:
+        fired_changes = scholar_prompt.apply_fired_helpful_counters(
+            packets,
+            knowledge_dir(),
+        )
+        if fired_changes:
+            record.decisions["fired_helpful_bumps"] = len(fired_changes)
+            for c in fired_changes:
+                log.info("scholar.review: %s", c)
+    except Exception:
+        log.exception("scholar.review: fired-helpful-counter pass raised")
+
+
 def run_scholar_agent(
     prompt: str,
     knowledge_dir: Path,
@@ -657,6 +681,7 @@ def _review_inner(packets: Sequence[Mapping[str, Any]]) -> None:
     started = time.time()
 
     _bump_reinforcement_counters(packets, record)
+    _bump_fired_helpful_counters(packets, record)
 
     log.info(
         "scholar.review: invoking agent (session=%s packets=%d proposals=%d interrupts=%d)",

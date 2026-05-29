@@ -45,6 +45,22 @@ def offset_state_path() -> Path:
     return home() / "daemon.offset.json"
 
 
+def fired_helpful_state_path() -> Path:
+    """Where the Scholar persists the fired-helpful dedup high-water mark
+    across daemon restarts.
+
+    Keyed ``{session_id: {entry_path: last_counted_turn_seq}}``. Only
+    ``used_helpfully`` signals citing a turn newer than the stored mark
+    for that (session, entry) are counted; the mark then advances. This
+    prevents double-counting a turn the Librarian re-sees on subsequent
+    scans (the rolling buffer is never drained). Follows the offset-state
+    idiom (``ingest._load_offset_state`` / ``_save_offset_state``):
+    atomic tmp+rename JSON. See
+    ``scholar_prompt.apply_fired_helpful_counters``.
+    """
+    return home() / "daemon.fired-helpful.json"
+
+
 def log_path() -> Path:
     return home() / "daemon.log"
 
