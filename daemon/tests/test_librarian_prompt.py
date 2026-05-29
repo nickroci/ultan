@@ -377,8 +377,24 @@ def test_template_describes_all_action_types():
         "update_readme",
         "add_wikilink",
         "split_folder",
+        "abstract_entries",
     ):
         assert action in p, f"action type {action!r} missing from assembled prompt"
+
+
+def test_assembled_prompt_documents_abstract_entries_aha_gate():
+    """The Librarian prompt must carry the four-part aha gate plus the GOOD
+    and MUST-REJECT examples so the model only proposes genuine abstractions."""
+    p = lp.assemble_prompt(
+        project_slug="x",
+        rolling_buffer="(empty)",
+        library_snapshot="(empty)",
+        applies_when_table="(empty)",
+    )
+    assert "AHA GATE" in p
+    assert "Predictive lift" in p
+    assert "linting across languages" in p  # the GOOD example
+    assert "likes good code" in p  # a MUST-REJECT example
 
 
 def test_assemble_prompt_substitutes_all_placeholders():

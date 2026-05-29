@@ -11,6 +11,8 @@ from pydantic import ValidationError
 
 from agent_mem_daemon import _validation
 from agent_mem_daemon._schemas import (
+    AbstractEntries,
+    ScholarAbstractEntries,
     ScholarArchiveEntry,
     ScholarDecisions,
     ScholarDeprecateEntry,
@@ -119,6 +121,99 @@ def test_deprecate_entry_requires_both():
     assert ok.action == "deprecate_entry"
 
 
+# ── AbstractEntries / ScholarAbstractEntries ─────────────────────────
+
+
+def _abstraction_body(id_: str, *, scope: str = "global") -> str:
+    """A valid parent-abstraction body — like ``_body`` but ``type:
+    abstraction`` and carrying two child wikilinks."""
+    return _body(id_, scope=scope).replace("type: lesson", "type: abstraction") + (
+        "\n## Related\n\n- [[global/python/likes-lint]]\n- [[global/js/likes-lint]]\n"
+    )
+
+
+def test_abstract_entries_valid():
+    a = AbstractEntries(
+        child_paths=["global/python/likes-lint.md", "global/js/likes-lint.md"],
+        parent_path="global/conventions/likes-linting.md",
+        parent_title="Likes linting across languages",
+        parent_body=_abstraction_body("likes-linting"),
+        reasoning="r",
+    )
+    assert a.action == "abstract_entries"
+    assert len(a.child_paths) == 2
+
+
+def test_abstract_entries_rejects_fewer_than_two_children():
+    with pytest.raises(ValidationError) as exc:
+        AbstractEntries(
+            child_paths=["global/python/likes-lint.md"],
+            parent_path="global/conventions/x.md",
+            parent_title="x",
+            parent_body=_abstraction_body("x"),
+            reasoning="r",
+        )
+    assert "at least two child_paths" in str(exc.value)
+
+
+def test_abstract_entries_rejects_empty_children():
+    with pytest.raises(ValidationError):
+        AbstractEntries(
+            child_paths=[],
+            parent_path="global/conventions/x.md",
+            parent_title="x",
+            parent_body=_abstraction_body("x"),
+            reasoning="r",
+        )
+
+
+def test_scholar_abstract_entries_rejects_unparseable_parent_body():
+    with pytest.raises(ValidationError) as exc:
+        ScholarAbstractEntries(
+            child_paths=["global/python/a.md", "global/js/b.md"],
+            parent_path="global/conventions/x.md",
+            parent_title="x",
+            parent_body="# no frontmatter\n\nbody",
+            reasoning="r",
+        )
+    assert "frontmatter" in str(exc.value)
+
+
+def test_scholar_abstract_entries_rejects_id_slug_mismatch():
+    with pytest.raises(ValidationError) as exc:
+        ScholarAbstractEntries(
+            child_paths=["global/python/a.md", "global/js/b.md"],
+            parent_path="global/conventions/likes-linting.md",
+            parent_title="x",
+            parent_body=_abstraction_body("WRONG"),
+            reasoning="r",
+        )
+    assert "does not match the filename slug" in str(exc.value)
+
+
+def test_scholar_abstract_entries_rejects_empty_parent_body():
+    with pytest.raises(ValidationError) as exc:
+        ScholarAbstractEntries(
+            child_paths=["global/python/a.md", "global/js/b.md"],
+            parent_path="global/conventions/x.md",
+            parent_title="x",
+            parent_body="",
+            reasoning="r",
+        )
+    assert "non-empty `parent_body`" in str(exc.value)
+
+
+def test_scholar_abstract_entries_valid():
+    a = ScholarAbstractEntries(
+        child_paths=["global/python/likes-lint.md", "global/js/likes-lint.md"],
+        parent_path="global/conventions/likes-linting.md",
+        parent_title="Likes linting across languages",
+        parent_body=_abstraction_body("likes-linting"),
+        reasoning="r",
+    )
+    assert a.action == "abstract_entries"
+
+
 # ── ScholarDecisions union discrimination ────────────────────────────
 
 
@@ -128,12 +223,21 @@ def test_decisions_discriminates_actions():
             "actions": [
                 {"action": "archive_entry", "path": "global/a.md", "reasoning": "r"},
                 {"action": "move_entry", "from_path": "global/a.md", "to_path": "global/b/a.md"},
+                {
+                    "action": "abstract_entries",
+                    "child_paths": ["global/python/a.md", "global/js/b.md"],
+                    "parent_path": "global/conventions/likes-linting.md",
+                    "parent_title": "Likes linting across languages",
+                    "parent_body": _abstraction_body("likes-linting"),
+                    "reasoning": "r",
+                },
             ],
             "interrupts_processed": [],
         }
     )
     assert isinstance(decisions.actions[0], ScholarArchiveEntry)
     assert isinstance(decisions.actions[1], ScholarMoveEntry)
+    assert isinstance(decisions.actions[2], ScholarAbstractEntries)
 
 
 # ── _validation helper edges ─────────────────────────────────────────
