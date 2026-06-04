@@ -42,6 +42,7 @@ def _write_entry(
     created: str = "2026-01-01",
     updated: str | None = None,
     status: str | None = None,
+    fired: int | None = None,
 ) -> None:
     """Create an entry with the supplied frontmatter fields."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -51,6 +52,8 @@ def _write_entry(
         "created": created,
         "reinforced": reinforced,
     }
+    if fired is not None:
+        fm["fired"] = fired
     if updated is not None:
         fm["updated"] = updated
     if last_surfaced is not None:
@@ -126,6 +129,97 @@ def test_stamp_last_surfaced_returns_false_for_no_frontmatter(home: Path) -> Non
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text("# Just a heading\n\nNo frontmatter here.\n")
     assert decay.stamp_last_surfaced(p, today_iso="2026-05-27") is False
+
+
+# ── record_surface (fired counter; Defect 2) ─────────────────────────
+
+
+def test_record_surface_increments_fired_and_stamps_last_surfaced(home: Path) -> None:
+    p = home / "knowledge" / "global" / "foo.md"
+    _write_entry(p, id_="foo", title="Foo", fired=0)
+    ok = decay.record_surface(p, today_iso="2026-05-27")
+    assert ok is True
+    fm = yaml.safe_load(p.read_text(encoding="utf-8").split("---")[1])
+    assert fm["fired"] == 1
+    assert str(fm["last_surfaced"]) == "2026-05-27"
+
+
+def test_record_surface_is_per_event_not_daily_gated(home: Path) -> None:
+    """The crux of the invariant: two surface events on the SAME day must
+    bump ``fired`` twice (unlike ``last_surfaced``, which is daily-idempotent)
+    so ``fired-helpful`` — which can bump several times a day — never exceeds
+    ``fired``."""
+    p = home / "knowledge" / "global" / "foo.md"
+    _write_entry(p, id_="foo", title="Foo", fired=0)
+    decay.record_surface(p, today_iso="2026-05-27")
+    decay.record_surface(p, today_iso="2026-05-27")
+    fm = yaml.safe_load(p.read_text(encoding="utf-8").split("---")[1])
+    assert fm["fired"] == 2
+    assert str(fm["last_surfaced"]) == "2026-05-27"
+
+
+def test_record_surface_starts_from_zero_when_field_absent(home: Path) -> None:
+    """An entry with no ``fired`` field starts the counter at 1, not crash."""
+    p = home / "knowledge" / "global" / "foo.md"
+    _write_entry(p, id_="foo", title="Foo")  # no fired field written
+    assert "fired:" not in p.read_text(encoding="utf-8")
+    decay.record_surface(p, today_iso="2026-05-27")
+    fm = yaml.safe_load(p.read_text(encoding="utf-8").split("---")[1])
+    assert fm["fired"] == 1
+
+
+def test_record_surface_coerces_bad_fired_value(home: Path) -> None:
+    """A non-int ``fired`` (corrupt frontmatter) is treated as 0, then +1."""
+    p = home / "knowledge" / "global" / "foo.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(
+        "---\nid: foo\ntitle: Foo\ncreated: '2026-01-01'\nfired: not-a-number\n---\n\nbody\n"
+    )
+    decay.record_surface(p, today_iso="2026-05-27")
+    fm = yaml.safe_load(p.read_text(encoding="utf-8").split("---")[1])
+    assert fm["fired"] == 1
+
+
+def test_record_surface_preserves_other_frontmatter(home: Path) -> None:
+    p = home / "knowledge" / "global" / "foo.md"
+    _write_entry(p, id_="foo", title="Foo", fired=4, reinforced=3, last_reinforced="2026-04-01")
+    decay.record_surface(p, today_iso="2026-05-27")
+    fm = yaml.safe_load(p.read_text(encoding="utf-8").split("---")[1])
+    assert fm["id"] == "foo"
+    assert fm["reinforced"] == 3
+    assert fm["last_reinforced"] == "2026-04-01"
+    assert fm["fired"] == 5
+
+
+def test_record_surface_returns_false_for_missing_file(home: Path) -> None:
+    p = home / "knowledge" / "global" / "nonexistent.md"
+    assert decay.record_surface(p, today_iso="2026-05-27") is False
+
+
+def test_record_surface_returns_false_for_no_frontmatter(home: Path) -> None:
+    p = home / "knowledge" / "global" / "raw.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("# Just a heading\n\nNo frontmatter here.\n")
+    assert decay.record_surface(p, today_iso="2026-05-27") is False
+
+
+def test_fired_helpful_never_exceeds_fired_under_surface_semantics(home: Path) -> None:
+    """Invariant guard: with N surface events and M<=N helpful bumps in the
+    same day, ``fired-helpful <= fired`` holds. ``record_surface`` counts each
+    surface; ``fired-helpful`` (modelled here as a same-day multi-bump) stays
+    bounded by it."""
+    p = home / "knowledge" / "global" / "foo.md"
+    _write_entry(p, id_="foo", title="Foo", fired=0)
+    # Three surface events today.
+    for _ in range(3):
+        decay.record_surface(p, today_iso="2026-05-27")
+    fm = yaml.safe_load(p.read_text(encoding="utf-8").split("---")[1])
+    fired = int(fm["fired"])
+    # The Scholar would bump fired-helpful at most once per surfaced turn; the
+    # denominator (fired) must dominate. Two helpful bumps <= three surfaces.
+    fired_helpful = 2
+    assert fired == 3
+    assert fired_helpful <= fired
 
 
 # ── sweep-state I/O ──────────────────────────────────────────────────

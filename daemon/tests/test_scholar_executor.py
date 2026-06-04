@@ -6,13 +6,26 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Dict
 
-from agent_mem_daemon import scholar_executor
+from agent_mem_daemon import _validation, scholar_executor
 from agent_mem_daemon._schemas import ScholarDecisions
 
 from .conftest import scholar_entry_body, seed_scholar_tree
 
 NOW = datetime(2026, 5, 19, 12, 0, 0, tzinfo=timezone.utc)
+
+# A full set of server-owned bookkeeping values, well clear of the template
+# defaults, so a clobber back to 0/absent is unambiguous in assertions.
+PRESERVED_COUNTERS: Dict[str, Any] = {
+    "fired": 8,
+    "fired-helpful": 5,
+    "last_fired_helpful": "2026-05-10",
+    "reinforced": 3,
+    "last_reinforced": "2026-05-12",
+    "last_surfaced": "2026-05-18",
+    "created": "2026-01-02",
+}
 
 
 def _body(id_: str, *, scope: str = "global", extra: str = "") -> str:
@@ -96,6 +109,165 @@ def test_update_entry_overwrites_body(tmp_path: Path):
     )
     assert res.counts["update_entry"] == 1
     assert "new clause" in (k / "global" / "python" / "use-uv.md").read_text(encoding="utf-8")
+
+
+# ── server-owned counter preservation (Defect 1 regression) ───────────
+
+
+def _entry_with_counters(id_: str, *, scope: str = "global", extra: str = "") -> str:
+    """``scholar_entry_body`` with the full server-owned counter set grafted
+    into the frontmatter — represents an entry the daemon has already bumped
+    on disk before the Scholar's rewrite lands."""
+    fm, body = scholar_executor._split_body(scholar_entry_body(id_, scope=scope, extra=extra))
+    fm.update(PRESERVED_COUNTERS)
+    return scholar_executor._reserialise(fm, body)
+
+
+def _read_fm(path: Path) -> Dict[str, Any]:
+    return _validation.parse_frontmatter(path.read_text(encoding="utf-8"))
+
+
+def _assert_counters_preserved(path: Path) -> None:
+    fm = _read_fm(path)
+    for key, want in PRESERVED_COUNTERS.items():
+        assert str(fm.get(key)) == str(want), f"{key}: {fm.get(key)!r} != {want!r}"
+
+
+def test_update_entry_preserves_server_owned_counters(tmp_path: Path):
+    """The key regression: an update whose new_body clobbers the counters back
+    to the template defaults must NOT lose the on-disk server-owned values —
+    while the LLM-owned prose/title DOES take effect."""
+    k = _seed(tmp_path)
+    target = k / "global" / "python" / "use-uv.md"
+    target.write_text(_entry_with_counters("use-uv"), encoding="utf-8")
+    # The model emits the template defaults (fired/fired-helpful 0, no
+    # reinforced) plus genuinely new prose + title.
+    clobber = scholar_entry_body("use-uv", extra=" A freshly rewritten clause.")
+    clobber = clobber.replace('title: "use-uv"', 'title: "Use uv, rewritten"')
+    res = _apply(
+        k,
+        {
+            "action": "update_entry",
+            "path": "global/python/use-uv.md",
+            "new_body": clobber,
+            "reasoning": "r",
+        },
+    )
+    assert res.counts["update_entry"] == 1
+    _assert_counters_preserved(target)
+    # Prose and title stay LLM-owned. (Frontmatter is re-dumped when counters
+    # are grafted back, so assert on the parsed value, not a raw quoted line.)
+    text = target.read_text(encoding="utf-8")
+    assert "A freshly rewritten clause." in text
+    assert _read_fm(target)["title"] == "Use uv, rewritten"
+
+
+def test_write_entry_brand_new_keeps_defaults(tmp_path: Path):
+    """A write_entry to a path with no pre-existing file writes the body as-is
+    (defaults stand, no spurious preservation, no crash)."""
+    k = _seed(tmp_path)
+    res = _apply(
+        k,
+        {
+            "action": "write_entry",
+            "path": "global/python/brand-new.md",
+            "body": scholar_entry_body("brand-new"),
+            "reasoning": "r",
+        },
+    )
+    assert res.counts["write_entry"] == 1
+    fm = _read_fm(k / "global" / "python" / "brand-new.md")
+    # Template defaults survive untouched; no counter was invented.
+    assert str(fm["fired"]) == "0"
+    assert str(fm["fired-helpful"]) == "0"
+    assert "reinforced" not in fm
+    assert "last_surfaced" not in fm
+
+
+def test_write_entry_replacing_existing_preserves_counters(tmp_path: Path):
+    """A write_entry that overwrites an existing entry is a replace too — its
+    server-owned counters must be preserved like an update."""
+    k = _seed(tmp_path)
+    target = k / "global" / "python" / "use-uv.md"
+    target.write_text(_entry_with_counters("use-uv"), encoding="utf-8")
+    _apply(
+        k,
+        {
+            "action": "write_entry",
+            "path": "global/python/use-uv.md",
+            "body": scholar_entry_body("use-uv", extra=" rewritten via write"),
+            "reasoning": "r",
+        },
+    )
+    _assert_counters_preserved(target)
+    assert "rewritten via write" in target.read_text(encoding="utf-8")
+
+
+def test_merge_preserves_target_counters_when_overwriting(tmp_path: Path):
+    """Merge that overwrites an existing target in place keeps the target's
+    server-owned counters (the merged body's clobbered values are discarded)."""
+    k = _seed(tmp_path)
+    # target_path already exists with elevated counters.
+    target = k / "global" / "python" / "merged.md"
+    target.write_text(_entry_with_counters("merged"), encoding="utf-8")
+    (k / "global" / "python" / "a.md").write_text(scholar_entry_body("a"), encoding="utf-8")
+    res = _apply(
+        k,
+        {
+            "action": "merge_entries",
+            "source_paths": ["global/python/a.md"],
+            "target_path": "global/python/merged.md",
+            "target_body": scholar_entry_body("merged", extra=" merged prose"),
+            "reasoning": "r",
+        },
+    )
+    assert res.counts["merge_entries"] == 1
+    _assert_counters_preserved(target)
+    assert "merged prose" in target.read_text(encoding="utf-8")
+
+
+def test_deprecate_preserves_counters(tmp_path: Path):
+    """Deprecate rewrites frontmatter in place; the server-owned counters of
+    the deprecated entry survive (only status/superseded_by/banner change)."""
+    k = _seed(tmp_path)
+    target = k / "global" / "python" / "use-uv.md"
+    target.write_text(_entry_with_counters("use-uv"), encoding="utf-8")
+    (k / "global" / "python" / "newer.md").write_text(scholar_entry_body("newer"), encoding="utf-8")
+    res = _apply(
+        k,
+        {
+            "action": "deprecate_entry",
+            "path": "global/python/use-uv.md",
+            "superseded_by": "global/python/newer.md",
+            "reasoning": "r",
+        },
+    )
+    assert res.counts["deprecate_entry"] == 1
+    _assert_counters_preserved(target)
+    text = target.read_text(encoding="utf-8")
+    assert "status: deprecated" in text
+
+
+def test_abstract_preserves_parent_counters_when_overwriting(tmp_path: Path):
+    """If abstraction overwrites an existing parent entry, that parent's
+    server-owned counters are preserved."""
+    k = _seed_two_children(tmp_path)
+    parent = k / "global" / "conventions" / "likes-tooling.md"
+    parent.parent.mkdir(parents=True, exist_ok=True)
+    parent.write_text(_entry_with_counters("likes-tooling"), encoding="utf-8")
+    res = _apply(
+        k,
+        {
+            "action": "abstract_entries",
+            "child_paths": ["global/python/use-uv.md", "global/python/lint.md"],
+            "parent_path": "global/conventions/likes-tooling.md",
+            "parent_title": "Likes tooling",
+            "parent_body": _abstraction_body("likes-tooling"),
+            "reasoning": "r",
+        },
+    )
+    assert res.counts["abstract_entries"] == 1
+    _assert_counters_preserved(parent)
 
 
 # ── merge_entries ─────────────────────────────────────────────────────

@@ -171,6 +171,53 @@ def stamp_last_surfaced(
     return _atomic_write_entry(entry_path, fm, body)
 
 
+def _fired_count(fm: Dict[str, Any]) -> int:
+    """Current ``fired`` counter as a non-negative int (0 if absent or
+    unparseable — same permissive coercion as ``reinforced``)."""
+    raw = fm.get("fired")
+    if raw is None:
+        return 0
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return n if n > 0 else 0
+
+
+def record_surface(
+    entry_path: Path,
+    *,
+    today_iso: Optional[str] = None,
+) -> bool:
+    """Record one priming surface event on the entry: increment ``fired``
+    by 1 AND stamp ``last_surfaced`` to today, in a single atomic write.
+
+    Unlike :func:`stamp_last_surfaced`, ``fired`` is NOT daily-gated — it
+    counts every surface event so the invariant ``fired-helpful <= fired``
+    holds (``fired-helpful`` increments per (session, entry, turn), which
+    can be several within a single day). ``last_surfaced`` is still set to
+    today either way; the date is naturally idempotent so re-stamping it is
+    harmless.
+
+    Args:
+        entry_path: absolute path to the entry's ``.md`` file.
+        today_iso: ISO date string to write (default: UTC today).
+            Tests pin this for deterministic assertions.
+
+    Returns:
+        True if the file was updated, False on any failure path (file
+        missing, bad frontmatter, write failed). Never raises.
+    """
+    iso = today_iso or _today_iso()
+    parsed = _read_and_parse_frontmatter(entry_path)
+    if parsed is None:
+        return False
+    fm, _raw_fm, body = parsed
+    fm["fired"] = _fired_count(fm) + 1
+    fm["last_surfaced"] = iso
+    return _atomic_write_entry(entry_path, fm, body)
+
+
 # ── Sweep state I/O ──────────────────────────────────────────────────
 
 
@@ -521,6 +568,7 @@ __all__ = [
     "SweepResult",
     "maybe_run_sweep",
     "read_last_sweep_at",
+    "record_surface",
     "run_sweep",
     "should_sweep",
     "stamp_last_surfaced",

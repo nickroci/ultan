@@ -294,10 +294,13 @@ def _post_render_bookkeeping(
 
     1. Per-session sent-cache update (only when body non-empty and
        session_id present — otherwise there's no state to track).
-    2. ``last_surfaced`` frontmatter stamp on each newly-shown entry,
-       so the decay sweep treats surfacing as activity. Runs even
-       without ``session_id`` because the agent saw the entries
-       regardless of how the daemon tracks sessions.
+    2. Surface bookkeeping on each newly-shown entry via
+       ``decay.record_surface``: increment the ``fired`` counter and
+       stamp ``last_surfaced``, so the decay sweep treats surfacing as
+       activity and ``fired`` tracks the surface denominator for
+       ``fired-helpful``. Runs even without ``session_id`` because the
+       agent saw the entries regardless of how the daemon tracks
+       sessions.
     3. Opportunistic ``maybe_run_sweep`` — self-skips unless the 24h
        cooldown has elapsed. One ``stat()`` on the sweep-state file
        on the common path.
@@ -310,9 +313,9 @@ def _post_render_bookkeeping(
     for link in newly_sent or ():
         entry_path = (kdir / f"{link}.md").resolve()
         try:
-            decay.stamp_last_surfaced(entry_path)
+            decay.record_surface(entry_path)
         except Exception:
-            log.exception("priming_rpc: last_surfaced stamp raised for %s", link)
+            log.exception("priming_rpc: surface bookkeeping raised for %s", link)
     try:
         decay.maybe_run_sweep(kdir)
     except Exception:
