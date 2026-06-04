@@ -225,6 +225,64 @@ def test_refresh_reinforced_counter_boosts_rank(tmp_path):
     assert "(×" not in lines[1]
 
 
+def _write_useful_pair(k: Path) -> None:
+    """Two entries identical except for their fired / fired-helpful counts:
+    ``proven`` was relied on 8/10 surfaces, ``ignored`` 0/10."""
+    (k / "global").mkdir(parents=True, exist_ok=True)
+    _write(
+        k / "global" / "proven.md",
+        _entry(
+            id_="proven",
+            title="Proven entry",
+            applies_when="working with foo",
+            keywords=["foo"],
+            fired=10,
+            fired_helpful=8,
+        ),
+    )
+    _write(
+        k / "global" / "ignored.md",
+        _entry(
+            id_="ignored",
+            title="Ignored entry",
+            applies_when="working with foo",
+            keywords=["foo"],
+            fired=10,
+            fired_helpful=0,
+        ),
+    )
+
+
+def test_usefulness_breaks_tie_between_equal_rerank_candidates(tmp_path):
+    """When two candidates score identically, the one actually relied on
+    (higher fired-helpful/fired) wins the tiebreak."""
+    k = tmp_path / "knowledge"
+    _write_useful_pair(k)
+    # Identical rerank scores — only the usefulness tiebreaker can order them.
+    hits = [
+        (k / "global" / "ignored.md", 3.0),
+        (k / "global" / "proven.md", 3.0),
+    ]
+    ranked = priming._boost_with_reinforcement(hits)
+    order = [p.stem for p, _score, _r in ranked]
+    assert order == ["proven", "ignored"]
+
+
+def test_usefulness_does_not_override_a_clear_rerank_gap(tmp_path):
+    """The tiebreaker is gentle: a clearly stronger rerank score wins even
+    when that entry is chronically ignored and the weaker one is maximally
+    useful. Usefulness can only break near-ties, not flip real relevance."""
+    k = tmp_path / "knowledge"
+    _write_useful_pair(k)
+    # proven (useful) gets the weak rerank score; ignored gets a strong one.
+    hits = [
+        (k / "global" / "proven.md", 2.0),
+        (k / "global" / "ignored.md", 5.0),
+    ]
+    ranked = priming._boost_with_reinforcement(hits)
+    assert ranked[0][0].stem == "ignored"
+
+
 def test_refresh_idempotent(tmp_path):
     k = _seed_library(tmp_path)
     out = tmp_path / "hot-context.md"

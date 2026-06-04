@@ -129,8 +129,11 @@ def _shorten(text: str, *, max_chars: int = 80) -> str:
     return text[: max_chars - 1].rstrip() + "…"
 
 
-def _reinforced_count(fm: Dict[str, Any]) -> int:
-    raw = fm.get("reinforced")
+def _nonneg_int_field(fm: Dict[str, Any], key: str) -> int:
+    """A frontmatter integer counter as a non-negative int (0 when absent
+    or unparseable). Shared by the reinforced / fired / fired-helpful
+    readers so the coercion lives in one place."""
+    raw = fm.get(key)
     if raw is None:
         return 0
     try:
@@ -138,6 +141,57 @@ def _reinforced_count(fm: Dict[str, Any]) -> int:
     except (TypeError, ValueError):
         return 0
     return n if n > 0 else 0
+
+
+def _reinforced_count(fm: Dict[str, Any]) -> int:
+    return _nonneg_int_field(fm, "reinforced")
+
+
+# ── Usefulness tiebreaker (fired-helpful / fired) ─────────────────────
+#
+# ``fired`` counts how often an entry was surfaced in priming; ``fired-
+# helpful`` counts how often a surfaced entry was actually relied on (the
+# Librarian's used_helpfully signal). Their ratio is a quality prior: "when
+# this entry shows up, how often does it earn its place?" We fold it into
+# ranking as a SMALL additive nudge — a tiebreaker among candidates the
+# cross-encoder reranker already considers comparable, never a primary
+# ranking term. Keeping it gentle is deliberate: the design's own warning
+# is that ranking by usefulness creates a self-reinforcing surfacing loop
+# (surface -> accrue helpful -> rank higher -> surface more), so usefulness
+# must not be able to override a real applicability difference.
+# See knowledge/projects/agent-mem/concepts/forgetting-ltd-decay-design.
+#
+# The estimate is Beta-smoothed and centered on the prior mean: a raw ratio
+# is unusable at low counts (1/1 = "100% useful" beats 5/20), and centering
+# makes a zero-data entry contribute EXACTLY 0 — new entries are judged on
+# the reranker alone (clean cold-start), proven entries float up a hair,
+# chronically-surfaced-but-ignored entries sink a hair.
+_USEFULNESS_PRIOR_ALPHA = 1.0  # prior "helpful" pseudo-count
+_USEFULNESS_PRIOR_BETA = 4.0  # prior "ignored" pseudo-count -> prior mean 0.2
+# Provisional and uncalibrated: fired-helpful is ~0 across the library until
+# the capture (shipped 2026-06) accrues weeks of data, so this weight cannot
+# be tuned against the real distribution yet. Set small so the centered score
+# (range ~[-0.2, +0.8]) swings the boosted score by at most ~+0.08 / -0.02
+# logits — bigger than the scope bonus (0.02), far smaller than one
+# reinforcement (0.5) or a meaningful rerank gap.
+_USEFULNESS_TIEBREAK_WEIGHT = 0.1
+
+
+def _usefulness_score(fm: Dict[str, Any]) -> float:
+    """Beta-smoothed, prior-centered usefulness in roughly [-0.2, +0.8].
+
+    Returns 0.0 when the entry has never been surfaced (``fired`` absent or
+    0) so untracked entries are neutral. Above the prior mean -> positive
+    (rank nudge up); below -> negative (nudge down)."""
+    fired = _nonneg_int_field(fm, "fired")
+    if fired <= 0:
+        return 0.0
+    helpful = _nonneg_int_field(fm, "fired-helpful")
+    a = _USEFULNESS_PRIOR_ALPHA
+    b = _USEFULNESS_PRIOR_BETA
+    smoothed = (helpful + a) / (fired + a + b)
+    prior_mean = a / (a + b)
+    return smoothed - prior_mean
 
 
 def _entry_title(fm: Dict[str, Any], path: Path) -> str:
@@ -580,7 +634,12 @@ def _boost_with_reinforcement(
     knowledge_dir: Optional[Path] = None,
     current_project_slug: Optional[str] = None,
 ) -> List[Tuple[Path, float, int]]:
-    """Re-rank by ``score + reinforced * 0.5 + scope_bonus``.
+    """Re-rank by ``score + reinforced*0.5 + scope_bonus + usefulness_tiebreak``.
+
+    The usefulness term is a small, prior-centered nudge from the
+    fired-helpful/fired ratio (see ``_usefulness_score``) — a tiebreaker
+    among comparable candidates, never a primary ranking signal. Untracked
+    entries contribute exactly 0.
 
     The reinforcement multiplier is gentle on purpose: reinforced is an
     integer counter the user has driven up by repetition, and BM25 scores
@@ -622,7 +681,38 @@ def _boost_with_reinforcement(
                 current_project_slug,
                 aliases,
             )
-        boosted = score + reinforced * 0.5 + scope
+        usefulness = _usefulness_score(fm)
+        # TODO(usefulness): this is a deliberately gentle TIEBREAKER. Grow it
+        # into a real signal once fired-helpful has weeks of data to calibrate
+        # against (it is ~0 library-wide until the 2026-06 capture accrues).
+        # Ideas, roughly in order of value:
+        #   1. Evidence-gate the weight: scale by fired/(fired+K) so low-count
+        #      entries barely move. Smoothing fixes the point estimate; gating
+        #      fixes the weight magnitude — distinct jobs, do both.
+        #   2. Asymmetric "ignored" penalty (the prefrontal-inhibition analog):
+        #      high fired + low fired-helpful is strong evidence an entry is
+        #      noise in the contexts where it keeps surfacing. Don't inflate the
+        #      RANKING penalty (that feeds the self-reinforcing surfacing loop) —
+        #      route the negative leg into DECAY (decay.py sweep) so ignored
+        #      entries lose half-life. That's where the design says it belongs
+        #      and where the loop self-damps. We already have the sweep; it just
+        #      doesn't read fired-helpful yet.
+        #   3. RIF / near-duplicate negative ticks: when the top entry fires-
+        #      and-helps, give near-competitors that also fired a small negative
+        #      tick so monotonic-up counters don't entrench duplicates.
+        #   4. Put all four boost terms on a COMMON SCALE. Rerank logits are
+        #      ~[-3, +10], scope is ±0.02, reinforced is 0.5/unit, usefulness is
+        #      ~[-0.02, +0.08]: incommensurable today (see the NOTE on _SCOPE_*).
+        #      Normalise (e.g. squash the rerank logit to a bounded range) so
+        #      each weight means something comparable, then re-tune all three.
+        #   5. Telemetry: surface usefulness alongside the boosted score in the
+        #      run record so the weight can be calibrated from real data instead
+        #      of guessed.
+        # Design rationale: knowledge/projects/agent-mem/concepts/forgetting-
+        #   ltd-decay-design (decay-with-reinforcement, encoding-strength-as-
+        #   rank-modifier, RIF, archive-not-delete). The usefulness-into-decay
+        #   direction (idea 2) is tracked as a TODO in decay.py's sweep.
+        boosted = score + reinforced * 0.5 + scope + _USEFULNESS_TIEBREAK_WEIGHT * usefulness
         enriched.append((path, boosted, reinforced, score))
     enriched.sort(key=lambda t: (-t[1], str(t[0])))
     return [(p, ranked, reinforced) for p, ranked, reinforced, _orig in enriched]

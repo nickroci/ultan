@@ -318,6 +318,25 @@ def _last_activity_date(fm: Dict[str, Any]) -> Optional[date]:
     return max(valid)
 
 
+# TODO(decay): couple decay to USEFUL surfacing, not bare surfacing.
+# `_last_activity_date` counts any `last_surfaced` as activity, and
+# `record_surface` stamps it on EVERY surface — so an entry surfaced often but
+# never relied on (high `fired`, low `fired-helpful` — the "ignored" /
+# prefrontal-inhibition case) resists decay exactly as much as a genuinely
+# useful one. That's backwards: those are the entries we most want to fade.
+# Two directions to explore:
+#   1. Reset/extend the half-life on a HELPFUL surface (`fired-helpful` bump)
+#      rather than on every surface — reset on real *use*, not mere exposure.
+#      Closes the hole above and implements the design's "surfaced but not
+#      relevant -> decay" leg.
+#   2. Tier the half-life off our real counters instead of one DECAY_AGE_DAYS
+#      + a binary reinforced-floor cliff: more-proven entries (reinforced /
+#      fired-helpful) earn a smoothly longer life, rather than the current
+#      immune/not cliff.
+# When a merge path lands, SUM the reinforced/fired/fired-helpful counters
+# across sources rather than taking the max — max() silently destroys
+# accumulated evidence. See knowledge/projects/agent-mem/concepts/
+# forgetting-ltd-decay-design.
 def _is_eligible_for_archive(
     fm: Dict[str, Any],
     *,
