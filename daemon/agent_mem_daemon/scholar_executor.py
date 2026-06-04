@@ -90,6 +90,56 @@ def _reserialise(fm: Dict[str, Any], body: str) -> str:
     return f"---\n{dumped}\n---\n{body}"
 
 
+# Bookkeeping fields the daemon owns deterministically. The Scholar/Librarian
+# LLM is only *prompted* to preserve them and routinely emits the template
+# default (``0`` / absent), which clobbers the counters the daemon just bumped
+# on disk. So on any rewrite that REPLACES an existing entry, the executor is
+# the single source of truth: it forces each of these from the prior on-disk
+# entry onto the proposed frontmatter, discarding whatever the model emitted.
+# Everything else (title, keywords, status, confidence, applies-when, sources,
+# prose, …) stays LLM-owned and untouched.
+_SERVER_OWNED_FIELDS = (
+    "fired",
+    "fired-helpful",
+    "last_fired_helpful",
+    "reinforced",
+    "last_reinforced",
+    "last_surfaced",
+    "created",
+)
+
+
+def _preserve_server_owned_fields(abs_path: Path, proposed_body: str) -> str:
+    """Force the server-owned bookkeeping fields from the EXISTING on-disk
+    entry at ``abs_path`` onto ``proposed_body``'s frontmatter.
+
+    When ``abs_path`` has no pre-existing file (a brand-new entry) or its
+    frontmatter is unparseable, return ``proposed_body`` unchanged — there is
+    nothing to preserve. A server-owned field absent from the prior entry is
+    left as whatever the proposed body carries (defaults stand); a present one
+    overrides the LLM value verbatim.
+    """
+    if not abs_path.exists():
+        return proposed_body
+    prior_fm, _prior_body = _split_body(_safe_read(abs_path))
+    if not prior_fm:
+        return proposed_body
+    proposed_fm, body = _split_body(proposed_body)
+    if not proposed_fm:
+        # No frontmatter to graft onto — write the body as-is rather than
+        # synthesising a frontmatter block the model didn't intend.
+        return proposed_body
+    changed = False
+    for key in _SERVER_OWNED_FIELDS:
+        if key in prior_fm:
+            if proposed_fm.get(key) != prior_fm[key]:
+                proposed_fm[key] = prior_fm[key]
+                changed = True
+    if not changed:
+        return proposed_body
+    return _reserialise(proposed_fm, body)
+
+
 def _atomic_write(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` atomically (tmp + os.replace)."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -257,9 +307,13 @@ def _apply_write_like(
     now: datetime,
     result: ExecResult,
 ) -> None:
-    """Shared body for write_entry / update_entry (write the body verbatim,
-    sync the index row, append the log)."""
+    """Shared body for write_entry / update_entry. When the entry already
+    exists on disk (update, or a write that replaces an entry), the
+    server-owned bookkeeping counters are forced from the prior entry before
+    the verbatim write so an LLM-emitted default can't clobber them; then
+    sync the index row and append the log."""
     abs_path = (knowledge_dir / rel_path).resolve()
+    body = _preserve_server_owned_fields(abs_path, body)
     _atomic_write(abs_path, body)
     fm, fm_body = _split_body(body)
     row = _index_row(rel_path, fm, fm_body, session_id=session_id)
@@ -301,8 +355,12 @@ def _do_merge(
     kd: Path, a: "ScholarMergeEntries", *, session_id: str, now: datetime, result: ExecResult
 ) -> None:
     """Write the merged target, then archive every distinct source path."""
-    _atomic_write((kd / a.target_path).resolve(), a.target_body)
-    fm, fm_body = _split_body(a.target_body)
+    target_abs = (kd / a.target_path).resolve()
+    # If the merge overwrites an existing entry in place, keep its
+    # server-owned counters rather than the model's emitted defaults.
+    target_body = _preserve_server_owned_fields(target_abs, a.target_body)
+    _atomic_write(target_abs, target_body)
+    fm, fm_body = _split_body(target_body)
     _upsert_index_row(
         kd, a.target_path, _index_row(a.target_path, fm, fm_body, session_id=session_id)
     )
@@ -418,8 +476,11 @@ def _do_abstract(
     read is recorded as a per-child miss but does not abort the action; the
     parent and the readable backlinks are still applied (integrity-first)."""
     parent_abs = (kd / a.parent_path).resolve()
-    _atomic_write(parent_abs, a.parent_body)
-    fm, fm_body = _split_body(a.parent_body)
+    # Abstraction usually writes a fresh parent, but if it overwrites an
+    # existing entry, keep that entry's server-owned counters.
+    parent_body = _preserve_server_owned_fields(parent_abs, a.parent_body)
+    _atomic_write(parent_abs, parent_body)
+    fm, fm_body = _split_body(parent_body)
     _upsert_index_row(
         kd, a.parent_path, _index_row(a.parent_path, fm, fm_body, session_id=session_id)
     )
