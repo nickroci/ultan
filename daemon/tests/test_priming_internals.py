@@ -101,6 +101,31 @@ def test_reinforced_count_passes_through_positive() -> None:
     assert priming._reinforced_count({"reinforced": 4}) == 4
 
 
+# ── _usefulness_score (fired-helpful / fired tiebreaker) ──────────────
+
+
+def test_usefulness_score_zero_when_never_fired() -> None:
+    # No track record -> exactly neutral, so cold-start entries rank on the
+    # reranker alone.
+    assert priming._usefulness_score({}) == 0.0
+    assert priming._usefulness_score({"fired": 0, "fired-helpful": 0}) == 0.0
+
+
+def test_usefulness_score_positive_when_mostly_helpful() -> None:
+    # 8/10 helpful sits well above the 0.2 prior mean.
+    assert priming._usefulness_score({"fired": 10, "fired-helpful": 8}) > 0.0
+
+
+def test_usefulness_score_negative_when_surfaced_but_ignored() -> None:
+    # 0/20 helpful -> below the prior mean -> a gentle demotion.
+    assert priming._usefulness_score({"fired": 20, "fired-helpful": 0}) < 0.0
+
+
+def test_usefulness_score_handles_garbage() -> None:
+    assert priming._usefulness_score({"fired": "x", "fired-helpful": "y"}) == 0.0
+    assert priming._usefulness_score({"fired": 5, "fired-helpful": None}) < 0.0
+
+
 # ── _entry_title fallback ────────────────────────────────────────────
 
 

@@ -381,19 +381,38 @@ def _handle_fetch_entry(req: RpcRequest) -> RpcResponse:
     if raw.startswith("[[") and raw.endswith("]]"):
         raw = raw[2:-2].strip()
     raw = raw.strip("/")
-    target_rel = raw if raw.endswith(".md") else raw + ".md"
+    if not raw:
+        return {"ok": False, "error": "path must name an entry or folder"}
 
     kdir = knowledge_dir()
     if not kdir.exists():
         return {"ok": False, "error": "knowledge dir not found"}
     kroot = kdir.resolve()
-    target = (kroot / target_rel).resolve()
-    try:
-        target.relative_to(kroot)
-    except ValueError:
-        return {"ok": False, "error": "path escapes knowledge dir"}
-    if not target.is_file():
-        return {"ok": False, "error": f"entry not found: {target_rel}"}
+
+    # Resolve to a concrete .md file. A bare folder path (with or without a
+    # trailing slash) resolves to that folder's README.md — so `projects/foo`
+    # and `projects/foo/` browse the folder instead of 404-ing on the
+    # non-existent `projects/foo.md`. An explicit `.md` suffix is always an
+    # entry; otherwise try the entry first, then fall back to the folder README.
+    rels = [raw] if raw.endswith(".md") else [f"{raw}.md", f"{raw}/README.md"]
+    target: Optional[Path] = None
+    for rel in rels:
+        cand = (kroot / rel).resolve()
+        try:
+            cand.relative_to(kroot)
+        except ValueError:
+            return {"ok": False, "error": "path escapes knowledge dir"}
+        if cand.is_file():
+            target = cand
+            break
+    if target is None:
+        return {
+            "ok": False,
+            "error": (
+                f"entry not found: {raw} (tried {', '.join(rels)}). "
+                "If you meant a topic rather than a path, re-run as a free-text query."
+            ),
+        }
 
     content = target.read_text(encoding="utf-8")
     parent = target.parent

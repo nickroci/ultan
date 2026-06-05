@@ -35,6 +35,8 @@ def render_entry(
     applies_when: str,
     keywords: List[str],
     reinforced: Optional[int] = None,
+    fired: int = 0,
+    fired_helpful: int = 0,
     body: str = "",
     scope: str = "global",
     default_body_template: str = DEFAULT_BODY_TEMPLATE,
@@ -60,8 +62,8 @@ def render_entry(
     lines.append(f'title: "{title}"')
     lines.append("created: 2026-05-19")
     lines.append("updated: 2026-05-19")
-    lines.append("fired: 0")
-    lines.append("fired-helpful: 0")
+    lines.append(f"fired: {fired}")
+    lines.append(f"fired-helpful: {fired_helpful}")
     if reinforced is not None:
         lines.append(f"reinforced: {reinforced}")
     lines.append("sources:")
