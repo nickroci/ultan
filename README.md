@@ -413,7 +413,7 @@ Prior art worth borrowing from: **MemoryBank** (Zhong et al., 2024) applies the 
 
 ## Status
 
-643 daemon + 174 search + 259 hooks tests passing (1076 total). Live-tested end-to-end against real Sonnet + Opus calls — now driven through the typed-output shim over the subscription SDK — including the three retrieval tiers, the curator's salience-signal classification, README reconciler, wikilink validator, and the PreToolUse advisory/block hook. Currently a personal dogfood project — not packaged for `pip install`. Expect to clone, `uv sync`, and tune the prompts to your own preferences.
+645 daemon + 174 search + 259 hooks tests passing (1078 total). Live-tested end-to-end against real Sonnet + Opus calls — now driven through the typed-output shim over the subscription SDK — including the three retrieval tiers, the curator's salience-signal classification, README reconciler, wikilink validator, and the PreToolUse advisory/block hook. Currently a personal dogfood project — not packaged for `pip install`. Expect to clone, `uv sync`, and tune the prompts to your own preferences.
 
 ## License
 

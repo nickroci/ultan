@@ -498,6 +498,28 @@ def test_fetch_entry_rejects_missing_entry(tmp_path, rpc_server):
     assert "not found" in resp["error"]
 
 
+def test_fetch_entry_resolves_folder_to_readme(tmp_path, rpc_server):
+    """A bare folder path (no trailing slash) resolves to that folder's
+    README — so `global/python` browses the folder instead of 404-ing on
+    the non-existent `global/python.md`."""
+    _seed_library(tmp_path)
+    _thread, socket_path = rpc_server
+    resp = _send_request(socket_path, {"op": "fetch_entry", "path": "global/python"})
+    assert resp["ok"] is True
+    assert resp["path"].endswith("global/python/README.md")
+    assert "# python" in resp["content"]
+    # Siblings are the folder's entries (the README itself is excluded).
+    assert any("use-uv" in s for s in resp["siblings"])
+
+
+def test_fetch_entry_folder_trailing_slash_also_resolves_readme(tmp_path, rpc_server):
+    _seed_library(tmp_path)
+    _thread, socket_path = rpc_server
+    resp = _send_request(socket_path, {"op": "fetch_entry", "path": "global/python/"})
+    assert resp["ok"] is True
+    assert resp["path"].endswith("global/python/README.md")
+
+
 def test_fetch_entry_rejects_empty_path(rpc_server):
     _thread, socket_path = rpc_server
     resp = _send_request(socket_path, {"op": "fetch_entry", "path": "  "})
