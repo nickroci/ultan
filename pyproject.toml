@@ -1,11 +1,43 @@
-# Virtual workspace root — ties the Ultan packages into one uv workspace so a
-# single `uv sync` covers them and inter-package deps resolve locally.
-#
-# EXPERIMENT (branch experiment/uv-tool-install): testing whether
-#   uv tool install git+<repo>@<branch>#subdirectory=cli
-# (a) installs the thin `cli` member from git, and
-# (b) resolves the member's workspace-sibling deps (agent-mem-search, pulled
-#     in only by the `retrieval` extra) from the same git repo.
+# The repo root IS the thin `ultan` package AND the workspace root, so the
+# install command is the clean `uv tool install git+https://github.com/nickroci/ultan`
+# (no #subdirectory). The heavy retrieval stack lives behind the `retrieval`
+# extra and resolves the workspace sibling (agent-mem-search) from git.
+[project]
+name = "ultan"
+version = "0.2.0"
+description = "Ultan — local markdown memory for Claude Code (thin CLI + hooks + lazy daemon launcher)."
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Nicholas Holden", email = "nicholas.holden@banqora.com" }]
+# Base deps are deliberately LIGHT — the thin entry-level wrapper. No torch.
+dependencies = [
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# Heavy retrieval stack — provisioned on demand for the daemon, NOT pulled by
+# the thin `uv tool install`. agent-mem-search carries sentence-transformers /
+# numpy / einops.
+retrieval = [
+  "agent-mem-search",
+]
+
+[project.scripts]
+ultan = "ultan.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# Only the thin CLI package ships in the wheel — not daemon/, src/, tools/.
+packages = ["ultan"]
+
 [tool.uv.workspace]
-members = ["cli", "tools/search"]
+# Root is the workspace root + a member; tools/search is the other member.
+# daemon/ and src/ keep their own pyprojects and are excluded for now.
+members = ["tools/search"]
 exclude = ["daemon", "src"]
+
+[tool.uv.sources]
+agent-mem-search = { workspace = true }
