@@ -1,0 +1,11 @@
+# Virtual workspace root — ties the Ultan packages into one uv workspace so a
+# single `uv sync` covers them and inter-package deps resolve locally.
+#
+# EXPERIMENT (branch experiment/uv-tool-install): testing whether
+#   uv tool install git+<repo>@<branch>#subdirectory=cli
+# (a) installs the thin `cli` member from git, and
+# (b) resolves the member's workspace-sibling deps (agent-mem-search, pulled
+#     in only by the `retrieval` extra) from the same git repo.
+[tool.uv.workspace]
+members = ["cli", "tools/search"]
+exclude = ["daemon", "src"]
