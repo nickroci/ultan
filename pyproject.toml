@@ -41,3 +41,13 @@ exclude = ["src"]
 
 [tool.uv.sources]
 agent-mem-daemon = { workspace = true }
+
+[dependency-groups]
+dev = ["pytest>=8.0", "ruff>=0.15"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

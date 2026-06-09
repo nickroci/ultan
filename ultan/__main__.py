@@ -33,6 +33,8 @@ def main() -> int:
     d.add_argument(
         "daemon_args", nargs=argparse.REMAINDER, help="Args forwarded to the daemon (e.g. -v)."
     )
+    h = sub.add_parser("hook", help="Run a Claude Code hook handler (talks to the daemon).")
+    h.add_argument("event", help="Hook event, e.g. user-prompt-submit, session-start.")
     args = ap.parse_args()
 
     if args.version:
@@ -47,6 +49,10 @@ def main() -> int:
         from . import _daemon
 
         return _daemon.run_foreground(args.daemon_args)
+    if args.cmd == "hook":
+        from . import _hooks
+
+        return _hooks.dispatch(args.event)
 
     ap.print_help()
     return 0
