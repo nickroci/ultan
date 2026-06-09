@@ -9,12 +9,23 @@ description = "Ultan — local markdown memory for Claude Code (thin CLI + hooks
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Nicholas Holden", email = "nicholas.holden@banqora.com" }]
-# Base deps are deliberately LIGHT — the thin entry-level wrapper. No torch.
 # `mcp` is the MCP protocol SDK for the light MCP server (no ML deps); it is
 # lazy-imported only by `ultan mcp`, never on the hook hot path.
+#
+# agent-mem-tools wires the `ultan advisor` / `ultan remember` subcommands (the
+# /ultan-advisor and /ultan slash commands). It transitively pulls agent-mem
+# (the hooks / events.jsonl schema), agent-mem-daemon (BM25 library_tools), and
+# claude-agent-sdk — listed explicitly below so the dependency graph is legible.
+# This means a plain `uv tool install ultan` is enough to run advisor/remember.
+# The hook HOT PATH stays fast regardless: torch/mcp/advisor/remember are all
+# LAZY-imported (guarded by tests/test_hook_import.py), so installing the heavy
+# stack never slows the per-turn hook.
 dependencies = [
   "pyyaml>=6.0",
   "mcp>=1.0",
+  "agent-mem",
+  "agent-mem-daemon",
+  "agent-mem-tools",
 ]
 
 [project.optional-dependencies]
@@ -37,12 +48,14 @@ build-backend = "hatchling.build"
 packages = ["ultan"]
 
 [tool.uv.workspace]
-# Root (ultan) is the workspace root + a member; tools/search, daemon, and src
-# (the hooks) are the other members.
-members = ["tools/search", "daemon", "src"]
+# Root (ultan) is the workspace root + a member; tools/search, daemon, src (the
+# hooks), and tools/ultan (the slash-command logic) are the other members.
+members = ["tools/search", "daemon", "src", "tools/ultan"]
 
 [tool.uv.sources]
+agent-mem = { workspace = true }
 agent-mem-daemon = { workspace = true }
+agent-mem-tools = { workspace = true }
 
 [dependency-groups]
 dev = ["pytest>=8.0", "ruff>=0.15"]

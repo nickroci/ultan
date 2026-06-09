@@ -173,7 +173,7 @@ def main() -> int:
     print()
     print("Or in the background:")
     print(f"  cd {REPO / 'daemon'} && \\")
-    print(f"    nohup uv run agent-mem-daemon -v > ~/.agent-mem/daemon.stdout 2>&1 &")
+    print("    nohup uv run agent-mem-daemon -v > ~/.agent-mem/daemon.stdout 2>&1 &")
     return 0
 
 
