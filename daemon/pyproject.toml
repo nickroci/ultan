@@ -37,10 +37,9 @@ build-backend = "hatchling.build"
 packages = ["agent_mem_daemon"]
 
 [tool.uv.sources]
-# Path dependency: the BM25 tokenizer/indexer lives in tools/search.
-# Keeping it as a separate package lets the CLI and daemon share one
-# implementation without copy-paste.
-agent-mem-search = { path = "../tools/search", editable = true }
+# The BM25 tokenizer/indexer lives in tools/search — a sibling workspace
+# member, so resolve it from the workspace (was a path source pre-workspace).
+agent-mem-search = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -15,11 +15,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Heavy retrieval stack — provisioned on demand for the daemon, NOT pulled by
-# the thin `uv tool install`. agent-mem-search carries sentence-transformers /
-# numpy / einops.
+# Heavy retrieval stack — provisioned on demand by `ultan daemon` via uvx, NOT
+# pulled by the thin `uv tool install`. agent-mem-daemon transitively pulls
+# agent-mem-search (sentence-transformers / torch / numpy / einops).
 retrieval = [
-  "agent-mem-search",
+  "agent-mem-daemon",
 ]
 
 [project.scripts]
@@ -34,10 +34,10 @@ build-backend = "hatchling.build"
 packages = ["ultan"]
 
 [tool.uv.workspace]
-# Root is the workspace root + a member; tools/search is the other member.
-# daemon/ and src/ keep their own pyprojects and are excluded for now.
-members = ["tools/search"]
-exclude = ["daemon", "src"]
+# Root (ultan) is the workspace root + a member; tools/search and daemon are
+# the other members. src/ keeps its own pyproject and stays out for now.
+members = ["tools/search", "daemon"]
+exclude = ["src"]
 
 [tool.uv.sources]
-agent-mem-search = { workspace = true }
+agent-mem-daemon = { workspace = true }

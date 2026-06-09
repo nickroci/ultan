@@ -29,6 +29,10 @@ def main() -> int:
     ap.add_argument("--version", action="store_true", help="Print version and exit.")
     sub = ap.add_subparsers(dest="cmd")
     sub.add_parser("doctor", help="Report install / dependency-resolution status.")
+    d = sub.add_parser("daemon", help="Run the memory daemon (provisioned via uvx).")
+    d.add_argument(
+        "daemon_args", nargs=argparse.REMAINDER, help="Args forwarded to the daemon (e.g. -v)."
+    )
     args = ap.parse_args()
 
     if args.version:
@@ -39,6 +43,10 @@ def main() -> int:
         print(f"python: {sys.version.split()[0]}")
         print(f"retrieval extra (agent-mem-search) available: {_retrieval_available()}")
         return 0
+    if args.cmd == "daemon":
+        from . import _daemon
+
+        return _daemon.run_foreground(args.daemon_args)
 
     ap.print_help()
     return 0
