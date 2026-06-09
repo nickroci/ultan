@@ -15,14 +15,9 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
 from pathlib import Path
 
-_THIS_DIR = Path(__file__).resolve().parent
-if str(_THIS_DIR) not in sys.path:
-    sys.path.insert(0, str(_THIS_DIR))
-
-import _flush_spawn  # noqa: E402
+import _flush_spawn
 
 
 class _FakePopen:

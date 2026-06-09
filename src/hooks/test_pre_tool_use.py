@@ -19,12 +19,9 @@ from pathlib import Path
 from textwrap import dedent
 from unittest import mock
 
+import _blockers
+
 _THIS_DIR = Path(__file__).resolve().parent
-if str(_THIS_DIR) not in sys.path:
-    sys.path.insert(0, str(_THIS_DIR))
-
-import _blockers  # noqa: E402
-
 HOOK_SCRIPT = _THIS_DIR / "pre-tool-use.py"
 
 
