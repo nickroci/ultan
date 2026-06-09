@@ -10,8 +10,11 @@ requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Nicholas Holden", email = "nicholas.holden@banqora.com" }]
 # Base deps are deliberately LIGHT — the thin entry-level wrapper. No torch.
+# `mcp` is the MCP protocol SDK for the light MCP server (no ML deps); it is
+# lazy-imported only by `ultan mcp`, never on the hook hot path.
 dependencies = [
   "pyyaml>=6.0",
+  "mcp>=1.0",
 ]
 
 [project.optional-dependencies]

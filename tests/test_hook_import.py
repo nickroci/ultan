@@ -15,8 +15,9 @@ from __future__ import annotations
 import subprocess
 import sys
 
-# Modules that must NEVER be imported by the hook hot path.
-_HEAVY = ("torch", "sentence_transformers", "transformers", "sklearn", "numpy")
+# Modules that must NEVER be imported by the hook hot path — the heavy ML stack
+# plus the MCP SDK (lazy-imported only by `ultan mcp`, never by the hooks).
+_FORBIDDEN = ("torch", "sentence_transformers", "transformers", "sklearn", "numpy", "mcp")
 
 # Generous ceiling — importing the (stdlib-only) hook modules should be a few
 # milliseconds. The ceiling exists to catch a regression, not to micro-tune.
@@ -29,10 +30,10 @@ def test_hook_path_imports_fast_and_torch_free() -> None:
         "t = time.perf_counter()\n"
         "import ultan._hooks  # the user-prompt-submit hot path\n"
         "dt = time.perf_counter() - t\n"
-        f"heavy = [m for m in {_HEAVY!r} if m in sys.modules]\n"
+        f"bad = [m for m in {_FORBIDDEN!r} if m in sys.modules]\n"
         "print(round(dt, 4))\n"
-        "print(','.join(heavy))\n"
-        f"assert not heavy, f'heavy imports leaked into the hook path: {{heavy}}'\n"
+        "print(','.join(bad))\n"
+        f"assert not bad, f'forbidden imports leaked into the hook path: {{bad}}'\n"
         f"assert dt < {_MAX_IMPORT_S}, f'hook import too slow: {{dt:.3f}}s (ceiling {_MAX_IMPORT_S}s)'\n"
     )
     proc = subprocess.run(

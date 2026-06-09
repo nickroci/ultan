@@ -35,6 +35,7 @@ def main() -> int:
     )
     h = sub.add_parser("hook", help="Run a Claude Code hook handler (talks to the daemon).")
     h.add_argument("event", help="Hook event, e.g. user-prompt-submit, session-start.")
+    sub.add_parser("mcp", help="Run the light MCP server (Claude Code launches this).")
     args = ap.parse_args()
 
     if args.version:
@@ -53,6 +54,10 @@ def main() -> int:
         from . import _hooks
 
         return _hooks.dispatch(args.event)
+    if args.cmd == "mcp":
+        from . import _mcp
+
+        return _mcp.serve()
 
     ap.print_help()
     return 0
