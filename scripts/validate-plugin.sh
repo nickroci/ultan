@@ -41,8 +41,11 @@ section() { printf '\n== %s ==\n' "$1"; }
 export AGENT_MEM_HOME="$(mktemp -d "${TMPDIR:-/tmp}/ultan-val-home.XXXXXX")"
 export CLAUDE_PLUGIN_DATA="$(mktemp -d "${TMPDIR:-/tmp}/ultan-val-data.XXXXXX")"
 export CLAUDE_PLUGIN_ROOT="$REPO_ROOT"
-# Validate the working tree, not whatever is on remote main.
-export ULTAN_SPEC="ultan[retrieval] @ file://$REPO_ROOT"
+# Default: validate the working tree. Override ULTAN_SPEC to validate a
+# remote ref instead (e.g. the pushed branch, pre-merge):
+#   ULTAN_SPEC='ultan[retrieval] @ git+https://github.com/nickroci/ultan@<ref>' \
+#     bash scripts/validate-plugin.sh
+export ULTAN_SPEC="${ULTAN_SPEC:-ultan[retrieval] @ file://$REPO_ROOT}"
 BIN="$CLAUDE_PLUGIN_DATA/bin/ultan"
 
 cleanup() {
