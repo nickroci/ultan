@@ -16,7 +16,7 @@ BIN_DIR="$DATA/bin"
 BIN="$BIN_DIR/ultan"
 LOCK="$DATA/.install.lock"
 # TODO(release): pin to a published version / tag instead of a branch.
-SPEC="git+https://github.com/nickroci/ultan@experiment/uv-tool-install"
+SPEC="git+https://github.com/nickroci/ultan@main"
 
 if ! command -v uv >/dev/null 2>&1; then
   echo "ultan: 'uv' not found on PATH — install uv (https://docs.astral.sh/uv) to enable Ultan." >&2

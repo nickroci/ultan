@@ -94,33 +94,44 @@ The deliberate choice: deterministic-and-cheap text retrieval at always-on Tier 
 
 ## Quick start
 
-```bash
-# 1. Sync the daemon's deps (uv-managed)
-cd daemon && uv sync --group dev
+Ultan installs as a native **Claude Code plugin** — no editing `settings.json`, no
+daemon to babysit. You just need [`uv`](https://docs.astral.sh/uv) on your `PATH`; the
+plugin uses it to provision Ultan's runtime on first use.
 
-# 2. Sync the search CLI (separate venv, shared BM25 implementation).
-#    Pulls in sentence-transformers + einops; HuggingFace model weights
-#    are downloaded on first daemon start (see step 4 below).
-cd ../tools/search && uv sync
+Inside Claude Code:
 
-# 3. Install the slash commands and hooks
-#    - /ultan, /ultan-install, /ultan-advisor live at ~/.claude/commands/
-#    - `/ultan-install` writes hooks into ~/.claude/settings.json (GLOBAL — every
-#      Claude Code project). One daemon per machine serves the whole library
-#      across every repo, so global is the recommended default.
-#    - `/ultan-install --project` if you'd rather scope to one repo only.
-
-# 4. Start the daemon (foreground; logs to ~/.agent-mem/daemon.log). One per
-#    machine — it listens on ~/.agent-mem/priming.sock and answers Tier-1
-#    priming requests from every hook on every project.
-cd /path/to/ultan/daemon && uv run agent-mem-daemon -v
-#    (nohup, tmux, or a launchd plist if you want it persistent — auto-supervision
-#     not yet implemented.)
-
-# 5. Open Claude Code in any project (no per-project setup needed once the
-#    hooks are global) and work normally. Entries land under
-#    ~/.agent-mem/knowledge/ as the Scholar approves them.
+```text
+/plugin marketplace add nickroci/ultan
+/plugin install ultan@ultan      # choose "user" scope to enable it in every project
+/reload-plugins                  # load the hooks + MCP into the running session
 ```
+
+> ⏳ **Give the first run a minute or two.** `/plugin install` downloads the plugin, and
+> the first session then provisions Ultan's retrieval stack (torch + the embedding/rerank
+> models — a few hundred MB) in the background. You can keep working while it finishes.
+
+That's it. Skills and slash commands hot-load the instant you install; `/reload-plugins`
+pulls in the hooks and the MCP server. **A full Claude Code restart is not required** — a
+fresh session also works, but you don't need one.
+
+On first use a `SessionStart` hook provisions that retrieval stack into the plugin's
+private storage **in the background**. Until it finishes, priming falls back to a fast
+lexical scan; after that the daemon **lazy-starts on demand**. Models download anonymously
+from HuggingFace — see *First-start expectations* below.
+
+You now have:
+
+- `/ultan <text>` to save a memory, `/ultan-advisor <question>` to consult the library
+- the `ultan-search` skill and the `ultan_recall` MCP tool
+- automatic priming on every prompt
+- everything under `~/.agent-mem/knowledge/` as plain markdown — local, no cloud, no telemetry
+
+> **Don't also run `/ultan-install`.** It wires a *second* copy of the hooks into
+> `settings.json`; with the plugin installed, every hook would then fire twice.
+> `/ultan-install` is only for the from-source path — see *Development setup* below.
+
+> The plugin currently tracks an experimental branch (`@experiment/uv-tool-install`) and
+> will move to a tagged release before wider promotion.
 
 ### Where your memories live
 
@@ -184,6 +195,41 @@ in-process lexical scan so you still see relevant entries.
 To save a memory explicitly: `/ultan never deploy to prod without my explicit OK`.
 
 To ask before asking the user: `/ultan-advisor should I use respx or hand-roll an httpx mock?`.
+
+## Development setup
+
+For hacking on Ultan itself, or running from source without the plugin. This is the
+manual path the plugin automates — you wire the hooks yourself and run the daemon
+directly from the repo.
+
+```bash
+# 1. Sync the daemon's deps (uv-managed)
+cd daemon && uv sync --group dev
+
+# 2. Sync the search CLI (separate venv, shared BM25 implementation).
+#    Pulls in sentence-transformers + einops; HuggingFace model weights
+#    are downloaded on first daemon start (see step 4 below).
+cd ../tools/search && uv sync
+
+# 3. Install the slash commands and hooks
+#    - /ultan, /ultan-install, /ultan-advisor live at ~/.claude/commands/
+#    - `/ultan-install` writes hooks into ~/.claude/settings.json (GLOBAL — every
+#      Claude Code project). One daemon per machine serves the whole library
+#      across every repo, so global is the recommended default.
+#    - `/ultan-install --project` if you'd rather scope to one repo only.
+#    NOTE: don't run this if you've installed the plugin — the hooks would double-fire.
+
+# 4. Start the daemon (foreground; logs to ~/.agent-mem/daemon.log). One per
+#    machine — it listens on ~/.agent-mem/priming.sock and answers Tier-1
+#    priming requests from every hook on every project.
+cd /path/to/ultan/daemon && uv run agent-mem-daemon -v
+#    (nohup, tmux, or a launchd plist if you want it persistent — auto-supervision
+#     not yet implemented.)
+
+# 5. Open Claude Code in any project (no per-project setup needed once the
+#    hooks are global) and work normally. Entries land under
+#    ~/.agent-mem/knowledge/ as the Scholar approves them.
+```
 
 ---
 

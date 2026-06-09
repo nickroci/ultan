@@ -10,7 +10,7 @@
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/nickroci/ultan@experiment/uv-tool-install",
+        "git+https://github.com/nickroci/ultan@main",
         "ultan",
         "mcp"
       ]

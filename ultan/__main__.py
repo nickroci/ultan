@@ -1,12 +1,13 @@
-"""Ultan CLI (thin wrapper).
+"""Ultan CLI — the `ultan` entry point.
 
-Experiment scaffold for branch experiment/uv-tool-install: proves the thin
-`ultan` entry point installs from git via `uv tool install`, and that
-`ultan doctor` can detect whether the heavy `retrieval` extra (the workspace
-sibling agent-mem-search) was resolved and installed alongside it.
-
-Real subcommands (install / uninstall / daemon / hook) come once the
-packaging path is validated.
+Installed via `uv tool install git+https://github.com/nickroci/ultan` (the Claude
+Code plugin provisions it on first use via scripts/ensure-ultan.sh). Subcommands:
+`hook` (the per-turn hot path — stdlib-light and torch-free, guarded by
+tests/test_hook_import.py), `daemon` (runs the agent-mem-daemon installed in this
+same venv), `mcp` (the light MCP server Claude Code launches), and `advisor` /
+`remember` (the /ultan-advisor and /ultan slash commands). The heavy ML deps are
+lazy-imported so they never touch the hook path. `ultan doctor` reports whether
+the retrieval stack (agent-mem-search) resolved.
 """
 
 from __future__ import annotations
