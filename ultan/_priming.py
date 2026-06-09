@@ -83,6 +83,15 @@ class PrimingResponse(TypedDict, total=False):
 # higher and we'd rather wait than skip the precision lift.
 _TOTAL_BUDGET_MS = 2000
 
+# Per-file read cap for the lexical fallback scan: knowledge entries are
+# small markdown, so anything bigger is pathological (a stray dump) and must
+# not eat the hook budget or RAM. Oversized files are skipped, not truncated.
+_MAX_FILE_BYTES = 262_144
+
+# When the socket attempt burns the whole budget (hung daemon), the fallback
+# still gets this floor so the turn isn't left with nothing.
+_FALLBACK_FLOOR_S = 0.5
+
 # Length-prefix header size; must match daemon's priming_rpc.
 _LEN_HEADER = 4
 _MAX_BODY_BYTES = 1 << 20  # 1 MiB sanity cap, mirrors server side
@@ -248,8 +257,11 @@ def _parse_yaml_lite(fm_block: str) -> Frontmatter:
 
 
 def _iter_markdown(knowledge_dir: Path) -> List[Path]:
-    """Same selection rules as ``bm25._iter_markdown``: skip ``_archive``
-    subtrees and the top-level ``index.md`` / ``log.md`` catalogs."""
+    """Selection rules from ``bm25._iter_markdown`` (skip ``_archive``
+    subtrees and the top-level ``index.md`` / ``log.md`` catalogs) plus one
+    deliberate extra: skip every ``README.md`` at any depth. Folder READMEs
+    are catalog-like and would crowd real entries out of the tiny top-k
+    here; the daemon's BM25 path keeps them and lets IDF handle it."""
     files: List[Path] = []
     catalog_names = {"index.md", "log.md", "README.md"}
     for p in sorted(knowledge_dir.rglob("*.md")):
@@ -265,9 +277,9 @@ def _iter_markdown(knowledge_dir: Path) -> List[Path]:
 
 
 def _score_doc(doc_tokens: set[str], query_tokens: List[str]) -> float:
-    """Tiny lexical score: count of query-token hits, weighted by token
-    rarity in the query (de-duplicate first). No IDF — the corpus is
-    small and IDF would require a corpus scan we can't afford."""
+    """Tiny lexical score: the number of unique query tokens present in the
+    doc. No IDF / rarity weighting of any kind — the corpus is small and
+    weighting would require a corpus scan we can't afford on the hot path."""
     if not doc_tokens or not query_tokens:
         return 0.0
     # De-duplicate query tokens to avoid double-counting repetition.
@@ -357,15 +369,23 @@ def _reinforced_count(fm: Frontmatter) -> int:
 def _rank_entries(
     files: List[Path],
     q_tokens: List[str],
+    deadline: Optional[float] = None,
 ) -> List[ScoredEntry]:
     """Score and sort the knowledge files against the query tokens.
 
     Returns ``(path, boosted_score, reinforced, frontmatter)`` tuples
-    sorted by score desc, ties broken by path for stability.
+    sorted by score desc, ties broken by path for stability. Stops scanning
+    (ranking what it has) once ``deadline`` (a ``time.monotonic()`` value)
+    passes, and skips files over ``_MAX_FILE_BYTES`` — the scan re-reads the
+    whole library every prompt, so both bounds are load-bearing.
     """
     scored: List[ScoredEntry] = []
     for p in files:
+        if deadline is not None and time.monotonic() > deadline:
+            break  # budget exhausted — partial ranking beats a blown budget
         try:
+            if p.stat().st_size > _MAX_FILE_BYTES:
+                continue
             text = p.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
@@ -424,8 +444,14 @@ def _local_priming(
     k: int,
     char_budget: int,
     knowledge_dir: Optional[Path] = None,
+    deadline: Optional[float] = None,
 ) -> str:
     """Pure-stdlib token-overlap rank. Returns rendered markdown or ""."""
+    if k <= 0:
+        # k=0 would render the bare header/footer envelope with no bullets;
+        # negative k would silently slice entries off the tail. Both are
+        # caller bugs — return nothing rather than inject an empty block.
+        return ""
     kdir = knowledge_dir or _knowledge_dir()
     if not kdir.exists():
         return ""
@@ -438,7 +464,7 @@ def _local_priming(
     if not files:
         return ""
 
-    scored = _rank_entries(files, q_tokens)
+    scored = _rank_entries(files, q_tokens, deadline)
     if not scored:
         return ""
 
@@ -480,6 +506,12 @@ def get_priming(
     if not isinstance(runtime_prompt, str) or not runtime_prompt.strip():
         return ""
 
+    # ONE wall-clock budget shared by the socket attempt and the fallback —
+    # a hung daemon must not burn the full budget and then hand the fallback
+    # an unbounded scan on top (the fallback keeps a small floor so the turn
+    # still gets something when the socket ate everything).
+    deadline = time.monotonic() + total_budget_ms / 1000.0
+
     socket_path = _priming_socket_path()
     if socket_path.exists():
         request: PrimingRequest = {
@@ -498,4 +530,9 @@ def get_priming(
         # Daemon answered but with ok=false, OR transport failed. Fall through
         # to the local path so the agent gets something rather than nothing.
 
-    return _local_priming(prompt, k=k, char_budget=char_budget)
+    return _local_priming(
+        prompt,
+        k=k,
+        char_budget=char_budget,
+        deadline=max(deadline, time.monotonic() + _FALLBACK_FLOOR_S),
+    )

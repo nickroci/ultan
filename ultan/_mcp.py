@@ -30,7 +30,7 @@ def build_server() -> "FastMCP":
     server = FastMCP("ultan")
 
     @server.tool()
-    def ultan_recall(query: str) -> str:
+    def ultan_recall(query: str) -> str:  # pyright: ignore[reportUnusedFunction]  # registered via decorator
         """Recall relevant lessons, preferences, and conventions from the
         user's Ultan memory library for the given query. Returns markdown
         wikilink bullets (open them with the Read tool) or a no-match note."""

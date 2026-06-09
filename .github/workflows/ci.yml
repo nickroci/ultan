@@ -17,11 +17,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The root `ultan` plugin package (the runtime) and tools/ultan were
+          # previously unguarded — added so quality runs on every package.
+          - package: .
+            python-version: "3.12"
           - package: daemon
             python-version: "3.10"
           - package: tools/search
             python-version: "3.10"
           - package: src
+            python-version: "3.12"
+          - package: tools/ultan
             python-version: "3.12"
     defaults:
       run:
@@ -32,7 +38,10 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-          cache-dependency-glob: ${{ matrix.package }}/uv.lock
+          # The workspace root uv.lock is the only lockfile — member dirs
+          # resolve against it (`uv sync --locked` from a member validates
+          # the root lock), so it is the correct cache key for every job.
+          cache-dependency-glob: uv.lock
 
       - name: Install dependencies
         run: uv sync --locked

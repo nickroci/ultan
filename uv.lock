@@ -2074,37 +2074,33 @@ name = "ultan"
 version = "0.2.0"
 source = { editable = "." }
 dependencies = [
-    { name = "agent-mem" },
-    { name = "agent-mem-daemon" },
-    { name = "agent-mem-tools" },
     { name = "mcp" },
-    { name = "pyyaml" },
 ]
 
 [package.optional-dependencies]
 retrieval = [
     { name = "agent-mem-daemon" },
+    { name = "agent-mem-tools" },
 ]
 
 [package.dev-dependencies]
 dev = [
+    { name = "pyright" },
     { name = "pytest" },
     { name = "ruff" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "agent-mem", editable = "src" },
-    { name = "agent-mem-daemon", editable = "daemon" },
     { name = "agent-mem-daemon", marker = "extra == 'retrieval'", editable = "daemon" },
-    { name = "agent-mem-tools", editable = "tools/ultan" },
+    { name = "agent-mem-tools", marker = "extra == 'retrieval'", editable = "tools/ultan" },
     { name = "mcp", specifier = ">=1.0" },
-    { name = "pyyaml", specifier = ">=6.0" },
 ]
 provides-extras = ["retrieval"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "pyright", specifier = ">=1.1.409" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "ruff", specifier = ">=0.15" },
 ]

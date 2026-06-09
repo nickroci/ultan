@@ -17,6 +17,7 @@ Stdlib + claude-agent-sdk only. Reuses the daemon's
 ``agent_mem_daemon.library_tools.make_library_mcp_server`` so BM25 is
 the same in both places. Pure read — never writes to disk.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -143,6 +144,7 @@ async def _drain_query(prompt: str, options) -> str:
         TextBlock,
         query,
     )
+
     out = ""
     async for msg in query(prompt=_prompt_stream(prompt), options=options):
         if isinstance(msg, AssistantMessage):
@@ -165,12 +167,11 @@ def _make_path_guard(boundary: Path):
             PermissionResultAllow,
             PermissionResultDeny,
         )
+
         if name in PATH_FREE:
             return PermissionResultAllow(updated_input=input_)
         if name not in PATH_KEYS:
-            return PermissionResultDeny(
-                message=f"tool {name!r} not allowed for the advisor"
-            )
+            return PermissionResultDeny(message=f"tool {name!r} not allowed for the advisor")
         for key in PATH_KEYS[name]:
             raw = input_.get(key)
             if raw is None:
@@ -178,9 +179,7 @@ def _make_path_guard(boundary: Path):
             try:
                 Path(str(raw)).expanduser().resolve().relative_to(root)
             except (ValueError, OSError):
-                return PermissionResultDeny(
-                    message=f"path {raw!r} is outside {root}"
-                )
+                return PermissionResultDeny(message=f"path {raw!r} is outside {root}")
         return PermissionResultAllow(updated_input=input_)
 
     return _can_use_tool
@@ -200,7 +199,9 @@ async def _run_librarian(question: str, kdir: Path) -> dict:
         model=LIBRARIAN_MODEL,
         cwd=str(kdir),
         allowed_tools=[
-            "Read", "Glob", "Grep",
+            "Read",
+            "Glob",
+            "Grep",
             library_tools.fully_qualified_tool_name(),
         ],
         mcp_servers={
@@ -238,10 +239,12 @@ async def _run_scholar(question: str, findings: dict, kdir: Path) -> str:
         can_use_tool=_make_path_guard(kdir),
         env={**os.environ, "CLAUDE_INVOKED_BY": "ultan_advisor"},
     )
-    return (await asyncio.wait_for(
-        _drain_query(prompt, options),
-        timeout=SCHOLAR_TIMEOUT_S,
-    )).strip()
+    return (
+        await asyncio.wait_for(
+            _drain_query(prompt, options),
+            timeout=SCHOLAR_TIMEOUT_S,
+        )
+    ).strip()
 
 
 def _parse_librarian_json(text: str) -> dict:
@@ -286,15 +289,15 @@ def _parse_librarian_json(text: str) -> dict:
         return {
             "relevant_entries": [],
             "notes_for_scholar": "(Librarian returned no parseable JSON; raw text: "
-                                 + text[:500] + ")",
+            + text[:500]
+            + ")",
         }
     try:
         parsed = json.loads(blocks[-1])
     except json.JSONDecodeError:
         return {
             "relevant_entries": [],
-            "notes_for_scholar": "(Librarian JSON malformed; raw text: "
-                                 + blocks[-1][:500] + ")",
+            "notes_for_scholar": "(Librarian JSON malformed; raw text: " + blocks[-1][:500] + ")",
         }
     if not isinstance(parsed, dict):
         return {"relevant_entries": [], "notes_for_scholar": str(parsed)[:500]}
@@ -327,8 +330,11 @@ def run(question: str) -> int:
         print("_Ultan: searching library..._", flush=True)
         findings = asyncio.run(_run_librarian(question, kdir))
         n_hits = len(findings.get("relevant_entries") or [])
-        print(f"_Ultan: found {n_hits} relevant entr"
-              f"{'y' if n_hits == 1 else 'ies'}, synthesising..._", flush=True)
+        print(
+            f"_Ultan: found {n_hits} relevant entr"
+            f"{'y' if n_hits == 1 else 'ies'}, synthesising..._",
+            flush=True,
+        )
         answer = asyncio.run(_run_scholar(question, findings, kdir))
     except asyncio.TimeoutError:
         print("ultan-advisor: timed out", file=sys.stderr)
@@ -345,10 +351,11 @@ def run(question: str) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Ask Ultan for advice. Searches the knowledge library and "
-                    "synthesises a referenced answer.",
+        "synthesises a referenced answer.",
     )
-    ap.add_argument("question", nargs="*",
-                    help="The question or decision. Use '-' to read from stdin.")
+    ap.add_argument(
+        "question", nargs="*", help="The question or decision. Use '-' to read from stdin."
+    )
     args = ap.parse_args()
 
     if args.question == ["-"] or not args.question:

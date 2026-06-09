@@ -1,7 +1,10 @@
 # The repo root IS the thin `ultan` package AND the workspace root, so the
 # install command is the clean `uv tool install git+https://github.com/nickroci/ultan`
 # (no #subdirectory). The heavy retrieval stack lives behind the `retrieval`
-# extra and resolves the workspace sibling (agent-mem-search) from git.
+# extra; the plugin provisioner (scripts/ensure-ultan.sh) installs
+# `ultan[retrieval]` so the hook runtime gets the daemon in the same venv,
+# while a plain/uvx install (e.g. the MCP server in .claude-plugin/plugin.json)
+# stays small and starts fast.
 [project]
 name = "ultan"
 version = "0.2.0"
@@ -10,30 +13,23 @@ requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Nicholas Holden", email = "nicholas.holden@banqora.com" }]
 # `mcp` is the MCP protocol SDK for the light MCP server (no ML deps); it is
-# lazy-imported only by `ultan mcp`, never on the hook hot path.
-#
-# agent-mem-tools wires the `ultan advisor` / `ultan remember` subcommands (the
-# /ultan-advisor and /ultan slash commands). It transitively pulls agent-mem
-# (the hooks / events.jsonl schema), agent-mem-daemon (BM25 library_tools), and
-# claude-agent-sdk — listed explicitly below so the dependency graph is legible.
-# This means a plain `uv tool install ultan` is enough to run advisor/remember.
-# The hook HOT PATH stays fast regardless: torch/mcp/advisor/remember are all
-# LAZY-imported (guarded by tests/test_hook_import.py), so installing the heavy
-# stack never slows the per-turn hook.
+# lazy-imported only by `ultan mcp`, never on the hook hot path. The hook hot
+# path itself is pure stdlib (guarded by tests/test_hook_import.py).
 dependencies = [
-  "pyyaml>=6.0",
   "mcp>=1.0",
-  "agent-mem",
-  "agent-mem-daemon",
-  "agent-mem-tools",
 ]
 
 [project.optional-dependencies]
-# Heavy retrieval stack — provisioned on demand by `ultan daemon` via uvx, NOT
-# pulled by the thin `uv tool install`. agent-mem-daemon transitively pulls
-# agent-mem-search (sentence-transformers / torch / numpy / einops).
+# Full hook runtime, installed by scripts/ensure-ultan.sh as
+# `ultan[retrieval] @ git+…`. agent-mem-daemon transitively pulls
+# agent-mem-search (sentence-transformers / torch / numpy / einops) and puts
+# the `agent-mem-daemon` console script in the SAME venv, which is where
+# ultan/_daemon.py expects it (Path(sys.executable).with_name(...)).
+# agent-mem-tools ships the `advisor` / `remember` modules behind
+# `ultan advisor` / `ultan remember` (lazy-imported in ultan/__main__.py).
 retrieval = [
   "agent-mem-daemon",
+  "agent-mem-tools",
 ]
 
 [project.scripts]
@@ -53,12 +49,11 @@ packages = ["ultan"]
 members = ["tools/search", "daemon", "src", "tools/ultan"]
 
 [tool.uv.sources]
-agent-mem = { workspace = true }
 agent-mem-daemon = { workspace = true }
 agent-mem-tools = { workspace = true }
 
 [dependency-groups]
-dev = ["pytest>=8.0", "ruff>=0.15"]
+dev = ["pytest>=8.0", "pyright>=1.1.409", "ruff>=0.15"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -66,3 +61,34 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# This (root) job covers only the `ultan` package + its tests. The workspace
+# members — daemon, src, tools/* — are linted/typed by their own CI jobs, so
+# exclude them here to avoid double-coverage and conflicting results. skills/
+# ships a standalone stdlib script (a verbatim copy of the author's skill),
+# not package code.
+extend-exclude = [".venv", "build", "dist", "daemon", "src", "tools", "skills"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "C901", "PLR0912", "PLR0915", "PLC0415"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["E501", "C901", "PLR0912", "PLR0915", "PLC0415"]
+# Lazy imports are the design here: the hook hot path must never pay for the
+# heavy stacks (enforced by tests/test_hook_import.py), so subcommand deps
+# import inside their dispatch branches.
+"ultan/__main__.py" = ["PLC0415"]
+"ultan/_mcp.py" = ["PLC0415"]
+
+[tool.pyright]
+# Source only — tests stay at standard mode (excluded), matching the other
+# packages. The `ultan` package is the plugin hot path, so strict here matters.
+include = ["ultan"]
+exclude = [".venv", "**/__pycache__", "build", "dist", "tests", "skills"]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = false
+reportMissingImports = "warning"
+reportUnusedImport = "error"
+reportPrivateUsage = "warning"

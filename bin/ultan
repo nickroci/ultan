@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Plugin-root bin/ is added to the Bash tool's PATH while the plugin is
+# enabled — this is what lets /ultan and /ultan-advisor invoke bare `ultan`
+# without the user installing anything on their own PATH. The real binary
+# lives in the plugin's private data dir (installed by ensure-ultan.sh).
+# CLAUDE_PLUGIN_DATA is not set for command-invoked bash, so fall back to the
+# default data location for this plugin+marketplace ("ultan" @ "ultan").
+DATA="${CLAUDE_PLUGIN_DATA:-$HOME/.claude/plugins/data/ultan-ultan}"
+REAL="$DATA/bin/ultan"
+if [ -x "$REAL" ]; then
+  exec "$REAL" "$@"
+fi
+echo "ultan: not provisioned yet — the plugin installs Ultan in the background on session start; try again in a minute (see $DATA/install.log)." >&2
+exit 1

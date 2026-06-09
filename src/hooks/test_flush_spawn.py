@@ -242,6 +242,10 @@ def test_spawn_writes_snapshot_and_calls_popen(tmp_path: Path, monkeypatch):
     )
     state_dir = tmp_path / "state"
     state_dir.mkdir()
+    # The spawn guard requires the flush script to exist under code_root
+    # (repo mode); without it the helper degrades to a no-op (see below).
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "flush.py").write_text("", encoding="utf-8")
     out = _flush_spawn.snapshot_and_spawn_flush(
         str(transcript),
         "s1",
@@ -261,6 +265,49 @@ def test_spawn_writes_snapshot_and_calls_popen(tmp_path: Path, monkeypatch):
     assert str(out) in cmd
     assert "s1" in cmd
     assert "myproj" in cmd
+
+
+def test_spawn_skips_when_flush_script_missing(tmp_path: Path, monkeypatch, caplog):
+    """Installed-wheel mode: config.CODE_ROOT resolves into site-packages,
+    where there is no scripts/flush.py — the helper must no-op with a log
+    line instead of spawning `uv run` against a lib directory."""
+    calls: list[list] = []
+
+    class _CapturingPopen(_FakePopen):
+        def __init__(self, cmd, **kwargs):
+            calls.append(cmd)
+            super().__init__(cmd, **kwargs)
+
+    class _ShimSubprocess:
+        Popen = staticmethod(_CapturingPopen)
+        DEVNULL = _flush_spawn.subprocess.DEVNULL
+        CREATE_NO_WINDOW = getattr(_flush_spawn.subprocess, "CREATE_NO_WINDOW", 0)
+
+    monkeypatch.setattr(_flush_spawn, "subprocess", _ShimSubprocess)
+    transcript = tmp_path / "t.jsonl"
+    _write_transcript(
+        transcript,
+        [
+            {"message": {"role": "user", "content": "hi"}},
+            {"message": {"role": "assistant", "content": "hello"}},
+        ],
+    )
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    with caplog.at_level(logging.INFO):
+        out = _flush_spawn.snapshot_and_spawn_flush(
+            str(transcript),
+            "s1",
+            "myproj",
+            state_dir=state_dir,
+            code_root=tmp_path,  # no scripts/flush.py here
+            min_turns=1,
+            file_prefix="session-flush",
+            log_tag="t",
+        )
+    assert out is None
+    assert calls == []
+    assert "flush.py not found" in caplog.text
 
 
 def test_spawn_logs_when_extraction_raises(tmp_path: Path, monkeypatch, caplog):

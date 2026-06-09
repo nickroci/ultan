@@ -30,7 +30,7 @@ def main() -> int:
     ap.add_argument("--version", action="store_true", help="Print version and exit.")
     sub = ap.add_subparsers(dest="cmd")
     sub.add_parser("doctor", help="Report install / dependency-resolution status.")
-    d = sub.add_parser("daemon", help="Run the memory daemon (provisioned via uvx).")
+    d = sub.add_parser("daemon", help="Run the memory daemon installed in this venv.")
     d.add_argument(
         "daemon_args", nargs=argparse.REMAINDER, help="Args forwarded to the daemon (e.g. -v)."
     )
@@ -46,7 +46,9 @@ def main() -> int:
     )
     rem.add_argument("text", nargs="*", help="The memory text to remember.")
     rem.add_argument(
-        "--global", dest="globally", action="store_true",
+        "--global",
+        dest="globally",
+        action="store_true",
         help="Mark this memory as global (cross-project) scope.",
     )
     rem.add_argument("--scope", help="Explicit project slug override.")
@@ -58,7 +60,7 @@ def main() -> int:
     if args.cmd == "doctor":
         print(f"ultan {__version__}")
         print(f"python: {sys.version.split()[0]}")
-        print(f"retrieval extra (agent-mem-search) available: {_retrieval_available()}")
+        print(f"[retrieval] extra installed (daemon + search stack): {_retrieval_available()}")
         return 0
     if args.cmd == "daemon":
         from . import _daemon
@@ -83,9 +85,7 @@ def main() -> int:
         # too, for symmetry and a clean hot path.
         import remember
 
-        return remember.run(
-            " ".join(args.text), globally=args.globally, scope=args.scope
-        )
+        return remember.run(" ".join(args.text), globally=args.globally, scope=args.scope)
 
     ap.print_help()
     return 0

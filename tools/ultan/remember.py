@@ -25,6 +25,7 @@ Behaviour:
   fallback to basename).
 - Prints "queued for librarian" on success.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -53,7 +54,8 @@ def project_slug(cwd: Path) -> str | None:
     try:
         url = subprocess.check_output(
             ["git", "-C", str(cwd), "config", "--get", "remote.origin.url"],
-            stderr=subprocess.DEVNULL, text=True,
+            stderr=subprocess.DEVNULL,
+            text=True,
         ).strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
         url = ""
@@ -139,13 +141,14 @@ def run(text: str, *, globally: bool = False, scope: str | None = None) -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(
-        description="Queue a memory for the agent-mem Librarian."
+    ap = argparse.ArgumentParser(description="Queue a memory for the agent-mem Librarian.")
+    ap.add_argument("text", nargs="*", help="Memory text (use '-' to read from stdin).")
+    ap.add_argument(
+        "--global",
+        dest="globally",
+        action="store_true",
+        help="Mark this memory as global (cross-project) scope.",
     )
-    ap.add_argument("text", nargs="*",
-                    help="Memory text (use '-' to read from stdin).")
-    ap.add_argument("--global", dest="globally", action="store_true",
-                    help="Mark this memory as global (cross-project) scope.")
     ap.add_argument("--scope", help="Explicit project slug override.")
     args = ap.parse_args()
 

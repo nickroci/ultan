@@ -130,8 +130,15 @@ You now have:
 > `settings.json`; with the plugin installed, every hook would then fire twice.
 > `/ultan-install` is only for the from-source path — see *Development setup* below.
 
-> The plugin currently tracks an experimental branch (`@experiment/uv-tool-install`) and
-> will move to a tagged release before wider promotion.
+> **Already running Ultan from source?** If you previously ran `/ultan-install`, remove
+> its hooks *before* installing the plugin or every event will be captured twice:
+> open `~/.claude/settings.json` (or the project's `.claude/settings.json` if you used
+> `--project`) and delete every `hooks` entry whose command points into your agent-mem
+> checkout. Stop any manually started daemon too — the plugin's daemon lazy-starts on
+> its own. Your library needs no migration: `~/.agent-mem/` is shared by both setups.
+
+> The plugin currently installs from the `main` branch (`@main`) and will move to a
+> tagged release before wider promotion.
 
 ### Where your memories live
 
@@ -293,7 +300,7 @@ agent-mem/
     pyproject.toml      ← uv-managed
   src/                  ← Phase-0 hook layer (forked from claude-memory-compiler)
     hooks/              ← UserPromptSubmit, PostToolUse, Stop, ...
-    scripts/            ← compile / flush / lint / query
+    scripts/            ← flush / lint / query
     AGENTS.md           ← entry-schema reference
   tools/
     ultan/              ← /ultan, /ultan-install, /ultan-advisor scripts

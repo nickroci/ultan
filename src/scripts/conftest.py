@@ -1,6 +1,6 @@
 """Shared pytest fixtures for the ``scripts/`` regression tests.
 
-The scripts (``compile.py``, ``lint.py``, ``flush.py``, ``query.py`` and
+The scripts (``lint.py``, ``flush.py``, ``query.py`` and
 their shared ``utils.py``) resolve every storage path through
 ``config.get_config()``, which reads ``AGENT_MEM_HOME`` *at call time*.
 So test isolation is just::

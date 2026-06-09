@@ -32,17 +32,16 @@ in project B. Layout (see `scripts/config.py`):
     index.md                          # master catalog
     log.md                            # append-only build log
     global/
-      concepts/                       # Phase-0 compile target
+      concepts/                       # legacy Phase-0 target (Scholar routes now)
       connections/
       qa/
     projects/<slug>/                  # created lazily; populated in Phase 2
   reports/                            # lint output
   state/
-    state.json                        # compile/query stats
+    state.json                        # query stats (legacy compile keys kept)
     last-flush.json                   # dedup state for flush.py
     session-flush-*.md                # transient context files
   flush.log
-  compile.log
 ```
 
 The store root can be overridden by setting `AGENT_MEM_HOME` (handy for
@@ -51,9 +50,8 @@ tests, or if you don't want the dotfile in `$HOME`).
 The schema file (`AGENTS.md`) and the scripts themselves stay in the code
 checkout — `scripts/config.py` distinguishes `CODE_ROOT` (the checkout) from
 `STORE_DIR` (`~/.agent-mem/`). The Agent SDK is given `STORE_DIR` as its
-`cwd` for compile/query/lint (so Read/Write/Glob land in the knowledge
-tree), and `CODE_ROOT` for `flush.py` (which doesn't touch the corpus
-directly).
+`cwd` for query/lint (so Read/Write/Glob land in the knowledge tree), and
+`CODE_ROOT` for `flush.py` (which doesn't touch the corpus directly).
 
 ### Per-project tagging
 
@@ -67,10 +65,9 @@ A new module `scripts/scope.py` exposes `current_project_slug(cwd)`:
 The SessionEnd and PreCompact hooks call this with the cwd reported in the
 hook's stdin payload (`hook_input["cwd"]`), then pass the slug to `flush.py`
 as a third positional argument. `flush.py` tags each daily-log section with
-`project:<slug>` so a later compile pass (Scholar's job, Phase 2) can route
-lessons into `knowledge/projects/<slug>/`. Phase 0 itself does **not** write
-into per-project dirs — `compile.py` still writes everything to
-`knowledge/global/`, with a `TODO(agent-mem)` noting the deferred routing.
+`project:<slug>` so the daemon's Scholar can route lessons into
+`knowledge/projects/<slug>/`. The flush layer itself does **not** write into
+per-project dirs — routing is entirely the Scholar's job.
 
 The SessionStart hook also resolves the slug and injects a "Current project"
 note alongside the index, so the active agent knows which subtree's lessons
@@ -90,7 +87,7 @@ any cwd. See `_dot_claude_disabled/settings.json` for the template (replace
 
 - `state.json`, `last-flush.json`, and transient `session-flush-*` /
   `flush-context-*` files now live in `~/.agent-mem/state/`.
-- `flush.log` and `compile.log` live in `~/.agent-mem/`.
+- `flush.log` lives in `~/.agent-mem/`.
 - `reports/` (lint output) lives in `~/.agent-mem/reports/`.
 
 The `.gitignore` is simplified accordingly: nothing the runtime writes
@@ -103,8 +100,7 @@ Compiled articles now live under `knowledge/global/...`. Wikilinks should
 be written as `[[global/concepts/foo]]` rather than the upstream
 `[[concepts/foo]]`. `utils.wiki_article_exists` and `count_inbound_links`
 accept both forms as a compatibility shim, so any articles you had under
-the upstream layout still resolve until the next compile pass migrates
-them.
+the upstream layout still resolve until a curation pass migrates them.
 
 ### Cross-platform notes preserved
 
@@ -157,9 +153,10 @@ be added by later agents:
 - Soft interrupts via `pending-nudges.md` / `UserPromptSubmit`.
 - The provisional / confirmed lifecycle and `agent-mem review`.
 
-What works today is exactly the upstream loop, repointed at the user-global
-store and tagged with the project slug: **SessionEnd → flush → daily log →
-(after 6 PM) end-of-day compile → `knowledge/global/`**.
+What works today is the upstream loop's front half, repointed at the
+user-global store and tagged with the project slug: **SessionEnd → flush →
+daily log**. The upstream end-of-day compile step is gone — ingestion into
+`knowledge/` is the daemon's Librarian/Scholar pipeline (see `daemon/`).
 
 ---
 
@@ -174,9 +171,9 @@ capture:
    says "the hook knows the current working directory" without spelling out
    *which* cwd. Use the stdin field.
 2. **The Agent SDK's `cwd` is now ambiguous.** `flush.py` points it at
-   `CODE_ROOT` (no need for the corpus). `compile.py`, `query.py`, `lint.py`
-   point it at `STORE_DIR` (they read/write the corpus). The daemon will
-   need to make the same choice per task — worth adding to PLAN.md §1.
+   `CODE_ROOT` (no need for the corpus). `query.py` and `lint.py` point it
+   at `STORE_DIR` (they read/write the corpus). The daemon makes the same
+   choice per task — worth adding to PLAN.md §1.
 3. **`STATE_DIR` is now a real directory under `STORE_DIR`,** not the
    scripts directory as upstream had it. The hooks call `ensure_store_dirs()`
    so a fresh `~/.agent-mem/` materialises on first use — important for the
@@ -189,10 +186,10 @@ capture:
    wanted per-project daily logs instead, this would need to change.
 5. **Wikilink form change is a breaking schema bump.** Any pre-existing
    `[[concepts/foo]]` links from an upstream user's KB will resolve via the
-   legacy fallback in `utils.wiki_article_exists` for now, but the next
-   compile pass will write `[[global/concepts/foo]]` and the mismatch will
-   accumulate. A one-shot migration script (rewrite links in-place) should
-   land in Phase 1 or 2.
+   legacy fallback in `utils.wiki_article_exists` for now, but the Scholar
+   writes `[[global/concepts/foo]]` and the mismatch will accumulate. A
+   one-shot migration script (rewrite links in-place) should land in
+   Phase 1 or 2.
 6. **PLAN.md §1 shows `connections/` directly under `knowledge/`** in the
    storage diagram, but contextually means under whichever tier. I put
    `connections/` under both `global/` and `projects/<slug>/` to keep the

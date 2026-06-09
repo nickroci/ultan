@@ -28,7 +28,8 @@ from config import get_config
 
 
 class IngestedEntry(TypedDict):
-    """One row in ``state["ingested"]`` — what compile.py wrote about a log."""
+    """One row in ``state["ingested"]`` — written by the removed compile.py;
+    kept so legacy state files on disk still parse."""
 
     hash: str
     compiled_at: str

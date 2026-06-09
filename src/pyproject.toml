@@ -29,7 +29,7 @@ build-backend = "hatchling.build"
 # module names) and the test files.
 sources = ["hooks", "scripts"]
 include = ["hooks/*.py", "scripts/*.py"]
-exclude = ["**/test_*.py", "**/conftest.py", "**/*-*.py"]
+exclude = ["**/test_*.py", "**/conftest.py", "**/*-*.py", "**/__init__.py"]
 
 [tool.ruff]
 line-length = 100
@@ -62,9 +62,10 @@ reportMissingTypeStubs = false
 reportMissingImports = "warning"
 reportUnusedImport = "error"
 reportPrivateUsage = "warning"
-# Hook and script files use sys.path manipulation at runtime to import sibling
-# modules from src/scripts/ (e.g. `import config`, `import scope`). Adding the
-# directories to extraPaths lets pyright resolve those imports without ignores.
+# hooks/ and scripts/ are flat modules installed top-level by the editable
+# wheel (see [tool.hatch.build.targets.wheel] sources), so `import config` /
+# `import scope` resolve at runtime via the venv. extraPaths mirrors that flat
+# layout for pyright's static resolution.
 extraPaths = ["hooks", "scripts"]
 
 [tool.pytest.ini_options]

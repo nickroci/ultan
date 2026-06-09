@@ -1,8 +1,8 @@
 """
 Lint the knowledge base for structural and semantic health.
 
-Runs 7 checks: broken links, orphan pages, orphan sources, stale articles,
-contradictions (LLM), missing backlinks, and sparse articles.
+Runs 5 checks: broken links, orphan pages, contradictions (LLM), missing
+backlinks, and sparse articles.
 
 Usage:
     uv run python lint.py                    # all checks
@@ -31,9 +31,7 @@ from typing_extensions import NotRequired
 from utils import (
     count_inbound_links,
     extract_wikilinks,
-    file_hash,
     get_article_word_count,
-    list_raw_files,
     list_wiki_articles,
     load_state,
     read_all_wiki_content,
@@ -94,46 +92,6 @@ def check_orphan_pages() -> list[Issue]:
                     detail=f"Orphan page: no other articles link to [[{link_target}]]",
                 )
             )
-    return issues
-
-
-def check_orphan_sources() -> list[Issue]:
-    """Check for daily logs that haven't been compiled yet."""
-    state = load_state()
-    ingested = state.get("ingested", {})
-    issues: list[Issue] = []
-    for log_path in list_raw_files():
-        if log_path.name not in ingested:
-            issues.append(
-                Issue(
-                    severity="warning",
-                    check="orphan_source",
-                    file=f"daily/{log_path.name}",
-                    detail=f"Uncompiled daily log: {log_path.name} has not been ingested",
-                )
-            )
-    return issues
-
-
-def check_stale_articles() -> list[Issue]:
-    """Check if source daily logs have changed since compilation."""
-    state = load_state()
-    ingested = state.get("ingested", {})
-    issues: list[Issue] = []
-    for log_path in list_raw_files():
-        rel = log_path.name
-        if rel in ingested:
-            stored_hash = ingested[rel].get("hash", "")
-            current_hash = file_hash(log_path)
-            if stored_hash != current_hash:
-                issues.append(
-                    Issue(
-                        severity="warning",
-                        check="stale_article",
-                        file=f"daily/{rel}",
-                        detail=f"Stale: {rel} has changed since last compilation",
-                    )
-                )
     return issues
 
 
@@ -304,8 +262,6 @@ def main() -> int:
     checks: list[tuple[str, Callable[[], list[Issue]]]] = [
         ("Broken links", check_broken_links),
         ("Orphan pages", check_orphan_pages),
-        ("Orphan sources", check_orphan_sources),
-        ("Stale articles", check_stale_articles),
         ("Missing backlinks", check_missing_backlinks),
         ("Sparse articles", check_sparse_articles),
     ]

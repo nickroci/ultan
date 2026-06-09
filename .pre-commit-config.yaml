@@ -156,3 +156,11 @@ repos:
         files: ^src/
         pass_filenames: false
         stages: [pre-push]
+
+      - id: pytest-root
+        name: pytest (root ultan package)
+        language: system
+        entry: bash -c 'uv run --frozen pytest'
+        files: ^(ultan/|tests/|pyproject\.toml)
+        pass_filenames: false
+        stages: [pre-push]

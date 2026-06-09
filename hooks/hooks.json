@@ -7,6 +7,11 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/ensure-ultan.sh\"",
             "timeout": 60
+          },
+          {
+            "type": "command",
+            "command": "[ -x \"${CLAUDE_PLUGIN_DATA}/bin/ultan\" ] && \"${CLAUDE_PLUGIN_DATA}/bin/ultan\" hook session-start || true",
+            "timeout": 10
           }
         ]
       }
@@ -17,17 +22,6 @@
           {
             "type": "command",
             "command": "[ -x \"${CLAUDE_PLUGIN_DATA}/bin/ultan\" ] && \"${CLAUDE_PLUGIN_DATA}/bin/ultan\" hook user-prompt-submit || true",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "[ -x \"${CLAUDE_PLUGIN_DATA}/bin/ultan\" ] && \"${CLAUDE_PLUGIN_DATA}/bin/ultan\" hook pre-tool-use || true",
             "timeout": 5
           }
         ]
