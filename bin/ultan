@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Plugin-root bin/ is added to the Bash tool's PATH while the plugin is
-# enabled — this is what lets /ultan and /ultan-advisor invoke bare `ultan`
+# enabled — this is what lets /ultan, /ultan-advisor, and `ultan doctor` work
 # without the user installing anything on their own PATH. The real binary
 # lives in the plugin's private data dir (installed by ensure-ultan.sh).
 # CLAUDE_PLUGIN_DATA is not set for command-invoked bash, so fall back to the
@@ -10,5 +10,34 @@ REAL="$DATA/bin/ultan"
 if [ -x "$REAL" ]; then
   exec "$REAL" "$@"
 fi
-echo "ultan: not provisioned yet — the plugin installs Ultan in the background on session start; try again in a minute (see $DATA/install.log)." >&2
+
+# No binary yet — report WHERE the install stands instead of a bare error, so
+# `ultan doctor` answers "is it still installing?" even before the tool env
+# exists. (The full doctor lives in the installed package; this is the
+# pre-install half.)
+LOG="$DATA/install.log"
+PIDFILE="$DATA/.install.pid"
+if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+  echo "ultan: STILL INSTALLING — the background 'uv tool install' is running." >&2
+  [ -f "$LOG" ] && echo "ultan: progress: $(tail -n 1 "$LOG" 2>/dev/null | cut -c1-120)" >&2
+  echo "ultan: first install downloads torch (minutes on a cold cache); try again shortly." >&2
+  exit 1
+fi
+if [ -f "$DATA/.install.lock" ]; then
+  echo "ultan: an install lock exists but no installer process is running —" >&2
+  echo "ultan: it either just started or died mid-install." >&2
+  [ -f "$LOG" ] && echo "ultan: last log line: $(tail -n 1 "$LOG" 2>/dev/null | cut -c1-120)" >&2
+  echo "ultan: a new Claude Code session retries automatically (stale locks clear after 30 min)." >&2
+  exit 1
+fi
+if [ -f "$LOG" ]; then
+  echo "ultan: NOT INSTALLED — the last install attempt ended without producing a binary." >&2
+  echo "ultan: install.log tail:" >&2
+  tail -n 3 "$LOG" 2>/dev/null | sed 's/^/ultan:   /' >&2
+  echo "ultan: a new Claude Code session retries automatically." >&2
+  exit 1
+fi
+echo "ultan: not provisioned yet — the plugin installs Ultan in the background at" >&2
+echo "ultan: session start (progress lands in $DATA/install.log)." >&2
+echo "ultan: if this is a fresh install, start a new session or wait a minute." >&2
 exit 1

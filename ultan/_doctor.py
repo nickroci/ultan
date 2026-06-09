@@ -1,0 +1,137 @@
+"""`ultan doctor` — one-stop health report for the installed runtime.
+
+Answers "is Ultan working, and if not, where is it stuck?": runtime deps,
+daemon process/socket, priming round-trip, capture freshness. Read-only and
+stdlib-only — safe to run at any time, never spawns or writes anything.
+
+Pre-install status ("still downloading torch") is the plugin `bin/ultan`
+wrapper's job: this module can only run once the tool env exists, so the
+wrapper reports install progress whenever the real binary is missing.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import os
+import sys
+import time
+from pathlib import Path
+
+from . import __version__, _daemon, _priming
+
+
+def _fmt_age(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.0f}s ago"
+    if seconds < 3600:
+        return f"{seconds / 60:.0f}m ago"
+    if seconds < 86400:
+        return f"{seconds / 3600:.1f}h ago"
+    return f"{seconds / 86400:.1f}d ago"
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, owned by someone else
+    except OSError:
+        return False
+    return True
+
+
+def _daemon_pid(home: Path) -> int | None:
+    try:
+        return int((home / "daemon.pid").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _mtime_age(path: Path) -> float | None:
+    try:
+        return time.time() - path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def _report_runtime(home: Path) -> bool:
+    """Version + deps section. Returns True when the runtime is broken."""
+    daemon_bin = _daemon._daemon_bin()  # pyright: ignore[reportPrivateUsage]  # intra-package
+    print(f"ultan {__version__} (python {sys.version.split()[0]})")
+    print(f"home: {home}")
+    retrieval = importlib.util.find_spec("bm25") is not None
+    print(f"[retrieval] extra (daemon + search stack): {'installed' if retrieval else 'MISSING'}")
+    if daemon_bin.exists():
+        print(f"daemon binary: {daemon_bin}")
+    else:
+        print("daemon binary: MISSING — install is incomplete; reinstall the ultan tool")
+    return not retrieval or not daemon_bin.exists()
+
+
+def _report_daemon(home: Path) -> tuple[bool, bool]:
+    """Process + socket + priming round-trip. Returns (alive, socket_ok)."""
+    pid = _daemon_pid(home)
+    alive = pid is not None and _pid_alive(pid)
+    print(f"daemon process: {'running (pid ' + str(pid) + ')' if alive else 'not running'}")
+
+    socket_ok = _daemon._socket_answering()  # pyright: ignore[reportPrivateUsage]  # intra-package
+    if socket_ok:
+        print("priming socket: answering")
+    elif alive:
+        print(
+            "priming socket: not answering yet — daemon is WARMING UP "
+            f"(watch {home / 'daemon-spawn.log'})"
+        )
+    else:
+        print("priming socket: absent (daemon lazy-starts on the next prompt)")
+
+    t0 = time.monotonic()
+    md = _priming.get_priming("doctor health probe: packaging daemon memory", k=1)
+    dt_ms = (time.monotonic() - t0) * 1000.0
+    lane = "daemon" if socket_ok else "lexical fallback"
+    print(f"priming round-trip: {'ok' if md else 'no matches'} ({dt_ms:.0f}ms, {lane})")
+    return alive, socket_ok
+
+
+def _report_storage(home: Path) -> None:
+    """Capture stream + library + spawn-stamp section."""
+    events = home / "events.jsonl"
+    age = _mtime_age(events)
+    if age is None:
+        print("capture stream: events.jsonl missing — no hook has captured anything yet")
+    else:
+        size = events.stat().st_size
+        print(f"capture stream: events.jsonl last write {_fmt_age(age)} ({size} bytes)")
+
+    kdir = home / "knowledge"
+    if kdir.is_dir():
+        n = sum(1 for _ in kdir.rglob("*.md"))
+        print(f"knowledge: {n} markdown files")
+    else:
+        print("knowledge: no library yet (first curated memory creates it)")
+
+    stamp_age = _mtime_age(home / ".daemon-spawn-attempt")
+    if stamp_age is not None:
+        print(f"last daemon spawn attempt: {_fmt_age(stamp_age)}")
+
+
+def run() -> int:
+    home = _daemon._home()  # pyright: ignore[reportPrivateUsage]  # intra-package
+    broken = _report_runtime(home)
+    alive, socket_ok = _report_daemon(home)
+    _report_storage(home)
+
+    if broken:
+        verdict = "BROKEN — runtime deps missing (see above)"
+    elif socket_ok:
+        verdict = "HEALTHY"
+    elif alive:
+        verdict = "WARMING — daemon is loading models; priming uses the lexical fallback meanwhile"
+    else:
+        verdict = (
+            "IDLE — daemon down; it lazy-starts on the next prompt (lexical fallback meanwhile)"
+        )
+    print(f"verdict: {verdict}")
+    return 1 if broken else 0

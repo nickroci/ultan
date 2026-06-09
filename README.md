@@ -116,6 +116,11 @@ That's it. Skills and slash commands hot-load the instant you install; `/reload-
 pulls in the hooks and the MCP server. **A full Claude Code restart is not required** — a
 fresh session also works, but you don't need one.
 
+> 🩺 **Wondering what it's doing? Ask Claude to run `ultan doctor`.** It reports
+> whether the background install is still running, the daemon's state (warming /
+> healthy / idle), priming latency, and capture freshness — at any stage, even
+> mid-install.
+
 On first use a `SessionStart` hook provisions that retrieval stack into the plugin's
 private storage **in the background**. Until it finishes, priming falls back to a fast
 lexical scan; after that the daemon **lazy-starts on demand**. Models download anonymously

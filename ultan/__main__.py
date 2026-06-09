@@ -13,16 +13,9 @@ the retrieval stack (agent-mem-search) resolved.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import sys
 
 from . import __version__
-
-
-def _retrieval_available() -> bool:
-    """True if the heavy retrieval stack (agent-mem-search) resolved and
-    installed. `bm25` is a top-level module in the agent-mem-search wheel."""
-    return importlib.util.find_spec("bm25") is not None
 
 
 def main() -> int:
@@ -58,10 +51,9 @@ def main() -> int:
         print(f"ultan {__version__}")
         return 0
     if args.cmd == "doctor":
-        print(f"ultan {__version__}")
-        print(f"python: {sys.version.split()[0]}")
-        print(f"[retrieval] extra installed (daemon + search stack): {_retrieval_available()}")
-        return 0
+        from . import _doctor
+
+        return _doctor.run()
     if args.cmd == "daemon":
         from . import _daemon
 
