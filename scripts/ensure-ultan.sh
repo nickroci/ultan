@@ -24,7 +24,9 @@ BIN="$BIN_DIR/ultan"
 LOCK="$DATA/.install.lock"
 # TODO(release): pin to a published version / tag instead of a branch.
 # ULTAN_SPEC override lets scripts/validate-plugin.sh install the local tree.
-SPEC="${ULTAN_SPEC:-ultan[retrieval] @ git+https://github.com/nickroci/ultan@main}"
+# TESTING: pinned to the experiment branch for pre-merge validation — revert
+# to @main in the merge commit.
+SPEC="${ULTAN_SPEC:-ultan[retrieval] @ git+https://github.com/nickroci/ultan@experiment/uv-tool-install}"
 
 if ! command -v uv >/dev/null 2>&1; then
   echo "ultan: 'uv' not found on PATH — install uv (https://docs.astral.sh/uv) to enable Ultan." >&2
