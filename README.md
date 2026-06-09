@@ -106,9 +106,11 @@ Inside Claude Code:
 /reload-plugins                  # load the hooks + MCP into the running session
 ```
 
-> ⏳ **Give the first run a minute or two.** `/plugin install` downloads the plugin, and
-> the first session then provisions Ultan's retrieval stack (torch + the embedding/rerank
-> models — a few hundred MB) in the background. You can keep working while it finishes.
+> ⏳ **`/plugin install` looks frozen — it isn't.** Claude Code shows **no progress
+> while it downloads the plugin, which can take a minute**. Don't cancel; the
+> "plugin changed" confirmation appears when it's done. After that, the first session
+> provisions Ultan's retrieval stack (torch + the embedding/rerank models — a few
+> hundred MB) in the background, and you can keep working while it finishes.
 
 That's it. Skills and slash commands hot-load the instant you install; `/reload-plugins`
 pulls in the hooks and the MCP server. **A full Claude Code restart is not required** — a
