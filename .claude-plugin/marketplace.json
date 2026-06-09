@@ -1,10 +1,6 @@
 {
   "name": "ultan",
-  "owner": { "name": "Nicholas Holden", "url": "https://github.com/nickroci" },
-  "metadata": {
-    "description": "Ultan — local, brain-inspired markdown memory for Claude Code.",
-    "version": "0.2.0"
-  },
+  "owner": { "name": "Nicholas Holden" },
   "plugins": [
     {
       "name": "ultan",

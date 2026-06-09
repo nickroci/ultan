@@ -204,7 +204,7 @@ async def _run_librarian(question: str, kdir: Path) -> dict:
             library_tools.fully_qualified_tool_name(),
         ],
         mcp_servers={
-            library_tools._SERVER_NAME: library_tools.make_library_mcp_server(kdir),
+            library_tools.SERVER_NAME: library_tools.make_library_mcp_server(kdir),
         },
         max_turns=15,
         system_prompt={"type": "preset", "preset": "claude_code"},
