@@ -36,9 +36,9 @@ def knowledge_dir() -> Path:
     return home() / "knowledge"
 
 
-# Keep model names in sync with daemon/agent_mem_daemon/config.py — this is a
-# separate package coupled to the daemon only via a runtime sys.path shim, so
-# it carries its own copy rather than importing the daemon's config at load.
+# Keep model names in sync with daemon/agent_mem_daemon/config.py — importing
+# the daemon's config eagerly would pull the heavy embeddings stack onto the
+# --help path, so this carries its own copy instead.
 LIBRARIAN_MODEL = "claude-sonnet-4-6"
 SCHOLAR_MODEL = "claude-opus-4-8"
 
@@ -189,11 +189,12 @@ def _make_path_guard(boundary: Path):
 async def _run_librarian(question: str, kdir: Path) -> dict:
     """Invoke the Librarian to find relevant entries. Returns a parsed
     JSON dict, or a safe default if parsing fails."""
-    # Lazy import so missing SDK doesn't kill --help.
+    # Lazy imports: missing SDK must not kill --help, and the daemon's
+    # library_tools transitively pulls the heavy embeddings stack — keep it off
+    # the import-time / --help path. library_tools reuses the daemon's BM25 MCP
+    # server so search behaves identically in both places.
+    from agent_mem_daemon import library_tools
     from claude_agent_sdk import ClaudeAgentOptions
-    # Reuse the daemon's BM25 MCP server.
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "daemon"))
-    from agent_mem_daemon import library_tools  # type: ignore[import-not-found]
 
     options = ClaudeAgentOptions(
         model=LIBRARIAN_MODEL,

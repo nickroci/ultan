@@ -42,20 +42,11 @@ import json
 import os
 import re
 import sys
-from pathlib import Path
 from typing import Any, cast
 
-_THIS_DIR = Path(__file__).resolve().parent
-_CODE_ROOT = _THIS_DIR.parent
-_SCRIPTS_DIR = _CODE_ROOT / "scripts"
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
-if str(_THIS_DIR) not in sys.path:
-    sys.path.insert(0, str(_THIS_DIR))
-
-from _blockers import find_match, load_blockers, rel_to_knowledge  # noqa: E402
-from _events import EventPayload, HookPayload, append_event  # noqa: E402
-from config import get_config  # noqa: E402
+from _blockers import find_match, load_blockers, rel_to_knowledge
+from _events import EventPayload, HookPayload, append_event
+from config import get_config
 
 
 def _read_hook_input() -> HookPayload:

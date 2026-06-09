@@ -36,31 +36,25 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypedDict
 
-# config.py lives next to this file in scripts/. Add scripts/ to sys.path so
-# `import config` works whether we're invoked via `uv run python flush.py …`
-# or directly.
-_SCRIPTS_DIR = Path(__file__).resolve().parent
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
-
-from claude_agent_sdk import (  # noqa: E402
+from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ResultMessage,
     TextBlock,
     query,
 )
-from config import (  # noqa: E402
+from config import (
     CODE_ROOT,
     ensure_store_dirs,
     get_config,
 )
-from utils import State  # noqa: E402
+from utils import State
 
 # compile.py ships next to this script, so this is a genuine,
 # env-independent constant. The store-relative paths (flush state, log
 # files, compile state) are resolved on demand via get_config() instead,
 # so importing this module doesn't touch the filesystem.
+_SCRIPTS_DIR = Path(__file__).resolve().parent
 COMPILE_SCRIPT = _SCRIPTS_DIR / "compile.py"
 
 

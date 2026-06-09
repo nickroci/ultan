@@ -19,25 +19,20 @@ import asyncio
 import sys
 from pathlib import Path
 
-# Make local imports work when uv run sets cwd elsewhere.
-_SCRIPTS_DIR = Path(__file__).resolve().parent
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
-
-from claude_agent_sdk import (  # noqa: E402
+from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ResultMessage,
     TextBlock,
     query,
 )
-from config import (  # noqa: E402
+from config import (
     AGENTS_FILE,
     ensure_store_dirs,
     get_config,
     now_iso,
 )
-from utils import (  # noqa: E402
+from utils import (
     IngestedEntry,
     State,
     file_hash,

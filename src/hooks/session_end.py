@@ -19,23 +19,13 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
-from pathlib import Path
 from typing import Any
 
-_THIS_DIR = Path(__file__).resolve().parent
-_CODE_ROOT = _THIS_DIR.parent
-_SCRIPTS_DIR = _CODE_ROOT / "scripts"
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
-if str(_THIS_DIR) not in sys.path:
-    sys.path.insert(0, str(_THIS_DIR))
-
-from _events import append_event  # noqa: E402
-from _flush_spawn import snapshot_and_spawn_flush  # noqa: E402
-from _hookutil import ensure_store_dirs, parse_stdin, setup_logging  # noqa: E402
-from config import get_config  # noqa: E402
-from scope import current_project_slug  # noqa: E402
+from _events import append_event
+from _flush_spawn import snapshot_and_spawn_flush
+from _hookutil import ensure_store_dirs, parse_stdin, setup_logging
+from config import CODE_ROOT, get_config
+from scope import current_project_slug
 
 MIN_TURNS_TO_FLUSH = 1
 
@@ -91,7 +81,7 @@ def main() -> None:
         session_id,
         project_slug,
         state_dir=store / "state",
-        code_root=_CODE_ROOT,
+        code_root=CODE_ROOT,
         min_turns=MIN_TURNS_TO_FLUSH,
         file_prefix="session-flush",
         log_tag="session-end",
