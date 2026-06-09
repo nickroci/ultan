@@ -306,6 +306,42 @@ def _parse_librarian_json(text: str) -> dict:
 # ── Entry point ─────────────────────────────────────────────────────
 
 
+def run(question: str) -> int:
+    """Ask Ultan for advice on ``question``. Shared entry point for both the
+    ``advisor.py`` CLI and the ``ultan advisor`` subcommand.
+
+    Runs the Librarian (find) → Scholar (synthesise) pipeline and prints the
+    referenced answer to stdout. Read-only — never writes to the library.
+    """
+    question = question.strip()
+    if not question:
+        print("ultan-advisor: empty question", file=sys.stderr)
+        return 2
+
+    kdir = knowledge_dir()
+    if not kdir.exists():
+        print(f"(library not initialised yet at {kdir} — nothing to advise from)")
+        return 0
+
+    try:
+        print("_Ultan: searching library..._", flush=True)
+        findings = asyncio.run(_run_librarian(question, kdir))
+        n_hits = len(findings.get("relevant_entries") or [])
+        print(f"_Ultan: found {n_hits} relevant entr"
+              f"{'y' if n_hits == 1 else 'ies'}, synthesising..._", flush=True)
+        answer = asyncio.run(_run_scholar(question, findings, kdir))
+    except asyncio.TimeoutError:
+        print("ultan-advisor: timed out", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"ultan-advisor: failed: {e}", file=sys.stderr)
+        return 1
+
+    print()
+    print(answer)
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Ask Ultan for advice. Searches the knowledge library and "
@@ -322,33 +358,7 @@ def main() -> int:
     else:
         question = " ".join(args.question)
 
-    question = question.strip()
-    if not question:
-        print("ultan-advisor: empty question", file=sys.stderr)
-        return 2
-
-    kdir = knowledge_dir()
-    if not kdir.exists():
-        print(f"(library not initialised yet at {kdir} — nothing to advise from)")
-        return 0
-
-    try:
-        print(f"_Ultan: searching library..._", flush=True)
-        findings = asyncio.run(_run_librarian(question, kdir))
-        n_hits = len(findings.get("relevant_entries") or [])
-        print(f"_Ultan: found {n_hits} relevant entr"
-              f"{'y' if n_hits == 1 else 'ies'}, synthesising..._", flush=True)
-        answer = asyncio.run(_run_scholar(question, findings, kdir))
-    except asyncio.TimeoutError:
-        print("ultan-advisor: timed out", file=sys.stderr)
-        return 1
-    except Exception as e:
-        print(f"ultan-advisor: failed: {e}", file=sys.stderr)
-        return 1
-
-    print()
-    print(answer)
-    return 0
+    return run(question)
 
 
 if __name__ == "__main__":

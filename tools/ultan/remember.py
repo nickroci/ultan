@@ -112,6 +112,32 @@ def append_event(text: str, *, scope: str | None) -> dict:
     return user_ev
 
 
+def run(text: str, *, globally: bool = False, scope: str | None = None) -> int:
+    """Queue a memory for the Librarian. Shared entry point for both the
+    ``remember.py`` CLI and the ``ultan remember`` subcommand.
+
+    ``scope`` is an explicit project-slug override; when None (and not
+    ``globally``) it's derived from the cwd. ``globally=True`` forces
+    cross-project (global) scope regardless of ``scope``.
+    """
+    text = text.strip()
+    if not text:
+        print("ultan: empty memory text", file=sys.stderr)
+        return 2
+
+    if globally:
+        resolved: str | None = None
+    elif scope:
+        resolved = scope
+    else:
+        resolved = project_slug(Path.cwd())
+
+    ev = append_event(text, scope=resolved)
+    scope_label = f"project:{resolved}" if resolved else "global"
+    print(f"queued for librarian [{scope_label}] session={ev['session_id']}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Queue a memory for the agent-mem Librarian."
@@ -130,22 +156,7 @@ def main() -> int:
     else:
         text = " ".join(args.text)
 
-    text = text.strip()
-    if not text:
-        print("ultan: empty memory text", file=sys.stderr)
-        return 2
-
-    if args.globally:
-        scope: str | None = None
-    elif args.scope:
-        scope = args.scope
-    else:
-        scope = project_slug(Path.cwd())
-
-    ev = append_event(text, scope=scope)
-    scope_label = f"project:{scope}" if scope else "global"
-    print(f"queued for librarian [{scope_label}] session={ev['session_id']}")
-    return 0
+    return run(text, globally=args.globally, scope=args.scope)
 
 
 if __name__ == "__main__":

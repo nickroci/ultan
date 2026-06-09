@@ -5,6 +5,7 @@
   "author": { "name": "Nicholas Holden", "url": "https://github.com/nickroci" },
   "homepage": "https://github.com/nickroci/ultan",
   "license": "MIT",
+  "commands": "./commands/",
   "hooks": "./hooks/hooks.json",
   "mcpServers": {
     "ultan": {
