@@ -37,10 +37,9 @@ build-backend = "hatchling.build"
 packages = ["ultan"]
 
 [tool.uv.workspace]
-# Root (ultan) is the workspace root + a member; tools/search and daemon are
-# the other members. src/ keeps its own pyproject and stays out for now.
-members = ["tools/search", "daemon"]
-exclude = ["src"]
+# Root (ultan) is the workspace root + a member; tools/search, daemon, and src
+# (the hooks) are the other members.
+members = ["tools/search", "daemon", "src"]
 
 [tool.uv.sources]
 agent-mem-daemon = { workspace = true }
