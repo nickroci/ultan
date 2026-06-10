@@ -38,6 +38,16 @@ def pid_path() -> Path:
     return home() / "daemon.pid"
 
 
+def daemon_state_path() -> Path:
+    """Lifecycle flag the daemon maintains for OTHER processes to read:
+    ``{"phase": "warming"|"ready", "pid": N, "since": <iso>}``. Written right
+    after PID acquisition (warming), updated when the priming socket is
+    serving (ready), removed on shutdown. Consumers — `ultan doctor` and the
+    ultan-search skill — use it to say "starting up, retry shortly" instead
+    of "broken" while the first start loads models for minutes."""
+    return home() / "daemon.state"
+
+
 def offset_state_path() -> Path:
     """Where the JSONL tailer persists its last-read offset across daemon
     restarts. See ``ingest._load_offset_state`` / ``_save_offset_state``.

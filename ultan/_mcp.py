@@ -25,7 +25,7 @@ def build_server() -> "FastMCP":
     daemon spawn, no I/O — so it's unit-testable."""
     from mcp.server.fastmcp import FastMCP
 
-    from . import _priming
+    from . import _daemon, _priming
 
     server = FastMCP("ultan")
 
@@ -34,7 +34,15 @@ def build_server() -> "FastMCP":
         """Recall relevant lessons, preferences, and conventions from the
         user's Ultan memory library for the given query. Returns markdown
         wikilink bullets (open them with the Read tool) or a no-match note."""
-        return _priming.get_priming(query, k=5) or "(no relevant Ultan memory for this query)"
+        result = _priming.get_priming(query, k=5) or "(no relevant Ultan memory for this query)"
+        # Fallback honesty: during warmup results come from the lexical scan,
+        # and a "no match" may just mean the ranked index isn't serving yet.
+        if _daemon.status() == "warming":
+            return (
+                "*(Ultan daemon is warming up — lexical-fallback results; "
+                "retry in a minute or two for full ranked recall.)*\n\n" + result
+            )
+        return result
 
     return server
 

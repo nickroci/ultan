@@ -29,6 +29,7 @@ from .buffer import DEFAULT_INACTIVITY_SECONDS, DEFAULT_MAX_TURNS, RollingBuffer
 from .ingest import DEFAULT_POLL_INTERVAL, JsonlTailer
 from .logging_setup import configure as configure_logging
 from .paths import (
+    daemon_state_path,
     ensure_home,
     events_path,
     knowledge_dir,
@@ -111,6 +112,42 @@ def release_pid_file(path: Path) -> None:
         if current == os.getpid():
             path.unlink()
     except OSError:
+        pass
+
+
+def write_daemon_state(phase: str) -> None:
+    """Publish the lifecycle flag other processes read (see
+    ``paths.daemon_state_path``). Best-effort — a failed write must never
+    block startup; consumers fall back to pid/socket inference."""
+    import json  # noqa: PLC0415 — tiny, cold path
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    try:
+        daemon_state_path().write_text(
+            json.dumps(
+                {
+                    "phase": phase,
+                    "pid": os.getpid(),
+                    "since": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                }
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def clear_daemon_state() -> None:
+    """Best-effort remove of the lifecycle flag. Never raises. Only clears a
+    flag this process wrote — a duplicate daemon exiting must not erase the
+    live daemon's state."""
+    import json  # noqa: PLC0415
+
+    try:
+        raw = json.loads(daemon_state_path().read_text(encoding="utf-8"))
+        if raw.get("pid") == os.getpid():
+            daemon_state_path().unlink()
+    except (OSError, ValueError):
         pass
 
 
@@ -341,6 +378,9 @@ def run(args: argparse.Namespace) -> int:
     # files on its way out. acquire_pid_file writes only to raw stderr, which
     # the spawner tees to daemon-spawn.log (see ultan/_daemon.py).
     acquire_pid_file(pidfile)
+    # We own the lifecycle now — flag "warming" so doctor/the search skill
+    # can say "starting up" instead of "broken" during the model load.
+    write_daemon_state("warming")
 
     log = configure_logging(
         logfile,
@@ -405,6 +445,9 @@ def run(args: argparse.Namespace) -> int:
     sched.start()
     tailer_thread.start()
     rpc_thread.start()
+    # Socket is being served — flip the lifecycle flag to ready.
+    write_daemon_state("ready")
+    log.info("daemon ready: priming socket serving")
     try:
         while not stop_event.is_set():
             stop_event.wait(timeout=1.0)
@@ -435,6 +478,7 @@ def run(args: argparse.Namespace) -> int:
             sched.stats.queue_high_water,
             sched.stats.scholar_skipped_backpressure,
         )
+        clear_daemon_state()
         release_pid_file(pidfile)
 
     return 0

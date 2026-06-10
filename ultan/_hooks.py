@@ -73,6 +73,15 @@ def _user_prompt_submit(payload: dict[str, Any]) -> int:
         prompt if isinstance(prompt, str) else "",
         session_id=session_id if isinstance(session_id, str) else None,
     )
+    # Fallback honesty: while the daemon warms (first start loads models for
+    # minutes), priming comes from the crude lexical scan. Say so, so the
+    # agent treats the bullets as provisional rather than the library's best.
+    if md and _daemon.status() == "warming":
+        md += (
+            "\n*Ultan's daemon is still warming up — the bullets above are "
+            "lexical-fallback results; full ranked recall returns within a "
+            "minute or two.*\n"
+        )
     _emit_additional_context("UserPromptSubmit", md)
     return 0
 
