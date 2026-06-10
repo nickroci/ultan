@@ -144,9 +144,8 @@ You now have:
 > checkout. Stop any manually started daemon too — the plugin's daemon lazy-starts on
 > its own. Your library needs no migration: `~/.agent-mem/` is shared by both setups.
 
-> The plugin currently installs from `@experiment/uv-tool-install` for pre-merge
-> validation; it moves to `@main` at merge, and to a tagged release before wider
-> promotion.
+> The plugin currently installs from the `main` branch (`@main`) and will move to a
+> tagged release before wider promotion.
 
 ### Where your memories live
 
