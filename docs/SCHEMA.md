@@ -3,10 +3,10 @@
 The on-disk schema for the `agent-mem` knowledge store now lives in
 [`../src/AGENTS.md`](../src/AGENTS.md) — the single source of truth.
 
-That file is loaded verbatim by `src/scripts/compile.py` as the compiler
-specification passed to the Claude Agent SDK, so keeping the schema there
-(rather than duplicated in two places) is what guarantees the running system
-and the documented schema do not drift.
+That file is the schema reference the Librarian/Scholar outputs must conform
+to. (It was once loaded verbatim by the now-removed `src/scripts/compile.py`;
+today the daemon's curator prompts and `_schemas.py` validators encode the
+same contract, with `src/AGENTS.md` as the human-readable source of truth.)
 
 Anything that used to live here — directory layout, frontmatter field
 reference, invariants, project-slug recipe, fully-worked example, log/index

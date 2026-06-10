@@ -18,19 +18,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional, cast
 
-_THIS_DIR = Path(__file__).resolve().parent
-_CODE_ROOT = _THIS_DIR.parent
-_SCRIPTS_DIR = _CODE_ROOT / "scripts"
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
-if str(_THIS_DIR) not in sys.path:
-    sys.path.insert(0, str(_THIS_DIR))
-
-from _events import HookPayload, append_event  # noqa: E402
-from _hookutil import ensure_store_dirs  # noqa: E402
-from aliases import session_bucket  # noqa: E402
-from config import get_config  # noqa: E402
-from scope import current_project_slug  # noqa: E402
+from _events import HookPayload, append_event
+from _hookutil import ensure_store_dirs
+from aliases import session_bucket
+from config import get_config
+from scope import current_project_slug
 
 MAX_CONTEXT_CHARS = 20_000
 MAX_LOG_LINES = 30

@@ -1,10 +1,11 @@
 # AGENTS.md — agent-mem Knowledge Base Schema (Compiler Specification)
 
 > This file is the **single source of truth** for the on-disk schema of the
-> `agent-mem` knowledge store. The Claude Agent SDK reads it verbatim as the
-> "compiler specification" (see `scripts/compile.py` — `schema = AGENTS_FILE.read_text()`).
-> Everything the Librarian and Scholar write must conform to what is described
-> here.
+> `agent-mem` knowledge store — the "compiler specification" in this system's
+> compiler analogy. (The script that once loaded it verbatim, `scripts/compile.py`,
+> is gone; the daemon's curator prompts and `_schemas.py` validators encode the
+> same contract.) Everything the Librarian and Scholar write must conform to
+> what is described here.
 >
 > Architectural background (the two-tier curator, the daemon, BM25, interrupts)
 > lives in `../PLAN.md`. Role prompts live in `../docs/LIBRARIAN_PROMPT.md` and

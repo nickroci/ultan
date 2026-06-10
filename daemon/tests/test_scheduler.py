@@ -1116,3 +1116,42 @@ def test_backpressure_drop_releases_repair_markers(caplog):
     finally:
         sched.stop()
         repair_queue.reset_queue()
+
+
+# ── ScholarWorker: timeout requeue ───────────────────────────────────
+
+
+def test_scholar_worker_requeues_timeout_batch_with_marker() -> None:
+    """When the scholar callable returns packets (its timed-out verdict), the
+    worker re-enqueues them with a bumped ``scholar_retries`` marker so
+    scholar.review can drop the batch if it times out AGAIN — one retry,
+    never a loop, and no silently lost proposals."""
+    import queue as queue_mod
+
+    from agent_mem_daemon.scheduler import SchedulerStats, ScholarWorker
+
+    q: "queue_mod.Queue[EvidencePacket]" = queue_mod.Queue()
+    drains: List[List[Dict[str, Any]]] = []
+
+    def _fn(batch: List[EvidencePacket]):
+        drains.append([dict(p) for p in batch])  # snapshot before mutation
+        return list(batch) if len(drains) == 1 else None
+
+    worker = ScholarWorker(
+        in_queue=q,
+        scholar_fn=_fn,
+        every_k=1,
+        every_m_secs=999.0,
+        max_batch=10,
+        stats=SchedulerStats(),
+    )
+    q.put(_empty_packet({"session_id": "s1"}))
+    worker.start()
+    try:
+        worker.notify()
+        _wait_for(lambda: len(drains) >= 2)
+    finally:
+        worker.stop(final_drain=False)
+
+    assert drains[0][0].get("scholar_retries") in (None, 0)  # first attempt unmarked
+    assert drains[1][0].get("scholar_retries") == 1  # retry carries the marker

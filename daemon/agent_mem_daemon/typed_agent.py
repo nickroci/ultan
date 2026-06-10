@@ -40,6 +40,8 @@ way. So "never submitted" is just a terminal validation failure.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
@@ -291,13 +293,29 @@ async def run_typed(
 
     run = _query or query
     submitted = False
-    async for message in run(prompt=_single_user_message(prompt), options=options):
-        if isinstance(message, AssistantMessage):
-            for block in message.content:
-                if isinstance(block, ToolUseBlock) and block.name.endswith(SUBMIT_TOOL_NAME):
-                    submitted = True
-        elif isinstance(message, ResultMessage):
-            state.cost_usd = float(message.total_cost_usd or 0.0)
+    stream = run(prompt=_single_user_message(prompt), options=options)
+    try:
+        async for message in stream:
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, ToolUseBlock) and block.name.endswith(SUBMIT_TOOL_NAME):
+                        submitted = True
+            elif isinstance(message, ResultMessage):
+                state.cost_usd = float(message.total_cost_usd or 0.0)
+    except asyncio.CancelledError:
+        # A wait_for timeout (or daemon shutdown) cancelled us mid-stream.
+        # Close the SDK generator NOW: its close path terminates the spawned
+        # CLI subprocess (SIGTERM, then SIGKILL after grace). Abandoning the
+        # generator instead leaks a live `claude` process — the cancelled
+        # task still references it mid-iteration, so not even asyncio.run's
+        # shutdown_asyncgens reaches it. shield() keeps the close itself from
+        # being re-cancelled; the wait_for bounds a wedged transport so the
+        # timeout path can't hang.
+        aclose = getattr(stream, "aclose", None)
+        if aclose is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(asyncio.shield(aclose()), timeout=15.0)
+        raise
 
     if state.result is None:
         detail = state.last_error if submitted else "the model never called submit_result"

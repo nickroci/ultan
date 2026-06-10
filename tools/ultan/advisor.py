@@ -17,6 +17,7 @@ Stdlib + claude-agent-sdk only. Reuses the daemon's
 ``agent_mem_daemon.library_tools.make_library_mcp_server`` so BM25 is
 the same in both places. Pure read — never writes to disk.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -36,9 +37,9 @@ def knowledge_dir() -> Path:
     return home() / "knowledge"
 
 
-# Keep model names in sync with daemon/agent_mem_daemon/config.py — this is a
-# separate package coupled to the daemon only via a runtime sys.path shim, so
-# it carries its own copy rather than importing the daemon's config at load.
+# Keep model names in sync with daemon/agent_mem_daemon/config.py — importing
+# the daemon's config eagerly would pull the heavy embeddings stack onto the
+# --help path, so this carries its own copy instead.
 LIBRARIAN_MODEL = "claude-sonnet-4-6"
 SCHOLAR_MODEL = "claude-opus-4-8"
 
@@ -143,6 +144,7 @@ async def _drain_query(prompt: str, options) -> str:
         TextBlock,
         query,
     )
+
     out = ""
     async for msg in query(prompt=_prompt_stream(prompt), options=options):
         if isinstance(msg, AssistantMessage):
@@ -165,12 +167,11 @@ def _make_path_guard(boundary: Path):
             PermissionResultAllow,
             PermissionResultDeny,
         )
+
         if name in PATH_FREE:
             return PermissionResultAllow(updated_input=input_)
         if name not in PATH_KEYS:
-            return PermissionResultDeny(
-                message=f"tool {name!r} not allowed for the advisor"
-            )
+            return PermissionResultDeny(message=f"tool {name!r} not allowed for the advisor")
         for key in PATH_KEYS[name]:
             raw = input_.get(key)
             if raw is None:
@@ -178,9 +179,7 @@ def _make_path_guard(boundary: Path):
             try:
                 Path(str(raw)).expanduser().resolve().relative_to(root)
             except (ValueError, OSError):
-                return PermissionResultDeny(
-                    message=f"path {raw!r} is outside {root}"
-                )
+                return PermissionResultDeny(message=f"path {raw!r} is outside {root}")
         return PermissionResultAllow(updated_input=input_)
 
     return _can_use_tool
@@ -189,21 +188,24 @@ def _make_path_guard(boundary: Path):
 async def _run_librarian(question: str, kdir: Path) -> dict:
     """Invoke the Librarian to find relevant entries. Returns a parsed
     JSON dict, or a safe default if parsing fails."""
-    # Lazy import so missing SDK doesn't kill --help.
+    # Lazy imports: missing SDK must not kill --help, and the daemon's
+    # library_tools transitively pulls the heavy embeddings stack — keep it off
+    # the import-time / --help path. library_tools reuses the daemon's BM25 MCP
+    # server so search behaves identically in both places.
+    from agent_mem_daemon import library_tools
     from claude_agent_sdk import ClaudeAgentOptions
-    # Reuse the daemon's BM25 MCP server.
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "daemon"))
-    from agent_mem_daemon import library_tools  # type: ignore[import-not-found]
 
     options = ClaudeAgentOptions(
         model=LIBRARIAN_MODEL,
         cwd=str(kdir),
         allowed_tools=[
-            "Read", "Glob", "Grep",
+            "Read",
+            "Glob",
+            "Grep",
             library_tools.fully_qualified_tool_name(),
         ],
         mcp_servers={
-            library_tools._SERVER_NAME: library_tools.make_library_mcp_server(kdir),
+            library_tools.SERVER_NAME: library_tools.make_library_mcp_server(kdir),
         },
         max_turns=15,
         system_prompt={"type": "preset", "preset": "claude_code"},
@@ -237,10 +239,12 @@ async def _run_scholar(question: str, findings: dict, kdir: Path) -> str:
         can_use_tool=_make_path_guard(kdir),
         env={**os.environ, "CLAUDE_INVOKED_BY": "ultan_advisor"},
     )
-    return (await asyncio.wait_for(
-        _drain_query(prompt, options),
-        timeout=SCHOLAR_TIMEOUT_S,
-    )).strip()
+    return (
+        await asyncio.wait_for(
+            _drain_query(prompt, options),
+            timeout=SCHOLAR_TIMEOUT_S,
+        )
+    ).strip()
 
 
 def _parse_librarian_json(text: str) -> dict:
@@ -285,15 +289,15 @@ def _parse_librarian_json(text: str) -> dict:
         return {
             "relevant_entries": [],
             "notes_for_scholar": "(Librarian returned no parseable JSON; raw text: "
-                                 + text[:500] + ")",
+            + text[:500]
+            + ")",
         }
     try:
         parsed = json.loads(blocks[-1])
     except json.JSONDecodeError:
         return {
             "relevant_entries": [],
-            "notes_for_scholar": "(Librarian JSON malformed; raw text: "
-                                 + blocks[-1][:500] + ")",
+            "notes_for_scholar": "(Librarian JSON malformed; raw text: " + blocks[-1][:500] + ")",
         }
     if not isinstance(parsed, dict):
         return {"relevant_entries": [], "notes_for_scholar": str(parsed)[:500]}
@@ -305,22 +309,13 @@ def _parse_librarian_json(text: str) -> dict:
 # ── Entry point ─────────────────────────────────────────────────────
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(
-        description="Ask Ultan for advice. Searches the knowledge library and "
-                    "synthesises a referenced answer.",
-    )
-    ap.add_argument("question", nargs="*",
-                    help="The question or decision. Use '-' to read from stdin.")
-    args = ap.parse_args()
+def run(question: str) -> int:
+    """Ask Ultan for advice on ``question``. Shared entry point for both the
+    ``advisor.py`` CLI and the ``ultan advisor`` subcommand.
 
-    if args.question == ["-"] or not args.question:
-        if sys.stdin.isatty() and not args.question:
-            ap.error("no question supplied (pass it as args, or pipe via '-')")
-        question = sys.stdin.read()
-    else:
-        question = " ".join(args.question)
-
+    Runs the Librarian (find) → Scholar (synthesise) pipeline and prints the
+    referenced answer to stdout. Read-only — never writes to the library.
+    """
     question = question.strip()
     if not question:
         print("ultan-advisor: empty question", file=sys.stderr)
@@ -332,11 +327,14 @@ def main() -> int:
         return 0
 
     try:
-        print(f"_Ultan: searching library..._", flush=True)
+        print("_Ultan: searching library..._", flush=True)
         findings = asyncio.run(_run_librarian(question, kdir))
         n_hits = len(findings.get("relevant_entries") or [])
-        print(f"_Ultan: found {n_hits} relevant entr"
-              f"{'y' if n_hits == 1 else 'ies'}, synthesising..._", flush=True)
+        print(
+            f"_Ultan: found {n_hits} relevant entr"
+            f"{'y' if n_hits == 1 else 'ies'}, synthesising..._",
+            flush=True,
+        )
         answer = asyncio.run(_run_scholar(question, findings, kdir))
     except asyncio.TimeoutError:
         print("ultan-advisor: timed out", file=sys.stderr)
@@ -348,6 +346,26 @@ def main() -> int:
     print()
     print(answer)
     return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="Ask Ultan for advice. Searches the knowledge library and "
+        "synthesises a referenced answer.",
+    )
+    ap.add_argument(
+        "question", nargs="*", help="The question or decision. Use '-' to read from stdin."
+    )
+    args = ap.parse_args()
+
+    if args.question == ["-"] or not args.question:
+        if sys.stdin.isatty() and not args.question:
+            ap.error("no question supplied (pass it as args, or pipe via '-')")
+        question = sys.stdin.read()
+    else:
+        question = " ".join(args.question)
+
+    return run(question)
 
 
 if __name__ == "__main__":

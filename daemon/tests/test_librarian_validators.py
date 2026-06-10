@@ -261,3 +261,43 @@ def test_run_librarian_agent_sets_recursion_guard(
     monkeypatch.setattr(librarian, "run_typed", fake_run_typed)
     librarian.run_librarian_agent("prompt", k, timeout_s=5.0)
     assert captured.get("env", {}).get("CLAUDE_INVOKED_BY") == "agent_mem_daemon"
+
+
+# ── validate_user_asserted_filed: /ultan memories must be filed ───────────────
+
+
+def test_user_asserted_scan_with_no_proposals_is_bounced(tmp_path: Path) -> None:
+    """The prompt instructs the Librarian to FILE [USER-ASSERTED] turns, not
+    veto them — yet a model observably returned zero proposals for one,
+    silently discarding an explicit /ultan memory. The boundary validator
+    enforces the contract with a corrective ModelRetry."""
+    k = seed_scholar_tree(tmp_path)
+    deps = LibrarianDeps(knowledge_dir=k, user_asserted_turns=1)
+    with pytest.raises(ModelRetry) as exc:
+        librarian.validate_user_asserted_filed(deps, _proposal([]))
+    assert "USER-ASSERTED" in str(exc.value)
+
+
+def test_user_asserted_scan_with_a_proposal_passes(tmp_path: Path) -> None:
+    k = seed_scholar_tree(tmp_path)
+    deps = LibrarianDeps(knowledge_dir=k, user_asserted_turns=2)
+    p = _proposal(
+        [
+            {
+                "action": "write_entry",
+                "path": "global/python/asserted.md",
+                "body": "",
+                "reasoning": "user asked to keep this",
+            }
+        ]
+    )
+    assert librarian.validate_user_asserted_filed(deps, p) is p
+
+
+def test_scan_without_user_asserted_turns_may_veto_everything(tmp_path: Path) -> None:
+    """An ordinary scan is free to propose nothing — the validator only arms
+    when the transcript carried [USER-ASSERTED] turns."""
+    k = seed_scholar_tree(tmp_path)
+    deps = LibrarianDeps(knowledge_dir=k)  # user_asserted_turns defaults to 0
+    out = librarian.validate_user_asserted_filed(deps, _proposal([]))
+    assert out.proposals == []

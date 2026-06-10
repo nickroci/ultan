@@ -25,6 +25,7 @@ Behaviour:
   fallback to basename).
 - Prints "queued for librarian" on success.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -53,7 +54,8 @@ def project_slug(cwd: Path) -> str | None:
     try:
         url = subprocess.check_output(
             ["git", "-C", str(cwd), "config", "--get", "remote.origin.url"],
-            stderr=subprocess.DEVNULL, text=True,
+            stderr=subprocess.DEVNULL,
+            text=True,
         ).strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
         url = ""
@@ -112,14 +114,41 @@ def append_event(text: str, *, scope: str | None) -> dict:
     return user_ev
 
 
+def run(text: str, *, globally: bool = False, scope: str | None = None) -> int:
+    """Queue a memory for the Librarian. Shared entry point for both the
+    ``remember.py`` CLI and the ``ultan remember`` subcommand.
+
+    ``scope`` is an explicit project-slug override; when None (and not
+    ``globally``) it's derived from the cwd. ``globally=True`` forces
+    cross-project (global) scope regardless of ``scope``.
+    """
+    text = text.strip()
+    if not text:
+        print("ultan: empty memory text", file=sys.stderr)
+        return 2
+
+    if globally:
+        resolved: str | None = None
+    elif scope:
+        resolved = scope
+    else:
+        resolved = project_slug(Path.cwd())
+
+    ev = append_event(text, scope=resolved)
+    scope_label = f"project:{resolved}" if resolved else "global"
+    print(f"queued for librarian [{scope_label}] session={ev['session_id']}")
+    return 0
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(
-        description="Queue a memory for the agent-mem Librarian."
+    ap = argparse.ArgumentParser(description="Queue a memory for the agent-mem Librarian.")
+    ap.add_argument("text", nargs="*", help="Memory text (use '-' to read from stdin).")
+    ap.add_argument(
+        "--global",
+        dest="globally",
+        action="store_true",
+        help="Mark this memory as global (cross-project) scope.",
     )
-    ap.add_argument("text", nargs="*",
-                    help="Memory text (use '-' to read from stdin).")
-    ap.add_argument("--global", dest="globally", action="store_true",
-                    help="Mark this memory as global (cross-project) scope.")
     ap.add_argument("--scope", help="Explicit project slug override.")
     args = ap.parse_args()
 
@@ -130,22 +159,7 @@ def main() -> int:
     else:
         text = " ".join(args.text)
 
-    text = text.strip()
-    if not text:
-        print("ultan: empty memory text", file=sys.stderr)
-        return 2
-
-    if args.globally:
-        scope: str | None = None
-    elif args.scope:
-        scope = args.scope
-    else:
-        scope = project_slug(Path.cwd())
-
-    ev = append_event(text, scope=scope)
-    scope_label = f"project:{scope}" if scope else "global"
-    print(f"queued for librarian [{scope_label}] session={ev['session_id']}")
-    return 0
+    return run(text, globally=args.globally, scope=args.scope)
 
 
 if __name__ == "__main__":

@@ -335,6 +335,13 @@ def run(args: argparse.Namespace) -> int:
     logfile = args.log_file or log_path()
     pidfile = args.pid_file or pid_path()
 
+    # Claim the PID file BEFORE configure_logging: configure_logging rotates
+    # daemon.log when it grows past the cap, so a rejected duplicate spawn
+    # (acquire_pid_file → SystemExit(2)) must not touch the live daemon's log
+    # files on its way out. acquire_pid_file writes only to raw stderr, which
+    # the spawner tees to daemon-spawn.log (see ultan/_daemon.py).
+    acquire_pid_file(pidfile)
+
     log = configure_logging(
         logfile,
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -344,8 +351,6 @@ def run(args: argparse.Namespace) -> int:
     log.info("  events file: %s", events_file)
     log.info("  log file:    %s", logfile)
     log.info("  pid file:    %s", pidfile)
-
-    acquire_pid_file(pidfile)
 
     # Verify indexes are in sync with the markdown source of truth.
     # Rebuilds on drift (manual edits, git pull from another machine,

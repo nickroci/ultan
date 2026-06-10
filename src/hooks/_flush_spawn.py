@@ -173,6 +173,15 @@ def snapshot_and_spawn_flush(
         return None
 
     flush_script = code_root / "scripts" / "flush.py"
+    if not flush_script.exists():
+        # Installed-wheel mode: config.CODE_ROOT resolves into site-packages'
+        # parent, where there is no scripts/flush.py (or uv project) to spawn.
+        # Flush is a repo-mode feature — degrade to a logged no-op instead of
+        # pointing `uv run` at a lib directory.
+        logging.info(
+            "SKIP[%s]: flush.py not found at %s (installed-wheel mode)", log_tag, flush_script
+        )
+        return None
     cmd = [
         "uv",
         "run",

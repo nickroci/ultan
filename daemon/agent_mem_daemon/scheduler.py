@@ -57,7 +57,7 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, cast
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, cast
 
 from . import librarian as librarian_mod
 from . import repair_queue
@@ -83,7 +83,10 @@ DEFAULT_SWEEP_INTERVAL_SECS = 300.0  # buffer.sweep cadence
 
 
 LibrarianFn = Callable[[Dict[str, Any]], EvidencePacket]
-ScholarFn = Callable[[List[EvidencePacket]], None]
+# The scholar callable normally returns None; on an agent TIMEOUT it returns
+# the packets that deserve one retry, and the worker re-enqueues them with a
+# bumped ``scholar_retries`` marker (see scholar.review).
+ScholarFn = Callable[[List[EvidencePacket]], "Optional[Sequence[Mapping[str, Any]]]"]
 
 
 def _release_repair_fingerprints(packet_dict: Dict[str, Any], session_id: str) -> None:
@@ -343,12 +346,25 @@ class ScholarWorker:
                 len(batch),
                 self._q.qsize(),
             )
+            requeue: "Optional[Sequence[Mapping[str, Any]]]" = None
             try:
-                self._fn(batch)
+                requeue = self._fn(batch)
             except Exception:
                 log.exception(
                     "scholar callable raised; batch of %d dropped",
                     len(batch),
+                )
+            if requeue:
+                # Agent timeout — re-enqueue for exactly one retry. The bumped
+                # marker makes scholar.review drop the batch if it times out
+                # again, so this can never loop.
+                for raw in requeue:
+                    p = cast(EvidencePacket, raw)
+                    p["scholar_retries"] = int(p.get("scholar_retries", 0) or 0) + 1
+                    self._q.put(p)
+                log.warning(
+                    "scholar-worker: requeued %d packet(s) for retry after agent timeout",
+                    len(requeue),
                 )
             self._stats.scholar_runs += 1
             self._stats.packets_drained_total += len(batch)

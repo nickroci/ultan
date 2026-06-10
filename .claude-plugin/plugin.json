@@ -1,0 +1,19 @@
+{
+  "name": "ultan",
+  "version": "0.2.0",
+  "description": "Local, brain-inspired markdown memory for Claude Code — a curator pair gates writes by surprise, three retrieval tiers surface what matters, all on your disk.",
+  "author": { "name": "Nicholas Holden", "url": "https://github.com/nickroci" },
+  "homepage": "https://github.com/nickroci/ultan",
+  "license": "MIT",
+  "mcpServers": {
+    "ultan": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/nickroci/ultan@main",
+        "ultan",
+        "mcp"
+      ]
+    }
+  }
+}

@@ -1,0 +1,72 @@
+[project]
+name = "agent-mem-tools"
+version = "0.1.0"
+description = "Ultan slash-command logic (advisor / remember / install) — the /ultan, /ultan-advisor and /ultan-install entry points."
+authors = [{ name = "Nicholas Holden", email = "nicholas.holden@banqora.com" }]
+requires-python = ">=3.12"
+# remember.py is stdlib-only but writes the daemon's events.jsonl contract,
+# which is owned by the agent-mem (src) package — depend on it so the schema
+# stays co-versioned. advisor.py drives the Librarian/Scholar via the Claude
+# Agent SDK and reuses the daemon's BM25 library_tools, so it needs both.
+dependencies = [
+    "agent-mem",
+    "agent-mem-daemon",
+    "claude-agent-sdk>=0.1.29",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# Flat module layout: advisor.py, remember.py, install.py live at package root
+# and install top-level (same pattern as tools/search).
+only-include = ["advisor.py", "remember.py", "install.py"]
+sources = ["."]
+
+[tool.uv.sources]
+agent-mem = { workspace = true }
+agent-mem-daemon = { workspace = true }
+
+[dependency-groups]
+# CI's `uv sync --locked` in this dir installs only this package + its dev
+# group — without these the lint/type/test steps have no tools to run.
+dev = [
+    "pytest>=8.0",
+    "pyright>=1.1.409",
+    "ruff>=0.15",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [".venv", "build", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "C901", "PLR0912", "PLR0915", "PLC0415"]
+
+[tool.ruff.lint.per-file-ignores]
+# advisor.py carries long literal Librarian/Scholar prompt strings (E501 is
+# unavoidable for embedded prose) and deliberately lazy-imports the heavy
+# claude-agent-sdk / agent_mem_daemon stack inside functions (PLC0415) so the
+# --help and import paths stay light — this is the hot-path design, not a smell.
+# _parse_librarian_json is an inherently branchy best-effort JSON scanner.
+"advisor.py" = ["E501", "PLC0415", "C901", "PLR0912", "PLR0915"]
+
+[tool.pyright]
+include = ["advisor.py", "remember.py", "install.py"]
+exclude = [".venv", "**/__pycache__", "build", "dist"]
+# Workspace member — resolves against the shared root venv (this package has
+# no .venv of its own, unlike the pre-workspace members).
+venvPath = "../.."
+venv = ".venv"
+pythonVersion = "3.12"
+# TODO(typing): graduate to strict like the other members. These modules
+# predate the CI gate and lean on the partially-typed claude-agent-sdk —
+# strict currently reports ~83 unknown-type errors that need real annotation
+# work (advisor.py's SDK callbacks especially), not a config flip.
+typeCheckingMode = "basic"
+reportMissingTypeStubs = false
+reportMissingImports = "warning"
+reportUnusedImport = "error"
+reportPrivateUsage = "warning"

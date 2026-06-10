@@ -14,6 +14,8 @@ Async tests run under pytest-asyncio's auto mode (``asyncio_mode = "auto"``).
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from claude_agent_sdk import AssistantMessage, ResultMessage, ToolUseBlock
 from pydantic import BaseModel, field_validator
@@ -249,3 +251,53 @@ def test_submit_tool_ref_is_namespaced() -> None:
 async def test_single_user_message_yields_one_streaming_user_message() -> None:
     msgs = [m async for m in _single_user_message("hi")]
     assert msgs == [{"type": "user", "message": {"role": "user", "content": "hi"}}]
+
+
+# ── run_typed: cancellation must close the SDK stream ─────────────────────────
+
+
+async def test_run_typed_cancellation_closes_the_stream() -> None:
+    """A ``wait_for`` timeout cancels run_typed mid-stream. run_typed must
+    close the SDK stream explicitly — the stream's close path is what
+    terminates the spawned CLI subprocess. Abandoning it leaks a live
+    ``claude`` process (observed in production: a laptop-sleep-stretched
+    timeout left one running for 7h40m at ~3% CPU).
+
+    The instrumented stream is deliberately NOT an async generator, so no
+    implicit finalisation can close it — only run_typed's cancellation
+    handler. This test fails if that handler is removed."""
+
+    class _Stream:
+        def __init__(self) -> None:
+            self.aclosed = False
+
+        def __aiter__(self) -> "_Stream":
+            return self
+
+        async def __anext__(self) -> object:
+            await asyncio.sleep(3600)  # park forever — the timeout cancels us here
+            raise StopAsyncIteration
+
+        async def aclose(self) -> None:
+            self.aclosed = True
+
+    stream = _Stream()
+
+    def fake_query(*, prompt: object, options: object) -> _Stream:  # noqa: ARG001
+        return stream
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(
+            run_typed(
+                "p",
+                Decision,
+                deps=None,
+                system_prompt="s",
+                model="m",
+                mcp_servers={},
+                allowed_tools=[],
+                _query=fake_query,
+            ),
+            timeout=0.05,
+        )
+    assert stream.aclosed, "cancellation must aclose() the SDK stream (subprocess leak)"

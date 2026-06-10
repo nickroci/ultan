@@ -25,10 +25,8 @@ import os
 os.environ["CLAUDE_INVOKED_BY"] = "memory_flush"
 
 import asyncio
-import hashlib
 import json
 import logging
-import subprocess
 import sys
 import time
 import traceback
@@ -36,32 +34,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypedDict
 
-# config.py lives next to this file in scripts/. Add scripts/ to sys.path so
-# `import config` works whether we're invoked via `uv run python flush.py …`
-# or directly.
-_SCRIPTS_DIR = Path(__file__).resolve().parent
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
-
-from claude_agent_sdk import (  # noqa: E402
+from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ResultMessage,
     TextBlock,
     query,
 )
-from config import (  # noqa: E402
+from config import (
     CODE_ROOT,
     ensure_store_dirs,
     get_config,
 )
-from utils import State  # noqa: E402
-
-# compile.py ships next to this script, so this is a genuine,
-# env-independent constant. The store-relative paths (flush state, log
-# files, compile state) are resolved on demand via get_config() instead,
-# so importing this module doesn't touch the filesystem.
-COMPILE_SCRIPT = _SCRIPTS_DIR / "compile.py"
 
 
 def _setup_logging() -> None:
@@ -108,7 +92,7 @@ def append_to_daily_log(content: str, section: str, project_slug: str) -> None:
     """Append content to today's daily log, tagged with the project slug.
 
     Daily logs are global (one per date) — the project tag lives inside the
-    section heading so an end-of-day compile can route lessons to the right
+    section heading so the daemon's Scholar can route lessons to the right
     ``knowledge/projects/<slug>/`` later.
     """
     today = datetime.now(timezone.utc).astimezone()
@@ -136,7 +120,7 @@ async def run_flush(context: str, project_slug: str) -> str:
     prompt = f"""Review the conversation context below and respond with a concise summary
 of important items that should be preserved in the daily log. This session came
 from project **{project_slug}** — keep project-specific gotchas under "Lessons
-Learned" so a later compile can route them correctly.
+Learned" so the curation pass can route them correctly.
 
 Do NOT use any tools — just return plain text.
 
@@ -174,8 +158,8 @@ respond with exactly: FLUSH_OK
         async for message in query(
             prompt=prompt,
             options=ClaudeAgentOptions(
-                # cwd is the code tree, not the store: the SDK process needs
-                # access to AGENTS.md / scripts/, not the markdown corpus.
+                # cwd is the code tree, not the store: keep the SDK process
+                # out of the markdown corpus so it can't wander the library.
                 cwd=str(CODE_ROOT),
                 allowed_tools=[],
                 max_turns=2,
@@ -192,62 +176,6 @@ respond with exactly: FLUSH_OK
         response = f"FLUSH_ERROR: {type(e).__name__}: {e}"
 
     return response
-
-
-COMPILE_AFTER_HOUR = 18  # 6 PM local time
-
-
-def maybe_trigger_compilation() -> None:
-    """If it's past the compile hour and today's log hasn't been compiled, run compile.py."""
-    now = datetime.now(timezone.utc).astimezone()
-    if now.hour < COMPILE_AFTER_HOUR:
-        return
-
-    cfg = get_config()
-    today_log = f"{now.strftime('%Y-%m-%d')}.md"
-    if cfg.state_file.exists():
-        try:
-            compile_state: State = json.loads(cfg.state_file.read_text(encoding="utf-8"))
-            ingested = compile_state.get("ingested", {})
-            if today_log in ingested:
-                log_path = cfg.daily_dir / today_log
-                if log_path.exists():
-                    current_hash = hashlib.sha256(log_path.read_bytes()).hexdigest()[:16]
-                    if ingested[today_log].get("hash") == current_hash:
-                        return  # log unchanged since last compile
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    if not COMPILE_SCRIPT.exists():
-        return
-
-    logging.info("End-of-day compilation triggered (after %d:00)", COMPILE_AFTER_HOUR)
-
-    cmd = ["uv", "run", "--directory", str(CODE_ROOT), "python", str(COMPILE_SCRIPT)]
-
-    # Spawn detached so flush.py can exit without waiting on the compile.
-    # ``creationflags`` is Windows-only, ``start_new_session`` is POSIX-only —
-    # branching here keeps the kwargs concretely typed for each platform.
-    try:
-        log_handle = open(str(cfg.store_dir / "compile.log"), "a")
-        if sys.platform == "win32":
-            subprocess.Popen(
-                cmd,
-                stdout=log_handle,
-                stderr=subprocess.STDOUT,
-                cwd=str(CODE_ROOT),
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
-            )
-        else:
-            subprocess.Popen(
-                cmd,
-                stdout=log_handle,
-                stderr=subprocess.STDOUT,
-                cwd=str(CODE_ROOT),
-                start_new_session=True,
-            )
-    except Exception as e:
-        logging.error("Failed to spawn compile.py: %s", e)
 
 
 def main() -> None:
@@ -316,10 +244,6 @@ def main() -> None:
 
     # Clean up context file
     context_file.unlink(missing_ok=True)
-
-    # End-of-day auto-compilation: if it's past the compile hour and today's
-    # log hasn't been compiled yet, trigger compile.py in the background.
-    maybe_trigger_compilation()
 
     logging.info("Flush complete for session %s", session_id)
 

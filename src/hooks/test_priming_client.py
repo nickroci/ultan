@@ -7,14 +7,9 @@ budget trimming, and bad-file handling are all measured."""
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
-_THIS_DIR = Path(__file__).resolve().parent
-if str(_THIS_DIR) not in sys.path:
-    sys.path.insert(0, str(_THIS_DIR))
-
-import _priming_client  # noqa: E402
+import _priming_client
 
 
 def _write_entry(

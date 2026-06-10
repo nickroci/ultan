@@ -22,18 +22,12 @@ import tempfile
 import time
 from pathlib import Path
 
+import _nudges
+import _priming_client
 import pytest
+from conftest import FakeRpcServer, seed_library
 
-# Make ``_nudges`` importable. pytest runs from src/, so hooks/ is the
-# obvious place to add to sys.path. We do it once at module load.
 _THIS_DIR = Path(__file__).resolve().parent
-if str(_THIS_DIR) not in sys.path:
-    sys.path.insert(0, str(_THIS_DIR))
-
-import _nudges  # noqa: E402
-import _priming_client  # noqa: E402
-from conftest import FakeRpcServer, seed_library  # noqa: E402
-
 HOOK_SCRIPT = _THIS_DIR / "user-prompt-submit.py"
 
 

@@ -54,8 +54,6 @@ from typing import Callable, ContextManager, Iterator
 import pytest
 
 _THIS_DIR = Path(__file__).resolve().parent
-if str(_THIS_DIR) not in sys.path:
-    sys.path.insert(0, str(_THIS_DIR))
 
 
 # ── Short-path home dir ──────────────────────────────────────────────

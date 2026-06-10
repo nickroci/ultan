@@ -1,6 +1,6 @@
 """Shared pytest fixtures for the ``scripts/`` regression tests.
 
-The scripts (``compile.py``, ``lint.py``, ``flush.py``, ``query.py`` and
+The scripts (``lint.py``, ``flush.py``, ``query.py`` and
 their shared ``utils.py``) resolve every storage path through
 ``config.get_config()``, which reads ``AGENT_MEM_HOME`` *at call time*.
 So test isolation is just::
@@ -11,27 +11,17 @@ So test isolation is just::
 build the scaffolding once so individual test files don't copy-paste
 library-seeding blocks (the repo has an 8-line duplicate-code gate).
 
-Mirrors ``hooks/conftest.py`` in putting ``scripts/`` on ``sys.path`` so
-``import config`` / ``import utils`` resolve regardless of cwd.
+``config`` / ``utils`` import as top-level names because ``src`` is
+installed editable into the workspace venv (its flat ``scripts/``
+modules flatten to top-level), so no ``sys.path`` tweaking is needed.
 """
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Callable
 
 import pytest
-
-# Append (not insert) so we never shadow ``hooks/conftest.py`` when both
-# test trees run together: the hooks tests do a plain ``from conftest
-# import ...`` that must keep resolving to the hooks dir (which its own
-# conftest puts at sys.path[0]). ``config`` / ``utils`` only live under
-# scripts/, so appending is enough for our own ``import config`` etc.
-_THIS_DIR = Path(__file__).resolve().parent
-if str(_THIS_DIR) not in sys.path:
-    sys.path.append(str(_THIS_DIR))
-
 
 # ── Home isolation ───────────────────────────────────────────────────
 

@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import time
 from pathlib import Path
 from typing import Any, Mapping, Optional, TypedDict, cast
@@ -89,17 +88,6 @@ class EventLine(TypedDict):
     payload: EventPayload
 
 
-# Make scripts/ importable so we can reuse the AGENT_MEM_HOME helper that
-# already lives in config.py. We import lazily inside _events_path() so a
-# config import failure (unlikely but possible) doesn't break the recursion-
-# guard short-circuit.
-_THIS_DIR = Path(__file__).resolve().parent
-_CODE_ROOT = _THIS_DIR.parent
-_SCRIPTS_DIR = _CODE_ROOT / "scripts"
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
-
-
 # PIPE_BUF is 512 bytes on POSIX minimum, 4096 on Linux, 512 on macOS for
 # pipes — but for regular files O_APPEND is atomic per-write at any size
 # on Linux, and macOS guarantees atomicity up to PIPE_BUF for pipes only.
@@ -118,7 +106,7 @@ def _events_path() -> Path:
     # Lazy import: a config import failure (unlikely but possible) must
     # not break the recursion-guard short-circuit at the top of
     # :func:`append_event`. See module docstring.
-    from config import get_config  # noqa: E402,PLC0415
+    from config import get_config  # noqa: PLC0415
 
     return get_config().store_dir / "events.jsonl"
 

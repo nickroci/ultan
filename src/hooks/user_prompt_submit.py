@@ -40,23 +40,13 @@ from __future__ import annotations
 
 import json
 import os
-import sys
-from pathlib import Path
 from typing import Any, Optional
 
-_THIS_DIR = Path(__file__).resolve().parent
-_CODE_ROOT = _THIS_DIR.parent
-_SCRIPTS_DIR = _CODE_ROOT / "scripts"
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
-if str(_THIS_DIR) not in sys.path:
-    sys.path.insert(0, str(_THIS_DIR))
-
-from _events import HookPayload, append_event  # noqa: E402
-from _hookutil import parse_stdin  # noqa: E402
-from _nudges import render_context, take_nudges  # noqa: E402
-from _priming_client import get_priming  # noqa: E402
-from scope import current_project_slug  # noqa: E402
+from _events import HookPayload, append_event
+from _hookutil import parse_stdin
+from _nudges import render_context, take_nudges
+from _priming_client import get_priming
+from scope import current_project_slug
 
 
 def _emit_additional_context(context: str) -> None:

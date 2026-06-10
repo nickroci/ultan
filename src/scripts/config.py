@@ -7,9 +7,12 @@ checked out the repo — only the data moves.
 Two roots to keep straight:
 
 - ``CODE_ROOT`` — the checkout (``…/agent-mem/src``). Used as ``cwd`` for the
-  Claude Agent SDK and as the ``--directory`` argument to ``uv run``. The
-  schema file (``AGENTS.md``) ships with the code, so it lives here. It is
-  derived from this file's location, so it's a genuine module constant.
+  Claude Agent SDK and as the ``--directory`` argument to ``uv run``. Derived
+  from this file's location, so it is only meaningful when running FROM the
+  repo (editable install / `uv run --directory src`). In a non-editable wheel
+  the flattened module lands in site-packages and CODE_ROOT resolves to a lib
+  dir — callers that spawn scripts through it must check the target exists
+  (see ``_flush_spawn.snapshot_and_spawn_flush``).
 - The user-global data directory (``~/.agent-mem/``) and everything under
   it. This is *runtime state*, not a constant: it depends on the
   ``AGENT_MEM_HOME`` environment variable, which a test (or a late-binding
@@ -31,11 +34,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # ── Code locations (env-independent; derived from this file's path) ────
-# This file lives at <CODE_ROOT>/scripts/config.py.
+# This file lives at <CODE_ROOT>/scripts/config.py (repo mode only — see the
+# module docstring for the installed-wheel caveat).
 CODE_ROOT = Path(__file__).resolve().parent.parent
-SCRIPTS_DIR = CODE_ROOT / "scripts"
-HOOKS_DIR = CODE_ROOT / "hooks"
-AGENTS_FILE = CODE_ROOT / "AGENTS.md"
 
 
 @dataclass(frozen=True)
@@ -47,9 +48,9 @@ class StoreConfig:
     there is no import-time freeze to work around.
 
     Per-PLAN.md §1, knowledge is split into a global tier and per-project
-    subdirectories. The ``concepts``/``connections``/``qa`` dirs are the
-    Phase-0 default write targets for compile.py; per-project routing is a
-    Scholar concern (Phase 2).
+    subdirectories. The ``concepts``/``connections``/``qa`` dirs were the
+    Phase-0 default write targets (the removed compile.py); routing is now
+    the daemon Scholar's concern.
     """
 
     store_dir: Path

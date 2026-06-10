@@ -19,6 +19,7 @@ whole library). Use ``--project`` to scope the install to just the
 current repo (writes into ``<cwd>/.claude/settings.json``). Use
 ``--target <path>`` to point at any other settings.json.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -32,8 +33,12 @@ SRC = REPO / "src"
 TEMPLATE = SRC / "_dot_claude_disabled" / "settings.json"
 
 AGENT_MEM_HOOK_EVENTS = {
-    "SessionStart", "UserPromptSubmit", "PostToolUse",
-    "Stop", "PreCompact", "SessionEnd",
+    "SessionStart",
+    "UserPromptSubmit",
+    "PostToolUse",
+    "Stop",
+    "PreCompact",
+    "SessionEnd",
 }
 
 
@@ -106,19 +111,29 @@ def main() -> int:
         )
     )
     g = ap.add_mutually_exclusive_group()
-    g.add_argument("--target", type=Path,
-                   help="Path to settings.json (overrides default and --project).")
-    g.add_argument("--project", dest="project_local", action="store_true",
-                   help=("Install at <cwd>/.claude/settings.json instead of "
-                         "the global ~/.claude/settings.json. Use when you "
-                         "want agent-mem in just one repo."))
+    g.add_argument(
+        "--target", type=Path, help="Path to settings.json (overrides default and --project)."
+    )
+    g.add_argument(
+        "--project",
+        dest="project_local",
+        action="store_true",
+        help=(
+            "Install at <cwd>/.claude/settings.json instead of "
+            "the global ~/.claude/settings.json. Use when you "
+            "want agent-mem in just one repo."
+        ),
+    )
     # ``--global`` is now the default but kept as a no-op flag for
     # backward compatibility with any tooling or muscle memory that
     # still passes it explicitly.
-    g.add_argument("--global", dest="globally", action="store_true",
-                   help="Deprecated (this is now the default). Kept for compatibility.")
-    ap.add_argument("--dry-run", action="store_true",
-                    help="Print what would change; don't write.")
+    g.add_argument(
+        "--global",
+        dest="globally",
+        action="store_true",
+        help="Deprecated (this is now the default). Kept for compatibility.",
+    )
+    ap.add_argument("--dry-run", action="store_true", help="Print what would change; don't write.")
     args = ap.parse_args()
 
     if not TEMPLATE.exists():
@@ -143,12 +158,10 @@ def main() -> int:
         try:
             existing = json.loads(target.read_text(encoding="utf-8"))
         except json.JSONDecodeError as e:
-            print(f"ultan-install: existing {target} is not valid JSON: {e}",
-                  file=sys.stderr)
+            print(f"ultan-install: existing {target} is not valid JSON: {e}", file=sys.stderr)
             return 2
         if not isinstance(existing, dict):
-            print(f"ultan-install: existing {target} is not a JSON object",
-                  file=sys.stderr)
+            print(f"ultan-install: existing {target} is not a JSON object", file=sys.stderr)
             return 2
 
     merged, changed = merge_hooks(existing, template["hooks"])
@@ -173,7 +186,7 @@ def main() -> int:
     print()
     print("Or in the background:")
     print(f"  cd {REPO / 'daemon'} && \\")
-    print(f"    nohup uv run agent-mem-daemon -v > ~/.agent-mem/daemon.stdout 2>&1 &")
+    print("    nohup uv run agent-mem-daemon -v > ~/.agent-mem/daemon.stdout 2>&1 &")
     return 0
 
 

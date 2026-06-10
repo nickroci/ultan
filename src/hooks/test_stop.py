@@ -8,10 +8,6 @@ import sys
 from io import StringIO
 from pathlib import Path
 
-_THIS_DIR = Path(__file__).resolve().parent
-if str(_THIS_DIR) not in sys.path:
-    sys.path.insert(0, str(_THIS_DIR))
-
 
 def _fresh_stop(monkeypatch, home: Path):
     """Reload ``stop`` with a fresh AGENT_MEM_HOME so the event path

@@ -457,9 +457,9 @@ def test_archive_destination_returns_none_for_outside_path(home: Path) -> None:
 def test_run_sweep_continues_after_unreadable_entry(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An entry that can't be parsed shouldn't abort the sweep — it
-    just counts toward `errored` and the loop continues to other
-    entries."""
+    """An entry that can't be parsed shouldn't abort the sweep — it gets
+    classified (no frontmatter fence → ``skipped``, catalog-style file) and
+    the loop continues to other entries."""
     k = home / "knowledge"
     _write_entry(k / "global" / "good.md", id_="good", title="Good", created="2026-01-01")
     bad = k / "global" / "bad.md"
@@ -468,9 +468,11 @@ def test_run_sweep_continues_after_unreadable_entry(
 
     when = datetime(2026, 5, 27, tzinfo=timezone.utc)
     result = decay.run_sweep(knowledge_dir=k, now=when)
-    # Good one archived, bad one counted as errored.
+    # Good one archived; the fence-less file is catalog-classified, not an
+    # error (see test_run_sweep_counts_readme_catalogs_as_skipped_not_errored).
     assert result.archived == 1
-    assert result.errored == 1
+    assert result.skipped == 1
+    assert result.errored == 0
 
 
 def test_run_sweep_catches_unexpected_exception_per_entry(
@@ -662,3 +664,39 @@ def test_archive_entry_returns_false_on_mkdir_failure(
     monkeypatch.setattr(Path, "mkdir", _raise_oserror)
     ok = decay._archive_entry(p, k, fm, body, today_iso="2026-05-27")
     assert ok is False
+
+
+# ── run_sweep: catalog files vs real parse errors ────────────────────
+
+
+def test_run_sweep_counts_readme_catalogs_as_skipped_not_errored(home: Path) -> None:
+    """Folder READMEs have no frontmatter by design — they are catalog files,
+    not decayable entries. They must land in ``skipped``: counting them as
+    ``errored`` buries real parse failures under a constant ~25%-of-library
+    noise floor (observed: errored=142 with exactly 142 READMEs on disk)."""
+    k = home / "knowledge"
+    _write_entry(k / "global" / "ok.md", id_="ok", title="Ok", created="2026-05-20")
+    readme = k / "global" / "README.md"
+    readme.write_text("# Catalog\n\n<!-- ULTAN:children (auto) -->\n", encoding="utf-8")
+    when = datetime(2026, 5, 27, tzinfo=timezone.utc)
+
+    result = decay.run_sweep(knowledge_dir=k, now=when)
+
+    assert result.skipped == 1
+    assert result.errored == 0
+    assert result.kept == 1
+
+
+def test_run_sweep_counts_malformed_frontmatter_as_errored(home: Path) -> None:
+    """A file WITH a frontmatter fence that fails to parse is a real error
+    and must stay in ``errored`` (and get a per-file warning)."""
+    k = home / "knowledge"
+    bad = k / "global" / "bad.md"
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_text("---\n: not: [valid yaml\n---\nbody\n", encoding="utf-8")
+    when = datetime(2026, 5, 27, tzinfo=timezone.utc)
+
+    result = decay.run_sweep(knowledge_dir=k, now=when)
+
+    assert result.errored == 1
+    assert result.skipped == 0

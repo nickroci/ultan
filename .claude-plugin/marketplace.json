@@ -1,0 +1,11 @@
+{
+  "name": "ultan",
+  "owner": { "name": "Nicholas Holden" },
+  "plugins": [
+    {
+      "name": "ultan",
+      "source": "./",
+      "description": "Local, brain-inspired markdown memory for Claude Code — a curator pair gates writes by surprise, three retrieval tiers surface what matters, all on your disk."
+    }
+  ]
+}
