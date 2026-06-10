@@ -56,12 +56,14 @@ don't need one).
 > healthy / idle), priming latency, and capture freshness — at any stage, even
 > mid-install.
 
-On first use the plugin provisions that retrieval stack into its private storage
-**in the background** — triggered by `SessionStart` in a fresh session, or by your
-first prompt when you installed mid-session (`/reload-plugins` alone doesn't fire
-`SessionStart`, so the prompt hook covers that path). Until it finishes, priming
-falls back to a fast lexical scan; after that the daemon **lazy-starts on demand**.
-Models download anonymously from HuggingFace — see *First-start expectations* below.
+The plugin provisions that retrieval stack into its private storage **in the
+background**, triggered by whichever happens first: the plugin's MCP server starting
+(right after install/reload — the spec has no install-time script, so this is the
+earliest the plugin gets to run), a fresh session's `SessionStart`, or your next
+prompt. All three funnel into one lock-guarded installer, so they never race. Until
+it finishes, priming falls back to a fast lexical scan; after that the daemon
+**lazy-starts on demand**. Models download anonymously from HuggingFace — see
+*First-start expectations* below.
 
 You now have:
 

@@ -13,7 +13,11 @@
         "git+https://github.com/nickroci/ultan@main",
         "ultan",
         "mcp"
-      ]
+      ],
+      "env": {
+        "CLAUDE_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}",
+        "CLAUDE_PLUGIN_DATA": "${CLAUDE_PLUGIN_DATA}"
+      }
     }
   }
 }
