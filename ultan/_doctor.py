@@ -12,10 +12,12 @@ wrapper reports install progress whenever the real binary is missing.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import time
 from pathlib import Path
+from typing import Any, cast
 
 from . import __version__, _daemon, _priming
 
@@ -70,11 +72,23 @@ def _report_runtime(home: Path) -> bool:
     return not retrieval or not daemon_bin.exists()
 
 
+def _daemon_phase(home: Path) -> dict[str, Any] | None:
+    """The daemon's lifecycle flag ({phase, pid, since}), or None."""
+    try:
+        raw: Any = json.loads((home / "daemon.state").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return cast("dict[str, Any]", raw) if isinstance(raw, dict) else None
+
+
 def _report_daemon(home: Path) -> tuple[bool, bool]:
     """Process + socket + priming round-trip. Returns (alive, socket_ok)."""
     pid = _daemon_pid(home)
     alive = pid is not None and _pid_alive(pid)
     print(f"daemon process: {'running (pid ' + str(pid) + ')' if alive else 'not running'}")
+    phase = _daemon_phase(home)
+    if phase is not None and alive and phase.get("pid") == pid:
+        print(f"daemon phase: {phase.get('phase')} (since {phase.get('since')})")
 
     socket_ok = _daemon._socket_answering()  # pyright: ignore[reportPrivateUsage]  # intra-package
     if socket_ok:

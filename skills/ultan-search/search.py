@@ -13,12 +13,76 @@ import re
 import socket
 import struct
 import sys
+import time
 from pathlib import Path
 
 _HOME = Path(os.environ.get("AGENT_MEM_HOME") or (Path.home() / ".agent-mem"))
 SOCKET_PATH = _HOME / "priming.sock"
+# Default plugin data dir ("ultan" plugin @ "ultan" marketplace) — where the
+# background installer leaves its lock/pid while provisioning.
+_PLUGIN_DATA = Path(
+    os.environ.get("CLAUDE_PLUGIN_DATA")
+    or (Path.home() / ".claude" / "plugins" / "data" / "ultan-ultan")
+)
 PATH_CHARS_RE = re.compile(r"^[a-zA-Z0-9_./-]+$")
 RECV_TIMEOUT_S = 5.0
+
+_MSG_WARMING = (
+    "# Ultan is starting up — not broken\n\n"
+    "The daemon is warming (first start loads the retrieval models; allow 1-3\n"
+    "minutes). Retry this search shortly. Live status: run `ultan doctor`.\n\n"
+    "_Priming still works during warmup via the lexical fallback, so the\n"
+    "session is not memory-blind meanwhile._\n"
+)
+_MSG_INSTALLING = (
+    "# Ultan is still installing — not broken\n\n"
+    "The plugin's background installer is provisioning the runtime (torch +\n"
+    "models; minutes on a cold cache). Retry once it finishes. Progress:\n"
+    "run `ultan doctor`.\n"
+)
+_MSG_DOWN = (
+    "# Ultan daemon not running\n\n"
+    f"No socket at `{SOCKET_PATH}` and no startup in progress. With the\n"
+    "plugin installed the daemon lazy-starts on the next prompt — send any\n"
+    "message and retry. Details: run `ultan doctor`. (From a source\n"
+    "checkout: `uv run agent-mem-daemon -v`.)\n"
+)
+
+
+def _pid_alive(pid: object) -> bool:
+    try:
+        os.kill(int(pid), 0)  # type: ignore[arg-type]
+    except (TypeError, ValueError, ProcessLookupError):
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _startup_message() -> str | None:
+    """A friendly explanation when the socket isn't answering, or None when
+    the daemon is genuinely down (not installing, not warming). Checks the
+    daemon's lifecycle flag first, then spawn/install breadcrumbs."""
+    # 1. The daemon's own phase flag (written between pid-acquire and exit).
+    try:
+        state = json.loads((_HOME / "daemon.state").read_text(encoding="utf-8"))
+        if _pid_alive(state.get("pid")):
+            return _MSG_WARMING  # alive but socket not serving yet (or restarting)
+    except (OSError, ValueError):
+        pass
+    # 2. A spawn was attempted moments ago (pre-flag window, or older daemon).
+    try:
+        age = time.time() - (_HOME / ".daemon-spawn-attempt").stat().st_mtime
+        if age < 300:
+            return _MSG_WARMING
+    except OSError:
+        pass
+    # 3. The plugin's background install is still running.
+    if (_PLUGIN_DATA / ".install.pid").exists() or (_PLUGIN_DATA / ".install.lock").exists():
+        return _MSG_INSTALLING
+    return None
 
 
 def _looks_like_path(s: str) -> bool:
@@ -119,12 +183,7 @@ def main() -> int:
         mode = "search"
 
     if not SOCKET_PATH.exists():
-        print(
-            "# Ultan daemon not running\n\n"
-            f"Socket missing at `{SOCKET_PATH}`. Start the daemon:\n\n"
-            "```\nuv run agent-mem-daemon -v\n```\n",
-            file=sys.stderr,
-        )
+        print(_startup_message() or _MSG_DOWN, file=sys.stderr)
         return 1
 
     try:
@@ -134,6 +193,11 @@ def main() -> int:
         else:
             resp = _send_request({"op": "bm25_search", "query": arg, "k": 8})
             print(_render_search(resp, arg))
+    except (ConnectionError, OSError):
+        # Socket file present but not answering — stale socket or a daemon
+        # mid-restart. Same friendly triage as the missing-socket path.
+        print(_startup_message() or _MSG_DOWN, file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"# Ultan skill failed\n\nError: {e!r}\n", file=sys.stderr)
         return 1

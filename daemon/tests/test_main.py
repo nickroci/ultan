@@ -15,6 +15,7 @@ counts the lines.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import signal
@@ -343,3 +344,39 @@ def test_main_run_starts_and_shuts_down(monkeypatch, tmp_path: Path) -> None:
     root = logging.getLogger()
     for h in list(root.handlers):
         root.removeHandler(h)
+
+
+# ── daemon.state lifecycle flag ───────────────────────────────────────
+
+
+def test_write_daemon_state_publishes_phase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENT_MEM_HOME", str(tmp_path))
+    daemon_main.write_daemon_state("warming")
+    raw = json.loads((tmp_path / "daemon.state").read_text(encoding="utf-8"))
+    assert raw["phase"] == "warming"
+    assert raw["pid"] == os.getpid()
+    assert raw["since"]
+
+
+def test_clear_daemon_state_removes_own_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENT_MEM_HOME", str(tmp_path))
+    daemon_main.write_daemon_state("ready")
+    daemon_main.clear_daemon_state()
+    assert not (tmp_path / "daemon.state").exists()
+
+
+def test_clear_daemon_state_leaves_other_daemons_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rejected duplicate exiting must not erase the live daemon's flag."""
+    monkeypatch.setenv("AGENT_MEM_HOME", str(tmp_path))
+    (tmp_path / "daemon.state").write_text(
+        json.dumps({"phase": "ready", "pid": os.getpid() + 99999, "since": "x"}),
+        encoding="utf-8",
+    )
+    daemon_main.clear_daemon_state()
+    assert (tmp_path / "daemon.state").exists()
