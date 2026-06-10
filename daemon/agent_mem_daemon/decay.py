@@ -120,6 +120,17 @@ def _read_and_parse_frontmatter(
     return fm, m.group(1), body
 
 
+def _lacks_frontmatter_fence(entry_path: Path) -> bool:
+    """True when the file is readable but has no ``---`` frontmatter fence —
+    i.e. it is a catalog file (folder README), not a malformed entry. An
+    unreadable file returns False so the caller counts it as a real error."""
+    try:
+        text = entry_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return _FRONTMATTER_HEAD_RE.match(text) is None
+
+
 def _atomic_write_entry(entry_path: Path, fm: Dict[str, Any], body: str) -> bool:
     """Serialise ``fm`` back to YAML and rewrite the entry atomically.
     Returns True on success, False on any I/O / YAML failure."""
@@ -449,10 +460,17 @@ def _archive_entry(
 @dataclass
 class SweepResult:
     """Summary of one sweep pass — what got moved, what got skipped,
-    what failed. Returned by :func:`run_sweep` and logged at INFO."""
+    what failed. Returned by :func:`run_sweep` and logged at INFO.
+
+    ``skipped`` counts files with no frontmatter fence at all — folder
+    ``README.md`` catalogs and the like. Those are catalog content, not
+    decayable entries, and MUST NOT count as ``errored``: a library of a
+    few hundred entries carries ~25% READMEs, and lumping them into the
+    error count buries real parse failures in constant noise."""
 
     archived: int = 0
     kept: int = 0
+    skipped: int = 0
     errored: int = 0
     archived_paths: List[str] = field(default_factory=lambda: [])
 
@@ -512,7 +530,13 @@ def run_sweep(
         try:
             parsed = _read_and_parse_frontmatter(entry_path)
             if parsed is None:
-                result.errored += 1
+                if _lacks_frontmatter_fence(entry_path):
+                    # Catalog file (folder README etc.) — not a decayable
+                    # entry and not an error.
+                    result.skipped += 1
+                else:
+                    log.warning("decay.run_sweep: unparseable frontmatter in %s", entry_path)
+                    result.errored += 1
                 continue
             fm, _raw, body = parsed
             if not _is_eligible_for_archive(fm, today=today):
@@ -535,9 +559,10 @@ def run_sweep(
 
     write_last_sweep_at(when)
     log.info(
-        "decay.sweep: archived=%d kept=%d errored=%d",
+        "decay.sweep: archived=%d kept=%d skipped=%d errored=%d",
         result.archived,
         result.kept,
+        result.skipped,
         result.errored,
     )
     return result

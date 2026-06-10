@@ -28,6 +28,7 @@ import pytest
 
 from agent_mem_daemon import scholar
 from agent_mem_daemon._schemas import ScholarDecisions
+from agent_mem_daemon.llm import LLMTimeout
 from agent_mem_daemon.runs import InvocationRecord
 from agent_mem_daemon.typed_agent import TypedAgentError
 
@@ -1147,3 +1148,38 @@ def test_review_swallows_executor_error(monkeypatch):
 
     monkeypatch.setattr(scholar.scholar_executor, "apply_decisions", _boom)
     scholar.review([_nonempty_packet()])  # must not raise
+
+
+# ── Timeout → requeue-once contract ───────────────────────────────────
+
+
+def _raise_timeout(prompt, knowledge_dir, *, timeout_s):
+    raise LLMTimeout(f"Scholar agent exceeded {timeout_s}s")
+
+
+def test_review_requeues_batch_on_first_timeout(monkeypatch):
+    """A timeout says nothing about the batch (laptop sleep mid-run is the
+    canonical cause) — review must hand the packets back for one retry
+    instead of silently dropping the proposals."""
+    monkeypatch.setattr(scholar, "run_scholar_agent", _raise_timeout)
+    pkts = [
+        _packet(
+            "s1",
+            proposals=[{"action": "archive_entry", "path": "a.md", "reasoning": "stale"}],
+        )
+    ]
+    requeue = scholar.review(pkts)
+    assert requeue is not None
+    assert list(requeue) == pkts
+
+
+def test_review_drops_batch_on_second_timeout(monkeypatch):
+    """Exactly one retry: a batch already carrying the worker's
+    ``scholar_retries`` marker is dropped on the next timeout — no loop."""
+    monkeypatch.setattr(scholar, "run_scholar_agent", _raise_timeout)
+    pkt = _packet(
+        "s1",
+        proposals=[{"action": "archive_entry", "path": "a.md", "reasoning": "stale"}],
+    )
+    pkt["scholar_retries"] = 1  # bumped by the worker on the first requeue
+    assert scholar.review([pkt]) is None

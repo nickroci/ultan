@@ -98,6 +98,10 @@ class EvidencePacket(TypedDict):
     proposals: List[Dict[str, Any]]
     interrupts: List[Dict[str, Any]]
     repair_fingerprints: NotRequired[List[repair_queue.Fingerprint]]
+    # Bumped by the scholar worker when a batch is re-enqueued after an
+    # agent timeout; scholar.review drops (instead of requeueing again) any
+    # batch that already carries a non-zero marker. Absent == 0.
+    scholar_retries: NotRequired[int]
 
 
 def _empty_packet(session_id: str) -> EvidencePacket:
@@ -113,10 +117,12 @@ def _empty_packet(session_id: str) -> EvidencePacket:
 
 @dataclass
 class LibrarianDeps:
-    """Dependencies the Librarian's output validator reads — the pinned
-    knowledge-store root."""
+    """Dependencies the Librarian's output validators read — the pinned
+    knowledge-store root, plus how many ``[USER-ASSERTED]`` turns the
+    transcript carries (drives :func:`validate_user_asserted_filed`)."""
 
     knowledge_dir: Path
+    user_asserted_turns: int = 0
 
 
 def validate_proposal(deps: LibrarianDeps, output: "LibrarianProposal") -> "LibrarianProposal":
@@ -135,6 +141,28 @@ def validate_proposal(deps: LibrarianDeps, output: "LibrarianProposal") -> "Libr
     for proposal in output.proposals:
         _validate_proposal_paths(proposal, root)
         _validate_proposal_body(proposal)
+    return output
+
+
+def validate_user_asserted_filed(
+    deps: LibrarianDeps, output: "LibrarianProposal"
+) -> "LibrarianProposal":
+    """Enforce the prompt's own contract for ``/ultan`` memories at the
+    boundary: ``[USER-ASSERTED]`` turns are user-stated rules the Librarian
+    is instructed to FILE rather than veto — yet a model can (and observably
+    did) return zero proposals for one, silently discarding a memory the
+    user explicitly asked to keep. ModelRetry sends it back to self-correct;
+    if it still refuses within the retry budget the scan fails LOUDLY
+    (``TypedAgentError`` → warning + errored run record) instead of quietly
+    emitting an empty packet."""
+    if deps.user_asserted_turns > 0 and not output.proposals:
+        raise ModelRetry(
+            f"The transcript contains {deps.user_asserted_turns} [USER-ASSERTED] turn(s) — "
+            "explicit /ultan memories the user asked to keep. Per your instructions these "
+            "are user-stated rules to FILE, not veto. Re-submit with at least one proposal "
+            "covering the [USER-ASSERTED] content: write_entry for a new lesson, or "
+            "update_entry if an existing entry already covers it (fold the new wording in)."
+        )
     return output
 
 
@@ -236,6 +264,7 @@ def run_librarian_agent(
     knowledge_dir: Path,
     *,
     timeout_s: float = LIBRARIAN_TIMEOUT_S,
+    user_asserted_turns: int = 0,
 ) -> "Tuple[LibrarianProposal, float]":
     """Run the typed Librarian agent over the SDK and return
     ``(validated_proposal, cost_usd)``.
@@ -250,7 +279,10 @@ def run_librarian_agent(
     from ._schemas import LibrarianProposal  # noqa: PLC0415 — runtime output type
 
     mcp_servers, allowed_tools = _agent_research.research_server_and_tools(knowledge_dir)
-    deps = LibrarianDeps(knowledge_dir=knowledge_dir.resolve())
+    deps = LibrarianDeps(
+        knowledge_dir=knowledge_dir.resolve(),
+        user_asserted_turns=user_asserted_turns,
+    )
 
     async def _run() -> "Tuple[LibrarianProposal, float]":
         try:
@@ -263,7 +295,7 @@ def run_librarian_agent(
                     model=LIBRARIAN_MODEL,
                     mcp_servers=mcp_servers,
                     allowed_tools=allowed_tools,
-                    validators=[validate_proposal],
+                    validators=[validate_proposal, validate_user_asserted_filed],
                     max_retries=OUTPUT_RETRIES,
                     cwd=knowledge_dir,
                     env=recursion_guard_env(),
@@ -379,8 +411,16 @@ def _scan_for_packet(
         # embedding tools land in the right tree. ensure_home() creates the
         # dir if missing so we never pass a nonexistent path.
         ensure_home()
+        # [USER-ASSERTED] turns (/ultan memories) arm the boundary validator:
+        # a scan over them must file at least one proposal, never veto.
+        user_asserted_count = sum(1 for t in flat if t[4])
         try:
-            proposal, cost_usd = run_librarian_agent(prompt, kdir, timeout_s=LIBRARIAN_TIMEOUT_S)
+            proposal, cost_usd = run_librarian_agent(
+                prompt,
+                kdir,
+                timeout_s=LIBRARIAN_TIMEOUT_S,
+                user_asserted_turns=user_asserted_count,
+            )
         except LLMTimeout as e:
             log.warning("librarian agent timeout for session=%s: %s", session_id, e)
             record.mark_error(e)

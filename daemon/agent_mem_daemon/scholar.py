@@ -39,7 +39,7 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Sequence, Set, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from . import (
     _agent_research,
@@ -431,19 +431,21 @@ def _invoke_scholar_agent(
 ) -> "tuple[ScholarDecisions, float] | None":
     """Run :func:`run_scholar_agent` and adapt its outcome for the review
     pipeline. Returns ``(decisions, cost_usd)`` on success or ``None`` if the
-    run timed out / raised / never produced a valid result (record is marked
-    errored in that case — the batch is dropped exactly like a failed run)."""
+    run raised / never produced a valid result (record is marked errored in
+    that case — the batch is dropped exactly like a failed run).
+
+    :class:`LLMTimeout` PROPAGATES — the caller decides between requeue and
+    drop, because a timeout (unlike a validation failure) says nothing about
+    the batch itself: laptop sleep mid-run is the canonical cause, and the
+    proposals are still perfectly good on retry."""
     try:
         return run_scholar_agent(prompt, knowledge_root, timeout_s=SCHOLAR_TIMEOUT_S)
+    except LLMTimeout:
+        raise
     except TypedAgentError as e:
         # No valid result within the retry budget (or the model never
         # submitted): drop the batch exactly as a failed run.
         log.warning("scholar.review: agent produced no valid result (%s); batch dropped", e)
-        record.mark_error(e)
-        record.output_raw = ""
-        return None
-    except LLMTimeout as e:
-        log.warning("scholar.review: agent timeout (%s); batch dropped", e)
         record.mark_error(e)
         record.output_raw = ""
         return None
@@ -644,7 +646,7 @@ def _collect_repair_fingerprints(
     return out
 
 
-def review(packets: Sequence[Mapping[str, Any]]) -> None:
+def review(packets: Sequence[Mapping[str, Any]]) -> "Optional[Sequence[Mapping[str, Any]]]":
     """Judge a batch of Librarian packets.
 
     Args:
@@ -652,11 +654,18 @@ def review(packets: Sequence[Mapping[str, Any]]) -> None:
             the last Scholar run. May contain packets from multiple
             sessions.
 
-    Fire-and-forget — no return value, all errors logged, never raises.
+    Never raises; all errors are logged. Returns ``None`` normally. Returns
+    the packets themselves when the agent call TIMED OUT and the batch
+    deserves one retry — the scholar worker re-enqueues them with a bumped
+    ``scholar_retries`` marker (see :class:`scheduler.ScholarWorker`). A
+    timeout is the one failure mode where the batch is still good: the
+    canonical cause is laptop sleep freezing the run mid-flight, and
+    dropping it loses real proposals (observed: a sealed batch lost to a
+    lid-close).
     """
     if not packets:
         log.debug("scholar.review: empty packet list; nothing to do")
-        return
+        return None
 
     # Integrity-repair escalations carried by these packets. Concluding
     # this batch RELEASES their in-flight markers (the attempt is over),
@@ -668,7 +677,7 @@ def review(packets: Sequence[Mapping[str, Any]]) -> None:
     # the same issue; the NEXT pass re-escalates once the marker is gone.
     repair_fps = _collect_repair_fingerprints(packets)
     try:
-        _review_inner(packets)
+        return _review_inner(packets)
     finally:
         if repair_fps:
             repair_queue.get_queue().clear(repair_fps)
@@ -678,10 +687,13 @@ def review(packets: Sequence[Mapping[str, Any]]) -> None:
             )
 
 
-def _review_inner(packets: Sequence[Mapping[str, Any]]) -> None:
+def _review_inner(
+    packets: Sequence[Mapping[str, Any]],
+) -> "Optional[Sequence[Mapping[str, Any]]]":
     """Body of :func:`review` minus the repair-marker release. Split out so
     the release in ``review``'s ``finally`` covers the early-return paths
-    here without duplicating the clear at each ``return``."""
+    here without duplicating the clear at each ``return``. Returns the
+    packets to requeue on a first timeout, else ``None`` (see review)."""
     n_packets, n_props, n_ints = _count_inputs(packets)
 
     if _all_empty(packets):
@@ -695,7 +707,7 @@ def _review_inner(packets: Sequence[Mapping[str, Any]]) -> None:
         # content is signal we want to prime against regardless.
         _refresh_priming_safe(packets, "empty-packet path")
         _maybe_run_decay_sweep_safe("empty-packet path")
-        return
+        return None
 
     session_id = _batch_session_id(packets)
     ensure_home()  # create ~/.agent-mem/ if missing (side effect only)
@@ -727,9 +739,26 @@ def _review_inner(packets: Sequence[Mapping[str, Any]]) -> None:
     )
 
     try:
-        result = _invoke_scholar_agent(prompt, knowledge_root, record)
+        try:
+            result = _invoke_scholar_agent(prompt, knowledge_root, record)
+        except LLMTimeout as e:
+            record.mark_error(e)
+            record.output_raw = ""
+            # A timeout says nothing about the batch (laptop sleep mid-run is
+            # the canonical cause) — give it exactly one retry via the worker
+            # before giving up, instead of silently losing the proposals.
+            already_retried = any(int(p.get("scholar_retries", 0) or 0) > 0 for p in packets)
+            if already_retried:
+                log.warning("scholar.review: agent timeout (%s) on retry; batch dropped", e)
+                return None
+            log.warning(
+                "scholar.review: agent timeout (%s); requeueing %d packet(s) for one retry",
+                e,
+                len(packets),
+            )
+            return packets
         if result is None:
-            return
+            return None
         decisions, cost_usd = result
 
         # The agent returned a typed, boundary-validated ScholarDecisions —

@@ -53,7 +53,7 @@ def _stub_agent(monkeypatch, *, proposal: LibrarianProposal, cost: float = 0.0, 
     """Patch the agent runner to return ``(proposal, cost)`` and capture the
     prompt + knowledge_dir it was called with."""
 
-    def _run(prompt, knowledge_dir, *, timeout_s=600.0):
+    def _run(prompt, knowledge_dir, *, timeout_s=600.0, user_asserted_turns=0):
         if captured is not None:
             captured["prompt"] = prompt
             captured["knowledge_dir"] = knowledge_dir
@@ -94,7 +94,7 @@ def _payload_snap(session_id: str, exchanges: list[tuple[str, str]]):
 def test_scan_empty_buffer_returns_empty_packet_no_llm(home, monkeypatch):
     called = {"n": 0}
 
-    def _run(prompt, knowledge_dir, *, timeout_s=600.0):
+    def _run(prompt, knowledge_dir, *, timeout_s=600.0, user_asserted_turns=0):
         called["n"] += 1
         return _proposal({"proposals": [], "interrupts": []}), 0.0
 
@@ -281,7 +281,7 @@ def test_scan_writes_audit_jsonl(home, monkeypatch):
 
 
 def test_scan_agent_exception_swallowed(home, monkeypatch):
-    def boom(prompt, knowledge_dir, *, timeout_s=600.0):
+    def boom(prompt, knowledge_dir, *, timeout_s=600.0, user_asserted_turns=0):
         raise RuntimeError("provider down")
 
     monkeypatch.setattr(librarian, "run_librarian_agent", boom)
@@ -296,7 +296,7 @@ def test_scan_agent_exception_swallowed(home, monkeypatch):
 
 
 def test_scan_agent_timeout_swallowed(home, monkeypatch):
-    def slow(prompt, knowledge_dir, *, timeout_s=600.0):
+    def slow(prompt, knowledge_dir, *, timeout_s=600.0, user_asserted_turns=0):
         raise LLMTimeout("exceeded 600s")
 
     monkeypatch.setattr(librarian, "run_librarian_agent", slow)
@@ -373,7 +373,7 @@ def test_scan_attaches_fingerprints_even_on_agent_error(home, monkeypatch):
     marker can be released — otherwise it stays in-flight forever."""
     fp = _queue_task()
 
-    def boom(prompt, knowledge_dir, *, timeout_s=600.0):
+    def boom(prompt, knowledge_dir, *, timeout_s=600.0, user_asserted_turns=0):
         raise RuntimeError("provider down")
 
     monkeypatch.setattr(librarian, "run_librarian_agent", boom)
@@ -390,7 +390,7 @@ def test_scan_runs_agent_for_repair_task_even_with_empty_buffer(home, monkeypatc
     fp = _queue_task()
     called = {"n": 0}
 
-    def _run(prompt, knowledge_dir, *, timeout_s=600.0):
+    def _run(prompt, knowledge_dir, *, timeout_s=600.0, user_asserted_turns=0):
         called["n"] += 1
         return _proposal({"proposals": [], "interrupts": []}), 0.0
 
