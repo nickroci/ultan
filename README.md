@@ -26,72 +26,6 @@ It's your library. On your disk. In plain markdown. You can `ls` it, `cat` it, `
 
 ---
 
-## Design, in one paragraph
-
-Ultan is modelled — deliberately, at the level of the architecture, not as decoration — on how mammalian brains decide what to remember and how to surface it again later. Three ideas drive the whole system:
-
-<p align="center">
-  <a href="docs/architecture.png">
-    <img src="docs/architecture.png" width="800" alt="Coding sessions (multiple cascading windows) on the left, exchanging events with Ultan on the right. Inside Ultan: Librarian (Sonnet) sits above Scholar (Opus, the gate) which writes approved entries down into a stack of markdown documents labelled Knowledge." />
-  </a>
-</p>
-
-1. **Surprise gates storage.** Memory is not a transcript. The brain encodes events that violate prediction; novelty and reward-prediction-error are the dopaminergic signals that license hippocampal write (Lisman & Grace, 2005; Schultz, Dayan & Montague, 1997). Ultan's curator does the same: it captures an entry only when the user has told it something a competent assistant would *not* have produced unprompted. No surprise, no write. The three salience signals — **contradicts**, **novel**, **reinforces** — are direct analogues of prediction-error, novelty, and reactivation/consolidation (Sinclair & Barense, 2019).
-2. **Two systems, asymmetric bars.** Fast recall-tuned detection, slow precision-tuned deliberation — System 1 and System 2 (Kahneman, 2011). The Librarian (Sonnet) flags candidates aggressively. The Scholar (Opus) verifies them slowly and decides whether to commit. Cheap-and-broad gates expensive-and-narrow, the way the brain's salience network gates the prefrontal cortex.
-3. **Three retrieval tiers.** Humans don't query memory uniformly. They get ambient familiarity-driven priming, deliberate hippocampal recollection, and a fast orbital-PFC "stop signal" when the environment matches a stored constraint (Yonelinas, 2002; Aron, Robbins & Poldrack, 2014). Ultan exposes each as a separate mechanism with its own latency budget (§ *Three retrieval tiers*, below).
-
-### References
-
-- Lisman, J.E. & Grace, A.A. (2005). *The Hippocampal-VTA Loop: Controlling the Entry of Information into Long-Term Memory.* Neuron, 46(5), 703–713.
-- Schultz, W., Dayan, P. & Montague, P.R. (1997). *A neural substrate of prediction and reward.* Science, 275(5306), 1593–1599.
-- Yonelinas, A.P. (2002). *The nature of recollection and familiarity: A review of 30 years of research.* Journal of Memory and Language, 46(3), 441–517.
-- Kahneman, D. (2011). *Thinking, Fast and Slow.* Farrar, Straus and Giroux.
-- Aron, A.R., Robbins, T.W. & Poldrack, R.A. (2014). *Inhibition and the right inferior frontal cortex: one decade on.* Trends in Cognitive Sciences, 18(4), 177–185.
-- Sinclair, A.H. & Barense, M.D. (2019). *Prediction Error and Memory Reactivation: How Incomplete Reminders Drive Reconsolidation.* Trends in Neurosciences, 42(10), 727–739.
-- Collins, A.M. & Loftus, E.F. (1975). *A spreading-activation theory of semantic processing.* Psychological Review, 82(6), 407–428.
-
----
-
-## What it does
-
-- **Surprise gates the write** (see *Design, in one paragraph*, above). The curator asks, of every candidate, "would a competent assistant produce this advice unprompted?" If yes — already in the model's baseline knowledge, no information added by storing it — skip. If no, capture. Three salience signals trigger a write, mapping directly onto prediction-error, novelty, and reactivation:
-  - **Contradicts** an existing entry — user has changed their mind. Highest priority. Deprecates the old, writes the new. *(Prediction-error: stored belief was wrong.)*
-  - **Novel** — not in the library, not derivable from the model's training (user-specific facts, strict overrides of defaults, idiosyncratic preferences). *(Novelty: no matching trace exists.)*
-  - **Reinforces** — user repeated something we already have. No new entry; daemon bumps a `reinforced` counter on the existing entry to track how often it's reasserted. *(Reactivation: existing trace strengthened, not duplicated — Sinclair & Barense, 2019.)*
-- **Use-tracking, not a write trigger.** A fourth `salience_signal` value, **used_helpfully**, fires when the agent actually *relied on* a surfaced entry to answer — the Librarian judges genuine reliance (a mere mention is not use; disagreement stays *contradicts*), and the Scholar deterministically bumps a separate `fired-helpful` counter on the cited entry, deduped per turn so a re-scanned turn never double-counts. It is the positive-evidence half of the prefrontal-inhibition analog (see *Roadmap*), kept distinct from the three write-gating signals above. *(Now consumed by Tier-1 ranking as a gentle usefulness tiebreaker; feeding it into decay resistance is still a TODO — see Roadmap.)*
-- **Two-tier curator with asymmetric bars.** The Librarian (Sonnet) does fast salience detection — low bar, recall-tuned. The Scholar (Opus) deliberates — higher bar, precision-tuned. System 1 gates System 2; cheap-and-broad gates expensive-and-narrow.
-- **Organises a real library, not a flat pile.** Topical hierarchy emerges from content. Every folder has a README. ≤5 entries per directory before splitting. Auto-maintained child listings between marker comments. Wikilinks validate. Frontmatter validates. Scope/path agreement enforced.
-- **Three slash commands** wire it into Claude Code without ceremony:
-  - `/ultan <text>` — drop something into memory now, no extraction needed.
-  - `/ultan-install` — wire the hooks into the current project's `.claude/settings.json`.
-  - `/ultan-advisor <question>` — query the library before asking the user a preference question. The advisor finds relevant entries (Sonnet, BM25 + embeddings + Read), writes a referenced answer (Opus), and clearly distinguishes stored knowledge from its own opinion. *Always cheaper to check than to ask.*
-- **Pure markdown store.** No database. The library is `~/.agent-mem/knowledge/` — `ls`, `cat`, `git` it. Two derived indexes alongside (`.bm25.idx` for keyword, `.embeddings.idx` for semantic) auto-rebuild on drift.
-
-### Three retrieval tiers
-
-The agent can't afford to query the library for everything it's about to do, and humans don't either — retrieval is layered. Familiarity-based priming via spreading activation (Collins & Loftus, 1975); explicit hippocampal recollection (Yonelinas, 2002); and the rapid orbital-PFC "stop signal" that interrupts an in-flight action when it conflicts with a stored constraint (Aron, Robbins & Poldrack, 2014). Ultan implements all three:
-
-| Tier | Cognitive analog | Latency | Trigger | What it does |
-|---|---|---|---|---|
-| **1. Ambient priming** | Familiarity / spreading activation (Collins & Loftus, 1975) | <2s (Unix-socket round trip to warm daemon; budget enforced by the hook) | Hook fires a priming RPC to the daemon on every UserPromptSubmit | Top **3** most-relevant entries injected as `additionalContext` on every UserPromptSubmit, **each with a short body excerpt** so the agent can cite the actual rule rather than guess from the title. Bullets carry freshness (`★` for entries updated in the last 7 days) and kind markers (`[C]` convention, `[P]` preference, `[F]` finding, `[W]` warn). **Per-session dedup**: entries already surfaced this session don't re-surface — once shown, they're in the agent's context. Three-stage retrieval: BM25 + sentence-transformer embeddings (nomic-embed-text-v1.5) → RRF fusion → cross-encoder rerank (ms-marco-MiniLM-L-12-v2), boosted by `reinforced` counter, project-scope prior (current-project bonus, cross-project penalty), and a gentle `fired-helpful`/`fired` usefulness tiebreaker. ≤1500 char budget. |
-| **2. Deliberate recall** | Hippocampal recollection (Yonelinas, 2002) | 30-60s | `/ultan-advisor <question>` invocation | Sonnet Librarian searches deeply, Opus Scholar synthesises a referenced answer. The drill-down when the priming snippet isn't enough. |
-| **3. Acute notice** | Orbital-PFC stop signal (Aron et al., 2014) | <100ms synchronous | PreToolUse hook on every tool call | Default `advise`: pattern-matches the tool call against entries with `block_triggers`; on match, emits an `additionalContext` FYI — *"📚 Library note: [[X]] applies here"* — and the tool proceeds. **The agent decides.** Opt-in `severity: block` is reserved for genuinely dangerous actions (`rm -rf /`, force-push to main); only then does the hook hard-deny. Like a human noticing a relevant memory mid-action: noticed, not paralysed. |
-
-The Scholar still owns a **soft nudge pipeline** orthogonal to these — when the Librarian sees a stored preference matching the rolling buffer, the Scholar can approve a nudge to `pending-nudges.md` for injection on the next turn. Budget: 1/turn, 3/session.
-
-### The library is a graph
-
-The library is structurally a graph: folder hierarchy gives the tree, wikilinks (`[[path/to/entry]]`) give cross-links that turn it into a DAG. The Scholar maintains both as first-class objects — `add_wikilink` is one of its action verbs, every folder README's child listing is auto-reconciled between marker comments, and every wikilink is validated on write (the Librarian's proposal is dropped if a link doesn't resolve).
-
-Retrieval over the graph is split across tiers:
-
-- **Tier 1 (priming) is text-only** — three-stage retrieval: BM25 + sentence-transformer embeddings (nomic-embed-text-v1.5) fused via RRF, then re-ordered by a cross-encoder reranker (ms-marco-MiniLM-L-12-v2) co-attending over each `(query, body)` pair, and finally boosted by the `reinforced` counter, project-scope prior (current-project bonus + cross-project penalty), and a gentle `fired-helpful`/`fired` usefulness tiebreaker. The top 3 survivors are rendered with body excerpts, freshness markers, and one-character kind tags; per-session dedup suppresses entries already shown to the agent. The retriever does not traverse the graph; it returns top-k entries by relevance, with wikilinks appearing in the output as *hints*.
-- **Tier 2 (deliberate recall) is agent-driven graph traversal.** The agent sees wikilinks in priming context and follows them via the `ultan-search` skill, which returns the entry plus its local neighborhood — siblings, subfolders, parent README — in one read. The agent decides which edges to follow and when to stop, the same "memory as tools" pattern Letta and Wire have shown beats pre-baked retrieval expansion on cross-document queries.
-
-The deliberate choice: deterministic-and-cheap text retrieval at always-on Tier 1, semantic-and-expensive graph traversal at on-demand Tier 2. PageRank-style structural expansion at Tier 1 is a possible addition (see *Roadmap*), not a current capability.
-
----
-
 ## Quick start
 
 Ultan installs as a native **Claude Code plugin** — no editing `settings.json`, no
@@ -209,6 +143,72 @@ in-process lexical scan so you still see relevant entries.
 To save a memory explicitly: `/ultan never deploy to prod without my explicit OK`.
 
 To ask before asking the user: `/ultan-advisor should I use respx or hand-roll an httpx mock?`.
+
+## Design, in one paragraph
+
+Ultan is modelled — deliberately, at the level of the architecture, not as decoration — on how mammalian brains decide what to remember and how to surface it again later. Three ideas drive the whole system:
+
+<p align="center">
+  <a href="docs/architecture.png">
+    <img src="docs/architecture.png" width="800" alt="Coding sessions (multiple cascading windows) on the left, exchanging events with Ultan on the right. Inside Ultan: Librarian (Sonnet) sits above Scholar (Opus, the gate) which writes approved entries down into a stack of markdown documents labelled Knowledge." />
+  </a>
+</p>
+
+1. **Surprise gates storage.** Memory is not a transcript. The brain encodes events that violate prediction; novelty and reward-prediction-error are the dopaminergic signals that license hippocampal write (Lisman & Grace, 2005; Schultz, Dayan & Montague, 1997). Ultan's curator does the same: it captures an entry only when the user has told it something a competent assistant would *not* have produced unprompted. No surprise, no write. The three salience signals — **contradicts**, **novel**, **reinforces** — are direct analogues of prediction-error, novelty, and reactivation/consolidation (Sinclair & Barense, 2019).
+2. **Two systems, asymmetric bars.** Fast recall-tuned detection, slow precision-tuned deliberation — System 1 and System 2 (Kahneman, 2011). The Librarian (Sonnet) flags candidates aggressively. The Scholar (Opus) verifies them slowly and decides whether to commit. Cheap-and-broad gates expensive-and-narrow, the way the brain's salience network gates the prefrontal cortex.
+3. **Three retrieval tiers.** Humans don't query memory uniformly. They get ambient familiarity-driven priming, deliberate hippocampal recollection, and a fast orbital-PFC "stop signal" when the environment matches a stored constraint (Yonelinas, 2002; Aron, Robbins & Poldrack, 2014). Ultan exposes each as a separate mechanism with its own latency budget (§ *Three retrieval tiers*, below).
+
+### References
+
+- Lisman, J.E. & Grace, A.A. (2005). *The Hippocampal-VTA Loop: Controlling the Entry of Information into Long-Term Memory.* Neuron, 46(5), 703–713.
+- Schultz, W., Dayan, P. & Montague, P.R. (1997). *A neural substrate of prediction and reward.* Science, 275(5306), 1593–1599.
+- Yonelinas, A.P. (2002). *The nature of recollection and familiarity: A review of 30 years of research.* Journal of Memory and Language, 46(3), 441–517.
+- Kahneman, D. (2011). *Thinking, Fast and Slow.* Farrar, Straus and Giroux.
+- Aron, A.R., Robbins, T.W. & Poldrack, R.A. (2014). *Inhibition and the right inferior frontal cortex: one decade on.* Trends in Cognitive Sciences, 18(4), 177–185.
+- Sinclair, A.H. & Barense, M.D. (2019). *Prediction Error and Memory Reactivation: How Incomplete Reminders Drive Reconsolidation.* Trends in Neurosciences, 42(10), 727–739.
+- Collins, A.M. & Loftus, E.F. (1975). *A spreading-activation theory of semantic processing.* Psychological Review, 82(6), 407–428.
+
+---
+
+## What it does
+
+- **Surprise gates the write** (see *Design, in one paragraph*, above). The curator asks, of every candidate, "would a competent assistant produce this advice unprompted?" If yes — already in the model's baseline knowledge, no information added by storing it — skip. If no, capture. Three salience signals trigger a write, mapping directly onto prediction-error, novelty, and reactivation:
+  - **Contradicts** an existing entry — user has changed their mind. Highest priority. Deprecates the old, writes the new. *(Prediction-error: stored belief was wrong.)*
+  - **Novel** — not in the library, not derivable from the model's training (user-specific facts, strict overrides of defaults, idiosyncratic preferences). *(Novelty: no matching trace exists.)*
+  - **Reinforces** — user repeated something we already have. No new entry; daemon bumps a `reinforced` counter on the existing entry to track how often it's reasserted. *(Reactivation: existing trace strengthened, not duplicated — Sinclair & Barense, 2019.)*
+- **Use-tracking, not a write trigger.** A fourth `salience_signal` value, **used_helpfully**, fires when the agent actually *relied on* a surfaced entry to answer — the Librarian judges genuine reliance (a mere mention is not use; disagreement stays *contradicts*), and the Scholar deterministically bumps a separate `fired-helpful` counter on the cited entry, deduped per turn so a re-scanned turn never double-counts. It is the positive-evidence half of the prefrontal-inhibition analog (see *Roadmap*), kept distinct from the three write-gating signals above. *(Now consumed by Tier-1 ranking as a gentle usefulness tiebreaker; feeding it into decay resistance is still a TODO — see Roadmap.)*
+- **Two-tier curator with asymmetric bars.** The Librarian (Sonnet) does fast salience detection — low bar, recall-tuned. The Scholar (Opus) deliberates — higher bar, precision-tuned. System 1 gates System 2; cheap-and-broad gates expensive-and-narrow.
+- **Organises a real library, not a flat pile.** Topical hierarchy emerges from content. Every folder has a README. ≤5 entries per directory before splitting. Auto-maintained child listings between marker comments. Wikilinks validate. Frontmatter validates. Scope/path agreement enforced.
+- **Three slash commands** wire it into Claude Code without ceremony:
+  - `/ultan <text>` — drop something into memory now, no extraction needed.
+  - `/ultan-install` — wire the hooks into the current project's `.claude/settings.json`.
+  - `/ultan-advisor <question>` — query the library before asking the user a preference question. The advisor finds relevant entries (Sonnet, BM25 + embeddings + Read), writes a referenced answer (Opus), and clearly distinguishes stored knowledge from its own opinion. *Always cheaper to check than to ask.*
+- **Pure markdown store.** No database. The library is `~/.agent-mem/knowledge/` — `ls`, `cat`, `git` it. Two derived indexes alongside (`.bm25.idx` for keyword, `.embeddings.idx` for semantic) auto-rebuild on drift.
+
+### Three retrieval tiers
+
+The agent can't afford to query the library for everything it's about to do, and humans don't either — retrieval is layered. Familiarity-based priming via spreading activation (Collins & Loftus, 1975); explicit hippocampal recollection (Yonelinas, 2002); and the rapid orbital-PFC "stop signal" that interrupts an in-flight action when it conflicts with a stored constraint (Aron, Robbins & Poldrack, 2014). Ultan implements all three:
+
+| Tier | Cognitive analog | Latency | Trigger | What it does |
+|---|---|---|---|---|
+| **1. Ambient priming** | Familiarity / spreading activation (Collins & Loftus, 1975) | <2s (Unix-socket round trip to warm daemon; budget enforced by the hook) | Hook fires a priming RPC to the daemon on every UserPromptSubmit | Top **3** most-relevant entries injected as `additionalContext` on every UserPromptSubmit, **each with a short body excerpt** so the agent can cite the actual rule rather than guess from the title. Bullets carry freshness (`★` for entries updated in the last 7 days) and kind markers (`[C]` convention, `[P]` preference, `[F]` finding, `[W]` warn). **Per-session dedup**: entries already surfaced this session don't re-surface — once shown, they're in the agent's context. Three-stage retrieval: BM25 + sentence-transformer embeddings (nomic-embed-text-v1.5) → RRF fusion → cross-encoder rerank (ms-marco-MiniLM-L-12-v2), boosted by `reinforced` counter, project-scope prior (current-project bonus, cross-project penalty), and a gentle `fired-helpful`/`fired` usefulness tiebreaker. ≤1500 char budget. |
+| **2. Deliberate recall** | Hippocampal recollection (Yonelinas, 2002) | 30-60s | `/ultan-advisor <question>` invocation | Sonnet Librarian searches deeply, Opus Scholar synthesises a referenced answer. The drill-down when the priming snippet isn't enough. |
+| **3. Acute notice** | Orbital-PFC stop signal (Aron et al., 2014) | <100ms synchronous | PreToolUse hook on every tool call | Default `advise`: pattern-matches the tool call against entries with `block_triggers`; on match, emits an `additionalContext` FYI — *"📚 Library note: [[X]] applies here"* — and the tool proceeds. **The agent decides.** Opt-in `severity: block` is reserved for genuinely dangerous actions (`rm -rf /`, force-push to main); only then does the hook hard-deny. Like a human noticing a relevant memory mid-action: noticed, not paralysed. |
+
+The Scholar still owns a **soft nudge pipeline** orthogonal to these — when the Librarian sees a stored preference matching the rolling buffer, the Scholar can approve a nudge to `pending-nudges.md` for injection on the next turn. Budget: 1/turn, 3/session.
+
+### The library is a graph
+
+The library is structurally a graph: folder hierarchy gives the tree, wikilinks (`[[path/to/entry]]`) give cross-links that turn it into a DAG. The Scholar maintains both as first-class objects — `add_wikilink` is one of its action verbs, every folder README's child listing is auto-reconciled between marker comments, and every wikilink is validated on write (the Librarian's proposal is dropped if a link doesn't resolve).
+
+Retrieval over the graph is split across tiers:
+
+- **Tier 1 (priming) is text-only** — three-stage retrieval: BM25 + sentence-transformer embeddings (nomic-embed-text-v1.5) fused via RRF, then re-ordered by a cross-encoder reranker (ms-marco-MiniLM-L-12-v2) co-attending over each `(query, body)` pair, and finally boosted by the `reinforced` counter, project-scope prior (current-project bonus + cross-project penalty), and a gentle `fired-helpful`/`fired` usefulness tiebreaker. The top 3 survivors are rendered with body excerpts, freshness markers, and one-character kind tags; per-session dedup suppresses entries already shown to the agent. The retriever does not traverse the graph; it returns top-k entries by relevance, with wikilinks appearing in the output as *hints*.
+- **Tier 2 (deliberate recall) is agent-driven graph traversal.** The agent sees wikilinks in priming context and follows them via the `ultan-search` skill, which returns the entry plus its local neighborhood — siblings, subfolders, parent README — in one read. The agent decides which edges to follow and when to stop, the same "memory as tools" pattern Letta and Wire have shown beats pre-baked retrieval expansion on cross-document queries.
+
+The deliberate choice: deterministic-and-cheap text retrieval at always-on Tier 1, semantic-and-expensive graph traversal at on-demand Tier 2. PageRank-style structural expansion at Tier 1 is a possible addition (see *Roadmap*), not a current capability.
+
+---
 
 ## Development setup
 
