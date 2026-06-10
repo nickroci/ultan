@@ -21,7 +21,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -x \"${CLAUDE_PLUGIN_DATA}/bin/ultan\" ] && \"${CLAUDE_PLUGIN_DATA}/bin/ultan\" hook user-prompt-submit || true",
+            "command": "if [ -x \"${CLAUDE_PLUGIN_DATA}/bin/ultan\" ]; then \"${CLAUDE_PLUGIN_DATA}/bin/ultan\" hook user-prompt-submit; else \"${CLAUDE_PLUGIN_ROOT}/scripts/ensure-ultan.sh\"; fi || true",
             "timeout": 5
           }
         ]

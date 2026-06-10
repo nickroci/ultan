@@ -37,7 +37,7 @@ if [ -f "$LOG" ]; then
   echo "ultan: a new Claude Code session retries automatically." >&2
   exit 1
 fi
-echo "ultan: not provisioned yet — the plugin installs Ultan in the background at" >&2
-echo "ultan: session start (progress lands in $DATA/install.log)." >&2
-echo "ultan: if this is a fresh install, start a new session or wait a minute." >&2
+echo "ultan: not provisioned yet — the plugin installs Ultan in the background," >&2
+echo "ultan: triggered by session start OR your next prompt (progress lands in" >&2
+echo "ultan: $DATA/install.log). Send any message and try again in a minute." >&2
 exit 1

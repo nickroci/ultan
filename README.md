@@ -47,18 +47,21 @@ Inside Claude Code:
 > hundred MB) in the background, and you can keep working while it finishes.
 
 That's it. Skills and slash commands hot-load the instant you install; `/reload-plugins`
-pulls in the hooks and the MCP server. **A full Claude Code restart is not required** — a
-fresh session also works, but you don't need one.
+pulls in the hooks and the MCP server. **A full Claude Code restart is not required** —
+your next prompt kicks off provisioning automatically (a fresh session works too; you
+don't need one).
 
 > 🩺 **Wondering what it's doing? Ask Claude to run `ultan doctor`.** It reports
 > whether the background install is still running, the daemon's state (warming /
 > healthy / idle), priming latency, and capture freshness — at any stage, even
 > mid-install.
 
-On first use a `SessionStart` hook provisions that retrieval stack into the plugin's
-private storage **in the background**. Until it finishes, priming falls back to a fast
-lexical scan; after that the daemon **lazy-starts on demand**. Models download anonymously
-from HuggingFace — see *First-start expectations* below.
+On first use the plugin provisions that retrieval stack into its private storage
+**in the background** — triggered by `SessionStart` in a fresh session, or by your
+first prompt when you installed mid-session (`/reload-plugins` alone doesn't fire
+`SessionStart`, so the prompt hook covers that path). Until it finishes, priming
+falls back to a fast lexical scan; after that the daemon **lazy-starts on demand**.
+Models download anonymously from HuggingFace — see *First-start expectations* below.
 
 You now have:
 
