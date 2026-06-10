@@ -28,6 +28,15 @@ sources = ["."]
 agent-mem = { workspace = true }
 agent-mem-daemon = { workspace = true }
 
+[dependency-groups]
+# CI's `uv sync --locked` in this dir installs only this package + its dev
+# group — without these the lint/type/test steps have no tools to run.
+dev = [
+    "pytest>=8.0",
+    "pyright>=1.1.409",
+    "ruff>=0.15",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

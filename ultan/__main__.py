@@ -66,6 +66,10 @@ def main() -> int:
         from . import _mcp
 
         return _mcp.serve()
+    # advisor / remember ship via the [retrieval] extra (agent-mem-tools), so
+    # a thin install — including the root CI job's env — deliberately lacks
+    # them. stubs/*.pyi give pyright their signatures either way, so these
+    # call sites type identically in thin and full envs.
     if args.cmd == "advisor":
         # Lazy: advisor pulls claude-agent-sdk + the daemon's library_tools
         # (heavy embeddings stack). Must stay off the hook hot path.
