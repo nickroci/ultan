@@ -14,10 +14,49 @@ hook hot path (see tests/test_hook_import.py).
 
 from __future__ import annotations
 
+import os
+import subprocess
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
+
+
+def _kick_provisioner() -> None:
+    """Fire the plugin's background installer if the runtime isn't provisioned.
+
+    The plugin spec has no install-time script, but Claude Code starts this
+    MCP server right after `/plugin install` + `/reload-plugins` — the
+    earliest code the plugin gets to run — so kicking here makes provisioning
+    start at install time in practice. Idempotent and cheap: ensure-ultan.sh
+    returns immediately and holds an atomic install lock, so overlapping
+    kicks from the MCP server, SessionStart, and the first-prompt fallback
+    all collapse into one install. plugin.json passes CLAUDE_PLUGIN_ROOT /
+    CLAUDE_PLUGIN_DATA into our env; missing vars degrade to a no-op (the
+    other triggers still cover provisioning)."""
+    data = os.environ.get("CLAUDE_PLUGIN_DATA") or str(
+        Path.home() / ".claude" / "plugins" / "data" / "ultan-ultan"
+    )
+    if (Path(data) / "bin" / "ultan").exists():
+        return  # already provisioned
+    root = os.environ.get("CLAUDE_PLUGIN_ROOT")
+    if not root:
+        return
+    script = Path(root) / "scripts" / "ensure-ultan.sh"
+    if not script.exists():
+        return
+    try:
+        subprocess.Popen(
+            ["bash", str(script)],
+            env={**os.environ, "CLAUDE_PLUGIN_DATA": data},
+            stdout=subprocess.DEVNULL,  # the installer logs to install.log itself
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        pass
 
 
 def build_server() -> "FastMCP":
@@ -48,11 +87,13 @@ def build_server() -> "FastMCP":
 
 
 def serve() -> int:
-    """Run the MCP server over stdio (what Claude Code launches). Async-spawns
-    the daemon first so memory comes up in the background without blocking the
-    MCP handshake or hitting Claude Code's server-startup timeout."""
+    """Run the MCP server over stdio (what Claude Code launches). Kicks the
+    plugin provisioner if the runtime is missing (closest thing to an
+    install-time hook — see _kick_provisioner), then async-spawns the daemon;
+    neither blocks the MCP handshake or Claude Code's server-startup timeout."""
     from . import _daemon
 
+    _kick_provisioner()
     _daemon.ensure_running()
     build_server().run()
     return 0
