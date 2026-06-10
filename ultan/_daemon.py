@@ -16,12 +16,14 @@ Provisioning the venv is `scripts/ensure-ultan.sh`'s job on SessionStart.
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any, cast
 
 # The daemon console script ships in the same venv as this `ultan` install, so
 # it lives next to the running interpreter (sys.executable).
@@ -55,6 +57,44 @@ def _socket_answering() -> bool:
     except OSError:
         return False
     return True
+
+
+def _pid_alive(pid: object) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, owned by someone else
+    except OSError:
+        return False
+    return True
+
+
+def status() -> str:
+    """Coarse daemon state for consumers that must phrase fallbacks honestly:
+    ``"ready"`` (socket answering), ``"warming"`` (daemon alive or freshly
+    spawned but not serving yet), or ``"down"``. One socket probe plus cheap
+    file stats — fine on the hook hot path."""
+    if _socket_answering():
+        return "ready"
+    home = _home()
+    # The daemon's own lifecycle flag (written between pid-acquire and exit).
+    try:
+        raw: Any = json.loads((home / "daemon.state").read_text(encoding="utf-8"))
+        if isinstance(raw, dict) and _pid_alive(cast("dict[str, Any]", raw).get("pid")):
+            return "warming"
+    except (OSError, ValueError):
+        pass
+    # A spawn was attempted moments ago (pre-flag window, or older daemon).
+    try:
+        if (time.time() - (home / ".daemon-spawn-attempt").stat().st_mtime) < 300.0:
+            return "warming"
+    except OSError:
+        pass
+    return "down"
 
 
 def run_foreground(extra_args: list[str]) -> int:
