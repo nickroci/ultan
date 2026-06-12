@@ -1,20 +1,21 @@
 """The daemon stamps the version of the code it is running into daemon.state, so
 the `ultan` spawn path can detect a daemon left on old code after an update and
-restart it. (Home is isolated by the autouse fixture in conftest.)"""
+restart it. ``agent_mem_home`` isolates AGENT_MEM_HOME (opt-in, per conftest) so
+the write never touches the user's real ~/.agent-mem."""
 
 from __future__ import annotations
 
 import importlib.metadata as md
 import json
 import os
+from pathlib import Path
 
 from agent_mem_daemon import __main__ as dm
-from agent_mem_daemon.paths import daemon_state_path
 
 
-def test_write_daemon_state_records_running_version() -> None:
+def test_write_daemon_state_records_running_version(agent_mem_home: Path) -> None:
     dm.write_daemon_state("ready")
-    state = json.loads(daemon_state_path().read_text(encoding="utf-8"))
+    state = json.loads((agent_mem_home / "daemon.state").read_text(encoding="utf-8"))
     assert state["phase"] == "ready"
     assert state["pid"] == os.getpid()
     # The version of the code this process is running, read from on-disk metadata
