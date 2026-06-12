@@ -170,9 +170,8 @@ Ultan is modelled — deliberately, at the level of the architecture, not as dec
 - **Use-tracking, not a write trigger.** A fourth `salience_signal` value, **used_helpfully**, fires when the agent actually *relied on* a surfaced entry to answer — the Librarian judges genuine reliance (a mere mention is not use; disagreement stays *contradicts*), and the Scholar deterministically bumps a separate `fired-helpful` counter on the cited entry, deduped per turn so a re-scanned turn never double-counts. It is the positive-evidence half of the prefrontal-inhibition analog (see *Roadmap*), kept distinct from the three write-gating signals above. *(Now consumed by Tier-1 ranking as a gentle usefulness tiebreaker; feeding it into decay resistance is still a TODO — see Roadmap.)*
 - **Two-tier curator with asymmetric bars.** The Librarian (Sonnet) does fast salience detection — low bar, recall-tuned. The Scholar (Opus) deliberates — higher bar, precision-tuned. System 1 gates System 2; cheap-and-broad gates expensive-and-narrow.
 - **Organises a real library, not a flat pile.** Topical hierarchy emerges from content. Every folder has a README. ≤5 entries per directory before splitting. Auto-maintained child listings between marker comments. Wikilinks validate. Frontmatter validates. Scope/path agreement enforced.
-- **Three slash commands** wire it into Claude Code without ceremony:
+- **Two slash commands** wire it into Claude Code without ceremony:
   - `/ultan <text>` — drop something into memory now, no extraction needed.
-  - `/ultan-install` — wire the hooks into the current project's `.claude/settings.json`.
   - `/ultan-advisor <question>` — query the library before asking the user a preference question. The advisor finds relevant entries (Sonnet, BM25 + embeddings + Read), writes a referenced answer (Opus), and clearly distinguishes stored knowledge from its own opinion. *Always cheaper to check than to ask.*
 - **Pure markdown store.** No database. The library is `~/.agent-mem/knowledge/` — `ls`, `cat`, `git` it. Two derived indexes alongside (`.bm25.idx` for keyword, `.embeddings.idx` for semantic) auto-rebuild on drift.
 
@@ -216,13 +215,14 @@ cd daemon && uv sync --group dev
 #    are downloaded on first daemon start (see step 4 below).
 cd ../tools/search && uv sync
 
-# 3. Install the slash commands and hooks
-#    - /ultan, /ultan-install, /ultan-advisor live at ~/.claude/commands/
-#    - `/ultan-install` writes hooks into ~/.claude/settings.json (GLOBAL — every
-#      Claude Code project). One daemon per machine serves the whole library
-#      across every repo, so global is the recommended default.
-#    - `/ultan-install --project` if you'd rather scope to one repo only.
-#    NOTE: don't run this if you've installed the plugin — the hooks would double-fire.
+# 3. Wire the hooks
+#    The plugin is the supported install path: it registers the hooks (and the
+#    /ultan, /ultan-advisor commands) automatically from `hooks/hooks.json`.
+#    Running from source WITHOUT the plugin, mirror the `ultan hook <event>`
+#    entries in `hooks/hooks.json` into your own ~/.claude/settings.json. One
+#    daemon per machine serves the whole library across every repo.
+#    NOTE: don't wire these by hand if you've installed the plugin — the hooks
+#    would double-fire.
 
 # 4. Start the daemon (foreground; logs to ~/.agent-mem/daemon.log). One per
 #    machine — it listens on ~/.agent-mem/priming.sock and answers Tier-1
@@ -292,16 +292,17 @@ What we deliberately didn't borrow from `claude-hooks`: the Qdrant / pgvector / 
 ```
 agent-mem/
   README.md             ← this file
+  ultan/                ← hook runtime + `ultan` CLI (dispatch, doctor, mcp) and
+                          the hot-path modules (events, priming, blockers, nudges)
+  hooks/                ← hooks.json — the plugin's hook manifest
+  commands/             ← /ultan, /ultan-advisor slash commands
+  skills/               ← ultan-search skill
   daemon/               ← the long-lived event-ingest daemon
     agent_mem_daemon/   ← package
     tests/              ← pytest suite (see Status below for current count)
     pyproject.toml      ← uv-managed
-  src/                  ← Phase-0 hook layer (forked from claude-memory-compiler)
-    hooks/              ← UserPromptSubmit, PostToolUse, Stop, ...
-    scripts/            ← flush / lint / query
-    AGENTS.md           ← entry-schema reference
   tools/
-    ultan/              ← /ultan, /ultan-install, /ultan-advisor scripts
+    ultan/              ← /ultan, /ultan-advisor command logic (advisor, remember)
     search/             ← `agent-mem search` CLI + BM25 indexer (shared library)
   docs/
     LIBRARIAN_PROMPT.md ← Librarian role reference

@@ -260,11 +260,10 @@ def test_doctor_counts_pending_nudges(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_doctor_dirty_fixture_broken_wikilink(tmp_path: Path, monkeypatch) -> None:
-    """A broken wikilink should be visible in the lint output if lint is reachable.
+    """A broken wikilink surfaces in the doctor's lint section.
 
-    If lint can't be invoked (no `uv` on PATH, missing src checkout) the test
-    degrades to checking that the doctor itself doesn't crash. We don't fail
-    the suite on environment quirks.
+    Lint now runs in-process (no src checkout / subprocess), so it is always
+    available — the injected broken link must surface as an error with rc == 1.
     """
     home, knowledge = _setup_home(tmp_path)
     monkeypatch.setenv("AGENT_MEM_HOME", str(home))
@@ -277,8 +276,5 @@ def test_doctor_dirty_fixture_broken_wikilink(tmp_path: Path, monkeypatch) -> No
     )
 
     report = cli.run_doctor(knowledge)
-    if report.lint_rc < 0:
-        pytest.skip(f"lint unavailable: {report.lint_output!r}")
-    # When lint runs, the broken link should surface as an error and the rc
-    # should be non-zero.
-    assert "broken" in report.lint_output.lower() or report.lint_rc > 0
+    assert report.lint_rc == 1
+    assert "broken_link" in report.lint_output

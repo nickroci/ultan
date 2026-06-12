@@ -57,13 +57,16 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, cast
 
 from . import librarian as librarian_mod
 from . import repair_queue
 from . import scholar as scholar_mod
+from . import transcript as transcript_mod
 from .buffer import Event, RollingBuffer
 from .librarian import EvidencePacket
+from .paths import transcript_marker_path
 
 if TYPE_CHECKING:
     from .ingest import JsonlTailer
@@ -80,6 +83,13 @@ DEFAULT_SCHOLAR_EVERY_M_SECS = 60.0  # ...or every M seconds, whichever first
 DEFAULT_SCHOLAR_MAX_BATCH = 10  # cap batch size for runaway bursts
 DEFAULT_QUEUE_CEILING = 100  # bounded queue capacity
 DEFAULT_SWEEP_INTERVAL_SECS = 300.0  # buffer.sweep cadence
+
+# Role tag stamped on synthetic events carrying assistant natural-language
+# prose pulled from the Claude Code transcript on a Stop/SessionEnd. Distinct
+# from "assistant" (the default role for tool-I/O events) so the Librarian can
+# tell the model's REASONING apart from tool calls. ``flatten_buffer`` renders
+# it via the explicit-``payload.role`` path, so it reaches the prompt verbatim.
+ASSISTANT_PROSE_ROLE = "assistant-prose"
 
 
 LibrarianFn = Callable[[Dict[str, Any]], EvidencePacket]
@@ -438,12 +448,17 @@ class Scheduler:
         config: Optional[SchedulerConfig] = None,
         librarian: LibrarianFn = librarian_mod.scan,
         scholar: ScholarFn = scholar_mod.review,
+        transcript_marker: Optional[Path] = None,
     ) -> None:
         self.buffer = buffer
         self.config = config or SchedulerConfig()
         self._librarian = librarian
         self._scholar = scholar
         self.stats = SchedulerStats()
+        # Where assistant-prose transcript reads persist their per-session
+        # seen-uuid marker (incremental reads). Defaults to the canonical
+        # daemon-home path; tests inject a tmp path.
+        self._transcript_marker = transcript_marker or transcript_marker_path()
 
         # Bounded queues — capacity == queue_ceiling, per scope brief.
         # We use two separate queues so a slow Scholar doesn't choke
@@ -572,7 +587,17 @@ class Scheduler:
 
     def on_event(self, ev: Event) -> None:
         """Fold an Event into the buffer; arm the debounce timer when
-        the event seals a turn."""
+        the event seals a turn.
+
+        On a sealing event (``Stop`` / ``SessionEnd``) that carries a
+        ``transcript_path``, we first read the assistant's natural-language
+        turns from the Claude Code transcript and fold them into the OPEN
+        turn as synthetic ``assistant-prose`` events — so the same Stop
+        seals the model's reasoning alongside the tool I/O the Librarian
+        already sees. Without this the Librarian never sees the assistant's
+        prose (events.jsonl carries only prompts + tool calls)."""
+        if ev.type in ("Stop", "SessionEnd"):
+            self._inject_assistant_prose(ev)
         sealed_sess = self.buffer.ingest(ev)
         if sealed_sess is None:
             return
@@ -605,6 +630,64 @@ class Scheduler:
             # observability.
             self.stats.librarian_debounced += 1
         # ``needs_librarian`` is cleared once the snapshot is enqueued.
+
+    # ---- assistant-prose injection (transcript → buffer) -----------
+
+    @staticmethod
+    def _transcript_path_of(ev: Event) -> Optional[str]:
+        """Pull ``transcript_path`` off a sealing event's payload (or, as a
+        fallback, the raw event dict the hook author may put it on directly).
+        Returns ``None`` when absent — the common case until Phase 2 wires the
+        hook to forward it, so the rest of the daemon degrades to no prose."""
+        for src in (ev.payload, ev.raw):
+            cand = src.get("transcript_path")
+            if isinstance(cand, str) and cand.strip():
+                return cand
+        return None
+
+    def _inject_assistant_prose(self, sealing_ev: Event) -> None:
+        """Read NEW assistant prose for this session's transcript and fold it
+        into the buffer as synthetic ``assistant-prose`` events BEFORE the
+        sealing event seals the open turn.
+
+        Fail-soft on every axis: no ``transcript_path`` → no-op; unreadable
+        transcript → empty list (logged DEBUG in the transcript module);
+        already-seen turns → skipped via the per-session marker. Any
+        unexpected error is swallowed with ``log.exception`` so transcript
+        trouble can never break ingestion."""
+        transcript_path = self._transcript_path_of(sealing_ev)
+        if not transcript_path:
+            return
+        try:
+            prose = transcript_mod.read_new_assistant_prose(
+                Path(transcript_path),
+                session_id=sealing_ev.session_id,
+                marker_path=self._transcript_marker,
+            )
+        except Exception:
+            log.exception(
+                "assistant-prose read failed for session=%s; continuing without prose",
+                sealing_ev.session_id,
+            )
+            return
+        if not prose:
+            return
+        for turn in prose:
+            synthetic = Event(
+                ts=sealing_ev.ts,
+                session_id=sealing_ev.session_id,
+                type="AssistantProse",
+                cwd=sealing_ev.cwd,
+                payload={"role": ASSISTANT_PROSE_ROLE, "text": turn.text},
+            )
+            # Fold into the OPEN turn (not the Stop itself) so it seals into
+            # the same turn and flatten_buffer renders it as a quotable line.
+            self.buffer.ingest(synthetic)
+        log.info(
+            "scheduler: folded %d assistant-prose turn(s) into buffer (session=%s)",
+            len(prose),
+            sealing_ev.session_id,
+        )
 
     # ---- debounce → librarian queue --------------------------------
 
