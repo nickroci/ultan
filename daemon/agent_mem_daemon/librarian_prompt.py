@@ -702,6 +702,48 @@ proposal also carries substantive new content the Scholar approves. \
 Cite the turn precisely: re-seeing the same turn on a later scan must not \
 double-count, which only works if you give the stable ``turn_seq``.
 
+  **DRIFT — reconsolidate an entry that was just retrieved** (mutate in \
+place, sparingly)
+    Retrieval makes a memory labile: an entry that surfaced and was USED \
+this turn is the right moment to fold in a genuine refinement — but \
+reconsolidation also DISTORTS if you let it (every re-write risks eroding \
+the original claim). Propose ``drift`` ONLY when there is real signal, \
+never as a reflexive tidy-up.
+    Propose when EITHER:
+      - the use-context carries a genuine new qualifier, edge case, or \
+correction that belongs in the entry (e.g. entry says "use uv"; this turn \
+established "…except in the legacy `tools/` dir that pins pip" → integrate \
+that caveat), OR
+      - the entry can be sharpened without changing its claim (a buried \
+rule pulled to the top, a stale tangent cut).
+    Hard rules:
+      - The load-bearing claim MUST survive intact. You are integrating or \
+sharpening, NOT rewriting from scratch. If you can't keep the core claim \
+verbatim-in-spirit, this is ``contradicts``, not ``drift``.
+      - Pure rephrasing that adds no information and sharpens nothing → \
+DON'T. That is exactly the churn that turns memories to mush over time.
+      - **SPLIT instead of cramming when the entry sprawls.** Two cases: \
+(a) integrating the new nuance would push the entry to cover more than one \
+coherent claim, or (b) the entry you are already reconsolidating has \
+ALREADY grown large and spans mixed topics. In either case decompose — \
+but gently: only when the topics are genuinely separable, never as \
+reflexive tidying. You are the curator; reorg is your job. Spin the \
+separable material into its OWN entry and trim the original: emit an \
+``update_entry`` on the original (leaner body, with a ``[[link]]`` to the \
+new entry) PLUS a ``write_entry`` for the spun-off entry. Don't let \
+reconsolidation balloon a single file. (If the split pushes a folder over \
+its entry cap, the normal reorg pass handles that.) You only learn an \
+entry's true size by ``read_entry``-ing it — so when you reconsolidate, \
+read the whole entry first and judge whether it has quietly become several \
+topics.
+    Action: for an in-place refinement, propose ``update_entry`` with \
+``salience_signal: "drift"``, cite the entry in ``existing_entry``, and \
+put the FULL mutated body (frontmatter + prose) in ``new_body``. For a \
+split, emit the trimming ``update_entry`` (also ``salience_signal: \
+"drift"``) alongside the new ``write_entry``. Independent of \
+``used_helpfully`` (that only counts the hit; ``drift`` actually edits the \
+entry) — you may emit both for the same entry in one scan.
+
   **REDUNDANT / no signal** (skip silently — no proposal)
     Things every competent assistant would already produce or that don't carry information:
       - Code-as-code: "added a for loop", "created a class", "fixed indentation"

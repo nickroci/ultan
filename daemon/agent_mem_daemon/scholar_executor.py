@@ -106,6 +106,11 @@ _SERVER_OWNED_FIELDS = (
     "last_reinforced",
     "last_surfaced",
     "created",
+    # Reconsolidation bookkeeping. Preserved verbatim on ordinary rewrites
+    # (repairs, merges) so the mutation history survives; on a drift
+    # reconsolidation the stamp step below increments them authoritatively.
+    "reconsolidated",
+    "last_reconsolidated",
 )
 
 
@@ -137,6 +142,29 @@ def _preserve_server_owned_fields(abs_path: Path, proposed_body: str) -> str:
                 changed = True
     if not changed:
         return proposed_body
+    return _reserialise(proposed_fm, body)
+
+
+def _stamp_reconsolidation(abs_path: Path, proposed_body: str, now: datetime) -> str:
+    """Increment the ``reconsolidated`` counter and stamp ``last_reconsolidated``
+    on a drift (mutation-on-retrieval) update.
+
+    The count is taken authoritatively from the PRIOR on-disk entry (+1), never
+    from whatever the model emitted, so a stale model-supplied value can't reset
+    the history. Returns ``proposed_body`` unchanged when it carries no
+    parseable frontmatter to stamp onto."""
+    prior_count = 0
+    if abs_path.exists():
+        prior_fm, _ = _split_body(_safe_read(abs_path))
+        try:
+            prior_count = int(prior_fm.get("reconsolidated", 0) or 0)
+        except (TypeError, ValueError):
+            prior_count = 0
+    proposed_fm, body = _split_body(proposed_body)
+    if not proposed_fm:
+        return proposed_body
+    proposed_fm["reconsolidated"] = prior_count + 1
+    proposed_fm["last_reconsolidated"] = now.date().isoformat()
     return _reserialise(proposed_fm, body)
 
 
@@ -306,14 +334,21 @@ def _apply_write_like(
     session_id: str,
     now: datetime,
     result: ExecResult,
+    reconsolidation: bool = False,
 ) -> None:
     """Shared body for write_entry / update_entry. When the entry already
     exists on disk (update, or a write that replaces an entry), the
     server-owned bookkeeping counters are forced from the prior entry before
     the verbatim write so an LLM-emitted default can't clobber them; then
-    sync the index row and append the log."""
+    sync the index row and append the log.
+
+    ``reconsolidation`` marks a drift mutation-on-retrieval update: after the
+    counters are preserved, the ``reconsolidated`` counter is bumped and
+    ``last_reconsolidated`` is stamped from the prior on-disk value."""
     abs_path = (knowledge_dir / rel_path).resolve()
     body = _preserve_server_owned_fields(abs_path, body)
+    if reconsolidation:
+        body = _stamp_reconsolidation(abs_path, body, now)
     _atomic_write(abs_path, body)
     fm, fm_body = _split_body(body)
     row = _index_row(rel_path, fm, fm_body, session_id=session_id)
@@ -348,6 +383,7 @@ def _do_update(
         session_id=session_id,
         now=now,
         result=result,
+        reconsolidation=(a.salience_signal == "drift"),
     )
 
 
