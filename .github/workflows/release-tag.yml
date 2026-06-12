@@ -1,0 +1,40 @@
+name: release-tag
+
+# When a release/vX.Y.Z PR (opened by release.yml) is MERGED, tag the merge
+# commit and publish a GitHub Release. The tagged commit already carries the
+# matching versions + `@vX.Y.Z` install specs, so installing the tag is always
+# self-consistent. Keyed on the PR head ref (release/v*), so it's robust to the
+# merge strategy (squash/merge/rebase).
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: write
+
+jobs:
+  tag-and-release:
+    if: >-
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'release/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+
+      - name: Tag the merge commit + publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.pull_request.head.ref }}"   # release/v0.3.0
+          TAG="${TAG#release/}"                               # v0.3.0
+          SHA="${{ github.event.pull_request.merge_commit_sha }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "tag $TAG already exists — nothing to do"; exit 0
+          fi
+          git tag "$TAG" "$SHA"
+          git push origin "$TAG"
+          gh release create "$TAG" --target "$SHA" --title "$TAG" --generate-notes

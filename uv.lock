@@ -13,7 +13,7 @@ members = [
 
 [[package]]
 name = "agent-mem"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "src" }
 dependencies = [
     { name = "agent-mem-search" },
@@ -50,7 +50,7 @@ dev = [
 
 [[package]]
 name = "agent-mem-daemon"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "daemon" }
 dependencies = [
     { name = "agent-mem-search" },
@@ -95,7 +95,7 @@ dev = [
 
 [[package]]
 name = "agent-mem-search"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "tools/search" }
 dependencies = [
     { name = "claude-agent-sdk" },
@@ -136,7 +136,7 @@ dev = [
 
 [[package]]
 name = "agent-mem-tools"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "tools/ultan" }
 dependencies = [
     { name = "agent-mem" },
