@@ -58,20 +58,32 @@ jobs:
       - name: Tests (pytest)
         run: uv run pytest
 
+  version-coherence:
+    # Guard: plugin.json version, every workspace package version, and the
+    # install-spec refs must agree (see scripts/check-version-coherence.sh).
+    # Stops a half-bumped workspace or a drifted plugin.json install spec from
+    # reaching `main`.
+    name: version-coherence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check version coherence
+        run: bash scripts/check-version-coherence.sh
+
   ci-success:
     # Single required check for branch protection. It goes green only when
     # every job above has succeeded, so protection on `main` can require
     # just this one context — adding/removing CI jobs never means editing
     # the protection settings. `if: always()` makes it run (and report
-    # red) even when `build` fails or is cancelled, so it can't be skipped
-    # past a failing matrix.
+    # red) even when a needed job fails or is cancelled, so it can't be
+    # skipped past a failing matrix.
     name: ci-success
     if: always()
-    needs: [build]
+    needs: [build, version-coherence]
     runs-on: ubuntu-latest
     steps:
       - name: Require all CI jobs to have passed
         run: |
-          result="${{ needs.build.result }}"
-          echo "build matrix result: $result"
-          test "$result" = "success"
+          echo "build=${{ needs.build.result }} version-coherence=${{ needs.version-coherence.result }}"
+          test "${{ needs.build.result }}" = "success"
+          test "${{ needs.version-coherence.result }}" = "success"
