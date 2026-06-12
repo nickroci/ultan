@@ -47,13 +47,13 @@ store is empty / unreadable, which the caller treats as "nothing to inject".
 
 from __future__ import annotations
 
-import json
 import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, cast
+from typing import List, Optional
 
+from ._aliases import load_aliases
 from ._daemon import _home  # pyright: ignore[reportPrivateUsage]  # intra-package
 
 # ── Caps ─────────────────────────────────────────────────────────────────────
@@ -159,33 +159,6 @@ def _find_repo_root(cwd: Path) -> Optional[Path]:
         cur = cur.parent
 
 
-def _load_aliases(home: Path) -> dict[str, str]:
-    """Read ``project-aliases.json`` ({bucket: slug}); ``{}`` on any failure.
-
-    A tiny stdlib re-read of ``aliases.load_aliases`` — we only need the lookup,
-    not the write path, and importing the search package would breach the wheel
-    boundary (see module docstring)."""
-    try:
-        text = (home / "project-aliases.json").read_text(encoding="utf-8")
-    except (FileNotFoundError, OSError):
-        return {}
-    try:
-        data: object = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    # ``json.loads`` types ``data`` as Any; once narrowed to ``dict`` pyright
-    # drops to ``dict[Unknown, Unknown]``. Cast to a concrete object-valued
-    # mapping so the loop below stays typed (mirrors aliases.load_aliases).
-    items = cast("dict[object, object]", data)
-    out: dict[str, str] = {}
-    for k, v in items.items():
-        if isinstance(v, (str, int)):
-            out[str(k)] = str(v)
-    return out
-
-
 def _session_bucket(home: Path, cwd: Path, slug: str) -> Optional[str]:
     """Which ``knowledge/projects/<bucket>/`` does this session map to?
 
@@ -197,7 +170,7 @@ def _session_bucket(home: Path, cwd: Path, slug: str) -> Optional[str]:
     if not slug:
         return None
 
-    aliases = _load_aliases(home)
+    aliases = load_aliases(home)
     projects_dir = home / "knowledge" / "projects"
 
     # Step 1: an existing bucket whose canonical slug already resolves to ours.

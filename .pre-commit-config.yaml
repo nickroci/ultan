@@ -1,8 +1,9 @@
 # Repo-wide pre-commit gate: lint (ruff) + types (pyright) + tests (pytest).
 #
-# Each Python package (daemon, tools/search, src) has its own uv venv and its
-# own pyproject.toml config. ruff is shared via the upstream pre-commit repo;
-# pyright and pytest run as local hooks so they pick up each package's venv.
+# Each Python package (ultan at the repo root, daemon, tools/search) has its
+# own uv venv and its own pyproject.toml config. ruff is shared via the upstream
+# pre-commit repo; pyright and pytest run as local hooks so they pick up each
+# package's venv.
 #
 # Pyright runs on staged files only — existing baseline issues in
 # untouched files don't block commits, but touching a file forces cleanup.
@@ -56,19 +57,21 @@ repos:
         pass_filenames: false
         stages: [pre-commit]
 
-      - id: ruff-check-src
-        name: ruff check (src)
+      # ultan = the repo-root package. Run from the root (no cd); the root
+      # ruff config excludes the other members, so `.` is exactly ultan/ + tests/.
+      - id: ruff-check-ultan
+        name: ruff check (ultan)
         language: system
-        entry: bash -c 'cd src && uv run --frozen ruff check --fix'
-        files: ^src/.*\.py$
+        entry: bash -c 'uv run --frozen ruff check --fix .'
+        files: ^(ultan/|tests/).*\.py$
         pass_filenames: false
         stages: [pre-commit]
 
-      - id: ruff-format-src
-        name: ruff format (src)
+      - id: ruff-format-ultan
+        name: ruff format (ultan)
         language: system
-        entry: bash -c 'cd src && uv run --frozen ruff format'
-        files: ^src/.*\.py$
+        entry: bash -c 'uv run --frozen ruff format .'
+        files: ^(ultan/|tests/).*\.py$
         pass_filenames: false
         stages: [pre-commit]
 
@@ -91,11 +94,13 @@ repos:
         pass_filenames: true
         stages: [pre-commit]
 
-      - id: pyright-src
-        name: pyright (src)
+      # ultan runs from the repo root (the pyright config's include=["ultan"]
+      # IS the root package), so staged paths need no prefix strip.
+      - id: pyright-ultan
+        name: pyright (ultan)
         language: system
-        entry: bash -c 'cd src && uv run --frozen pyright "${@#src/}"' --
-        files: ^src/.*\.py$
+        entry: bash -c 'uv run --frozen pyright "${@}"' --
+        files: ^ultan/.*\.py$
         pass_filenames: true
         stages: [pre-commit]
 
@@ -123,11 +128,11 @@ repos:
         pass_filenames: false
         stages: [pre-commit]
 
-      - id: duplicate-code-src
-        name: duplicate-code (src)
+      - id: duplicate-code-ultan
+        name: duplicate-code (ultan)
         language: system
-        entry: bash -c 'cd src && find . -name "*.py" -not -path "./.venv/*" -print0 | xargs -0 uv run --frozen pylint --disable=all --enable=duplicate-code --fail-on=duplicate-code'
-        files: ^src/.*\.py$
+        entry: bash -c 'find ultan -name "*.py" -not -path "*/.venv/*" -print0 | xargs -0 uv run --frozen pylint --disable=all --enable=duplicate-code --fail-on=duplicate-code'
+        files: ^ultan/.*\.py$
         pass_filenames: false
         stages: [pre-commit]
 
@@ -146,14 +151,6 @@ repos:
         language: system
         entry: bash -c 'cd tools/search && uv run --frozen pytest'
         files: ^tools/search/
-        pass_filenames: false
-        stages: [pre-push]
-
-      - id: pytest-src
-        name: pytest (src)
-        language: system
-        entry: bash -c 'cd src && uv run --frozen pytest'
-        files: ^src/
         pass_filenames: false
         stages: [pre-push]
 
