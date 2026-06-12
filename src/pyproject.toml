@@ -1,6 +1,6 @@
 [project]
 name = "agent-mem"
-version = "0.3.0"
+version = "0.3.1"
 description = "Local, user-global memory store for coding agents — Phase 0 skeleton forked from claude-memory-compiler."
 authors = [{ name = "Nicholas Holden", email = "nicholas.holden@banqora.com" }]
 requires-python = ">=3.12"
