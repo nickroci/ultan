@@ -152,15 +152,16 @@ def _run_embedding_search(args: Dict[str, Any], root: Path) -> Dict[str, Any]:
     if not root.exists():
         return _text_response("(library is empty — no entries to search)")
     try:
-        index = embeddings_load_or_build(root)
+        # Build + query both run model.encode() → both on the single inference
+        # thread. The Scholar/Librarian share the MPS model with priming, and a
+        # stale-index rebuild here re-encodes the whole corpus; doing that on a
+        # worker thread concurrently with priming deadlocks MPS (see _inference).
+        raw = _inference.run(lambda: embeddings_load_or_build(root).search(query, k=k))
     except FileNotFoundError:
         return _text_response("(library has no entries yet)")
     except Exception as e:
-        log.exception("embedding index load/build failed")
+        log.exception("embedding load/search failed")
         return _text_response(f"(embedding backend error: {e})")
-    # Embedding inference on the daemon's single inference thread — the
-    # Scholar/Librarian workers share the MPS model with priming (see _inference).
-    raw = _inference.run(index.search, query, k=k)
     as_tuples: list[Tuple[Path, float, str]] = [(h.path, h.score, h.snippet) for h in raw]
     return _format_hit_lines(as_tuples, root, query=query)
 

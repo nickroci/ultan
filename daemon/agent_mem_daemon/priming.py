@@ -386,19 +386,20 @@ def _embedding_search(
         return []
 
     try:
-        index = embeddings_load_or_build(knowledge_dir)
+        # BOTH the index build and the query encode run model.encode(), so BOTH
+        # must run on the single inference thread. ``load_or_build`` re-encodes
+        # the whole corpus whenever the Scholar has written since the last build
+        # (constant during a session) — running that on the handler pool means
+        # concurrent priming requests each re-encode all docs on their own
+        # thread → MPS deadlock. (#37 funnelled the query but not the build,
+        # which is what actually hangs; confirmed via py-spy.)
+        hits = _inference.run(
+            lambda: embeddings_load_or_build(knowledge_dir).search(query, k=max(1, k))
+        )
     except FileNotFoundError:
         return []
     except Exception:
-        log.exception("priming: embedding index load/build failed")
-        return []
-
-    try:
-        # MUST run on the single inference thread — concurrent encode() calls
-        # from multiple threads deadlock MPS and corrupt tensors (see _inference).
-        hits = _inference.run(index.search, query, k=max(1, k))
-    except Exception:
-        log.exception("priming: embedding search raised")
+        log.exception("priming: embedding load/search raised")
         return []
 
     # Filter out very weak semantic matches (see EMBEDDING_NOISE_FLOOR).

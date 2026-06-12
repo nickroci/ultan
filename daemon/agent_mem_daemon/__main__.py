@@ -324,13 +324,12 @@ def _prewarm_indexes(knowledge_root: Path, log: logging.Logger) -> None:
     try:
         from embeddings import load_or_build as emb_load  # noqa: PLC0415
 
-        idx = emb_load(knowledge_root)
-        # Dummy search to JIT-compile the MPS kernels for the query path.
-        # ``load_or_build`` only loads weights and computes doc vectors — it
-        # never runs the query-side forward pass, so the first real priming
-        # request would pay a ~2-3s graph-compile cost without this. Run it on
-        # the single inference thread so the kernels compile on the thread that
-        # actually serves requests (else the first real request recompiles).
+        # Build AND query both run model.encode() — run both on the single
+        # inference thread so the doc-encode and query-encode kernels compile on
+        # the thread that actually serves requests (else the first real request
+        # recompiles), and so warmup never encodes on a different thread than
+        # serving (the cross-thread case is what deadlocks MPS).
+        idx = _inference.run(emb_load, knowledge_root)
         _inference.run(idx.search, "warmup query for kernel compile", k=1)
         log.info("startup: embedding index ready (%d docs)", len(idx.docs))
     except Exception:
