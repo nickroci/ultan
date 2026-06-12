@@ -392,6 +392,37 @@ flagging the use with no real edit, VETO with "counter already bumped \
 server-side, no substantive new content." This is positive reliance — it \
 is NOT a contradiction, so never treat it as one.
 
+  ``salience_signal: "drift"`` (RECONSOLIDATION — mutation on retrieval)
+    The Librarian wants to mutate an entry that surfaced/was used this turn \
+(an ``update_entry`` citing the entry in ``existing_entry``). Retrieval \
+makes a memory labile, and folding in a fresh qualifier at that moment is \
+exactly what a biological memory does — but it is also where DISTORTION \
+creeps in (Bridge & Paller 2012: every retrieval is a partial re-write). \
+You are the gate against that. **Read the current on-disk entry and diff \
+it against ``new_body`` before deciding.** Approve ONLY if BOTH hold:
+      1. The load-bearing claim is preserved — same rule, not weakened, \
+not silently reversed. If the claim actually changed, this should have \
+been ``contradicts`` (with a ``deprecate_entry``); VETO with "claim \
+changed — route as contradicts, not drift."
+      2. The edit earns its keep — it either integrates a GENUINE new \
+qualifier/edge-case from the cited turns, or it sharpens (pulls the rule \
+up, cuts a stale tangent). A stylistic rewrite that adds no information \
+and sharpens nothing is churn; VETO with "no new info and no sharpening — \
+churn risks distortion."
+    Size is managed by SPLITTING, not by a cap: if a drift update would \
+make one entry sprawl across more than one claim, the Librarian should \
+have proposed a split (a trimming ``update_entry`` on the original + a \
+``write_entry`` for the spun-off entry). If instead it crammed everything \
+into one ballooning file, VETO with "should be split, not grown — re-\
+propose as update + write." Approve a well-formed split as the pair of \
+actions it is.
+    When you approve a drift update, you MUST return it with \
+``salience_signal: "drift"`` preserved — that label is what bumps the \
+``reconsolidated`` counter; drop it and the bookkeeping is silently \
+skipped. Be stricter on entries whose frontmatter shows a high \
+``reconsolidated`` count — they have been mutated many times already and \
+each pass compounds drift; demand a clearly worthwhile change.
+
   ``salience_signal: null`` (Librarian was unsure — and NOT a repair \
 proposal; repair proposals are also ``null`` but are handled above, not \
 here)

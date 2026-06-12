@@ -632,3 +632,88 @@ def test_dispatch_handler_exception_recorded(tmp_path: Path, monkeypatch):
         },
     )
     assert res.counts.get("actions_failed") == 1
+
+
+# ── reconsolidation (drift) counter bookkeeping ───────────────────────
+
+
+def _drift_update(extra: str = " A reconsolidated clause.") -> Dict[str, Any]:
+    """A drift update_entry on the seeded ``use-uv`` entry."""
+    return {
+        "action": "update_entry",
+        "path": "global/python/use-uv.md",
+        "new_body": _body("use-uv", extra=extra),
+        "salience_signal": "drift",
+        "existing_entry": "global/python/use-uv.md",
+        "reasoning": "r",
+    }
+
+
+def test_drift_update_increments_reconsolidated_from_zero(tmp_path: Path):
+    """A drift update on a never-reconsolidated entry sets reconsolidated=1 and
+    stamps last_reconsolidated with the run date."""
+    k = _seed(tmp_path)
+    target = k / "global" / "python" / "use-uv.md"
+    _apply(k, _drift_update())
+    fm = _read_fm(target)
+    assert str(fm["reconsolidated"]) == "1"
+    assert str(fm["last_reconsolidated"]) == NOW.date().isoformat()
+    assert "reconsolidated clause" in target.read_text(encoding="utf-8")
+
+
+def test_second_drift_update_increments_again(tmp_path: Path):
+    """Reconsolidation count is authoritative from the prior on-disk value: two
+    drift updates leave reconsolidated=2 regardless of what the model emits."""
+    k = _seed(tmp_path)
+    target = k / "global" / "python" / "use-uv.md"
+    _apply(k, _drift_update(extra=" first"))
+    _apply(k, _drift_update(extra=" second"))
+    assert str(_read_fm(target)["reconsolidated"]) == "2"
+
+
+def test_drift_update_increments_existing_count(tmp_path: Path):
+    """Drift update on an entry that already carries reconsolidated=3 bumps it
+    to 4 (prior-on-disk + 1), never trusting the emitted body's value."""
+    k = _seed(tmp_path)
+    target = k / "global" / "python" / "use-uv.md"
+    fm, body = scholar_executor._split_body(scholar_entry_body("use-uv"))
+    fm["reconsolidated"] = 3
+    target.write_text(scholar_executor._reserialise(fm, body), encoding="utf-8")
+    _apply(k, _drift_update())
+    assert str(_read_fm(target)["reconsolidated"]) == "4"
+
+
+def test_drift_update_preserves_other_counters(tmp_path: Path):
+    """A drift reconsolidation still preserves the other server-owned counters
+    (fired/reinforced/…) — it only authoritatively rewrites the reconsolidation
+    pair."""
+    k = _seed(tmp_path)
+    target = k / "global" / "python" / "use-uv.md"
+    target.write_text(_entry_with_counters("use-uv"), encoding="utf-8")
+    _apply(k, _drift_update())
+    _assert_counters_preserved(target)
+    assert str(_read_fm(target)["reconsolidated"]) == "1"
+
+
+def test_non_drift_update_preserves_reconsolidated_without_bumping(tmp_path: Path):
+    """An ordinary (non-drift) update must NOT increment reconsolidated — it
+    only preserves the existing value so a repair/edit can't reset the history
+    or spuriously inflate it."""
+    k = _seed(tmp_path)
+    target = k / "global" / "python" / "use-uv.md"
+    fm, body = scholar_executor._split_body(scholar_entry_body("use-uv"))
+    fm["reconsolidated"] = 3
+    fm["last_reconsolidated"] = "2026-05-01"
+    target.write_text(scholar_executor._reserialise(fm, body), encoding="utf-8")
+    _apply(
+        k,
+        {
+            "action": "update_entry",
+            "path": "global/python/use-uv.md",
+            "new_body": _body("use-uv", extra=" a plain non-drift edit"),
+            "reasoning": "r",
+        },
+    )
+    out = _read_fm(target)
+    assert str(out["reconsolidated"]) == "3"  # preserved, not bumped
+    assert str(out["last_reconsolidated"]) == "2026-05-01"

@@ -83,27 +83,34 @@ class _BaseAction(BaseModel):
         ),
     )
 
-    salience_signal: Optional[Literal["contradicts", "novel", "reinforces", "used_helpfully"]] = (
-        Field(
-            default=None,
-            description=(
-                "Why this is worth remembering, in cognitive-science "
-                "terms. 'contradicts': disagrees with an existing entry "
-                "(cite path in existing_entry); user has changed their "
-                "mind. 'novel': not in library AND not derivable from "
-                "the model's baseline knowledge. 'reinforces': restates "
-                "an existing entry's claim (cite path in existing_entry); "
-                "the daemon will bump that entry's reinforced counter "
-                "and the Scholar may veto the write. 'used_helpfully': "
-                "the assistant actually RELIED ON / AGREED WITH a "
-                "surfaced or cited existing entry to answer THIS turn "
-                "(cite path in existing_entry AND the stable turn id in "
-                "cited_turn_seq); the daemon bumps that entry's "
-                "fired-helpful counter once per cited turn. A mere "
-                "mention is NOT use, and disagreement is 'contradicts', "
-                "not this. Null if unsure — the Scholar will infer."
-            ),
-        )
+    salience_signal: Optional[
+        Literal["contradicts", "novel", "reinforces", "used_helpfully", "drift"]
+    ] = Field(
+        default=None,
+        description=(
+            "Why this is worth remembering, in cognitive-science "
+            "terms. 'contradicts': disagrees with an existing entry "
+            "(cite path in existing_entry); user has changed their "
+            "mind. 'novel': not in library AND not derivable from "
+            "the model's baseline knowledge. 'reinforces': restates "
+            "an existing entry's claim (cite path in existing_entry); "
+            "the daemon will bump that entry's reinforced counter "
+            "and the Scholar may veto the write. 'used_helpfully': "
+            "the assistant actually RELIED ON / AGREED WITH a "
+            "surfaced or cited existing entry to answer THIS turn "
+            "(cite path in existing_entry AND the stable turn id in "
+            "cited_turn_seq); the daemon bumps that entry's "
+            "fired-helpful counter once per cited turn. 'drift': "
+            "RECONSOLIDATION — an entry that surfaced/was used this "
+            "turn should be mutated in place to integrate a genuine "
+            "new qualifier from the use-context OR to compress/sharpen "
+            "it (cite the entry in existing_entry, action MUST be "
+            "update_entry). A reconsolidation may NOT grow the entry "
+            "past its current size — it pays for new nuance by cutting "
+            "stale text. A mere mention is NOT use, and disagreement is "
+            "'contradicts', not this. Null if unsure — the Scholar will "
+            "infer."
+        ),
     )
 
     existing_entry: Optional[str] = Field(
