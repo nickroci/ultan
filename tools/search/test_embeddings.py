@@ -15,8 +15,10 @@ import shutil
 import time
 from pathlib import Path
 
+import numpy as np
 import pytest
 
+import embeddings
 from embeddings import (
     EmbeddingHit,
     EmbeddingIndex,
@@ -189,6 +191,53 @@ def test_load_or_build_caches_and_rebuilds(tmp_path: Path) -> None:
     third = load_or_build(knowledge)
     assert third.built_at > second.built_at
     assert third.embeddings.shape[0] == len(third.docs) == 5
+
+
+def test_load_or_build_incremental_reencodes_only_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale-but-compatible index re-encodes ONLY the changed entries, not the
+    whole corpus — the fix for the priming-hot-path full rebuild after every
+    Scholar write. On the old code this re-encoded everything (batches [3, 3]).
+    """
+    knowledge = tmp_path / "knowledge"
+    knowledge.mkdir()
+    for name in ("a", "b", "c"):
+        (knowledge / f"{name}.md").write_text(f"# {name}\nbody about {name}\n", encoding="utf-8")
+
+    batches: list[int] = []
+
+    class _FakeModel:
+        def encode(self, texts: list[str], **_kwargs: object) -> object:
+            batches.append(len(texts))
+            arr = np.zeros((len(texts), 4), dtype=np.float32)
+            for i, text in enumerate(texts):
+                arr[i, len(text) % 4] = 1.0
+            return arr
+
+    fake = _FakeModel()
+    monkeypatch.setattr(embeddings, "_load_model", lambda *_a, **_k: fake)
+
+    first = load_or_build(knowledge)
+    assert batches == [3]  # full build encoded all 3 entries
+    assert len(first.docs) == 3
+
+    # Modify ONE entry and push its mtime into the future so the index is stale.
+    (knowledge / "b.md").write_text("# b\ntotally different body now\n", encoding="utf-8")
+    future = time.time() + 5
+    os.utime(knowledge / "b.md", (future, future))
+
+    second = load_or_build(knowledge)
+    assert batches == [3, 1]  # incremental encoded ONLY the changed entry
+    assert len(second.docs) == 3
+
+    # Unchanged entries kept their exact cached embedding rows (reused, not re-encoded).
+    def _row(idx: EmbeddingIndex, name: str) -> object:
+        pos = next(i for i, d in enumerate(idx.docs) if d.path.endswith(name))
+        return idx.embeddings[pos]
+
+    assert np.array_equal(_row(first, "a.md"), _row(second, "a.md"))
+    assert np.array_equal(_row(first, "c.md"), _row(second, "c.md"))
 
 
 # ── Edge cases that don't need the model loaded ──────────────────────────────

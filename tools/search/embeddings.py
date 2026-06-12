@@ -23,12 +23,16 @@ Persistence:
     swallows unpickle errors and rebuilds.
 
 Threading:
-  - Reads (``search``) are safe to call concurrently.
-  - ``save_index`` is concurrency-safe (see ``bm25.save_pickled``): racing
-    saves to the same path each write a unique temp file then atomically
-    replace, so they never interleave into a corrupt file. Last writer wins.
-    ``build_index`` has no shared state, so parallel rebuilds are wasteful
-    (duplicated encode work) but correct.
+  - ``search``, ``build_index`` and ``_incremental_build`` all call
+    ``model.encode()``, which is NOT thread-safe on MPS: concurrent encodes from
+    different threads DEADLOCK (and corrupt each other's tensors). The daemon
+    serialises ALL inference — search and (incremental) rebuild — onto a single
+    thread via ``agent_mem_daemon/_inference.py``; callers outside that funnel
+    must not run these concurrently. (The earlier note here — "parallel rebuilds
+    are wasteful but correct" — was wrong: they hang.)
+  - ``save_index`` is concurrency-safe (see ``bm25.save_pickled``): racing saves
+    to the same path each write a unique temp file then atomically replace, so
+    they never interleave into a corrupt file. Last writer wins.
 """
 
 from __future__ import annotations
@@ -325,6 +329,90 @@ def build_index(
     )
 
 
+def _incremental_build(
+    cached: EmbeddingIndex,
+    knowledge_dir: Path,
+    model_name: str,
+) -> EmbeddingIndex:
+    """Rebuild re-encoding ONLY the entries that changed since ``cached``.
+
+    Reuses ``cached``'s embedding row for every entry whose path is unchanged and
+    whose mtime hasn't advanced (matching :func:`is_stale`); encodes only new or
+    modified entries; drops deleted ones. A full :func:`build_index` re-encodes
+    the whole corpus — expensive on the priming hot path, which rebuilds after
+    every Scholar write. The ``model.encode`` here is funnelled onto the daemon's
+    single inference thread by the callers (``_inference.run``), so it stays
+    MPS-safe. Falls back to a full build if the cached rows can't be reused.
+    """
+    knowledge_dir = knowledge_dir.expanduser().resolve()
+    n_cached = cached.embeddings.shape[0] if cached.embeddings.ndim == 2 else 0
+    by_path = {rec.path: i for i, rec in enumerate(cached.docs)}
+
+    docs: list[_DocRecord] = []
+    rows: list[_FloatArray] = []
+    encode_texts: list[str] = []
+    encode_slots: list[int] = []
+    for md in _iter_markdown(knowledge_dir):
+        try:
+            mtime = md.stat().st_mtime
+        except OSError:
+            continue
+        path = str(md)
+        ci = by_path.get(path)
+        if ci is not None and ci < n_cached and cached.docs[ci].mtime + 1e-6 >= mtime:
+            # Unchanged → reuse the cached embedding row (refresh stored mtime so
+            # the next staleness check is exact).
+            docs.append(_DocRecord(path=path, mtime=mtime, raw_text=cached.docs[ci].raw_text))
+            rows.append(cached.embeddings[ci])
+            continue
+        try:
+            raw = md.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        text = _embedding_text(raw).strip()
+        if not text:
+            continue
+        docs.append(_DocRecord(path=path, mtime=mtime, raw_text=raw))
+        rows.append(np.zeros((0,), dtype=np.float32))  # placeholder; overwritten below
+        encode_texts.append(text)
+        encode_slots.append(len(docs) - 1)
+
+    if not docs:
+        return EmbeddingIndex(
+            knowledge_dir=knowledge_dir,
+            model_name=model_name,
+            docs=[],
+            embeddings=np.zeros((0, 0), dtype=np.float32),
+            built_at=time.time(),
+        )
+
+    if encode_texts:
+        model = _load_model(model_name)
+        fresh = model.encode(
+            [_format_doc(t, model_name) for t in encode_texts],
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+            batch_size=8,
+        ).astype(np.float32)
+        for i, slot in enumerate(encode_slots):
+            rows[slot] = fresh[i]
+
+    try:
+        embeddings: _FloatArray = np.vstack(rows).astype(np.float32)
+    except ValueError:
+        # Ragged rows (corrupt / dimension-mismatched cache) — full rebuild.
+        return build_index(knowledge_dir, model_name=model_name)
+
+    return EmbeddingIndex(
+        knowledge_dir=knowledge_dir,
+        model_name=model_name,
+        docs=docs,
+        embeddings=embeddings,
+        built_at=time.time(),
+    )
+
+
 def save_index(index: EmbeddingIndex, path: Path | None = None) -> Path:
     """Pickle the index atomically. Returns the path written.
 
@@ -343,11 +431,15 @@ def load_or_build(
     force_rebuild: bool = False,
     index_path: Path | None = None,
 ) -> EmbeddingIndex:
-    """Load the persisted index if fresh, otherwise rebuild and save.
+    """Load the persisted index if fresh; otherwise rebuild (incrementally when
+    possible) and save.
 
     "Fresh" means the index was built against the same ``knowledge_dir`` and
     ``model_name``, every file we tracked is still present with the same mtime,
-    and no new ``.md`` files have appeared.
+    and no new ``.md`` files have appeared. When the cache is compatible but
+    stale we re-encode ONLY the changed/new entries (see :func:`_incremental_build`)
+    rather than the whole corpus — the corpus rebuild is what made priming slow
+    on the hot path after every Scholar write.
     """
     knowledge_dir = knowledge_dir.expanduser().resolve()
     target = index_path or _default_index_path(knowledge_dir)
@@ -358,12 +450,17 @@ def load_or_build(
             cached is not None
             and cached.knowledge_dir == knowledge_dir
             and cached.model_name == model_name
-            and not is_stale(
-                cached.docs,
-                {str(p): p.stat().st_mtime for p in _iter_markdown(knowledge_dir)},
-            )
         ):
-            return cached
+            current = {str(p): p.stat().st_mtime for p in _iter_markdown(knowledge_dir)}
+            if not is_stale(cached.docs, current):
+                return cached
+            # Compatible but stale → re-encode only the entries that changed.
+            index = _incremental_build(cached, knowledge_dir, model_name)
+            try:
+                save_index(index, target)
+            except OSError:
+                pass
+            return index
 
     index = build_index(knowledge_dir, model_name=model_name)
     try:
