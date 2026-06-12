@@ -90,6 +90,19 @@ def _report_daemon(home: Path) -> tuple[bool, bool]:
     if phase is not None and alive and phase.get("pid") == pid:
         print(f"daemon phase: {phase.get('phase')} (since {phase.get('since')})")
 
+    # Running daemon code vs what's installed now — surfaces a daemon left on old
+    # code after an update (it restarts on the next session; see _daemon).
+    running_ver = phase.get("version") if phase is not None else None
+    installed_ver = _daemon._installed_daemon_version()  # pyright: ignore[reportPrivateUsage]
+    if alive and running_ver:
+        if installed_ver and running_ver != installed_ver:
+            print(
+                f"daemon code: {running_ver} — STALE (installed {installed_ver}); "
+                "restarts on the next session"
+            )
+        else:
+            print(f"daemon code: {running_ver}")
+
     socket_ok = _daemon._socket_answering()  # pyright: ignore[reportPrivateUsage]  # intra-package
     if socket_ok:
         print("priming socket: answering")
