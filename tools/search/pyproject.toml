@@ -1,6 +1,6 @@
 [project]
 name = "agent-mem-search"
-version = "0.2.0"
+version = "0.3.0"
 description = "Three-mode search (hierarchy / index-led LLM / BM25) over the agent-mem knowledge store."
 authors = [{ name = "Nicholas Holden", email = "nicholas.holden@banqora.com" }]
 requires-python = ">=3.12"
