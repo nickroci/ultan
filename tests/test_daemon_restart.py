@@ -64,13 +64,19 @@ def test_no_restart_when_installed_version_unknown(
     assert stopped == []
 
 
-def test_no_restart_when_running_version_missing(
+def test_restart_legacy_daemon_with_no_version_stamp(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A legacy daemon (pre-this-feature) wrote no version — never restart blindly.
+    # A legacy daemon (pre-this-feature) wrote no version. Anchored on a KNOWN
+    # installed version, that's unambiguously old code → restart. This is the
+    # migration case: the daemon a user already has running when they first adopt
+    # the feature has no stamp, and must still be replaced.
     _write_state(home, pid=os.getpid(), version=None)
     monkeypatch.setattr(_daemon, "_installed_daemon_version", lambda: "0.3.0")
-    assert _daemon.restart_if_stale() is False
+    stopped: list[int] = []
+    monkeypatch.setattr(_daemon, "_stop_daemon", lambda pid, **k: stopped.append(pid))
+    assert _daemon.restart_if_stale() is True
+    assert stopped == [os.getpid()]
 
 
 def test_restart_when_stale_stops_and_clears_backoff(

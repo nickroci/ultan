@@ -153,18 +153,27 @@ def restart_if_stale() -> bool:
     metadata (cold-cheap, hot-needless). The running version is what the daemon
     stamped into ``daemon.state`` at ITS startup; the installed version is read
     live, so an ``uv tool install`` update is detected even though the old
-    process keeps serving the previous code. Fail-safe: any uncertainty (no
-    daemon, dead pid, unknown version on either side) leaves the daemon alone."""
+    process keeps serving the previous code.
+
+    Anchored on the INSTALLED version: if we can't read it (a thin/uvx env with
+    no daemon dist, or unreadable metadata) we never restart — there's nothing to
+    compare against. Given a readable installed version, a daemon whose recorded
+    version differs is stale; so is one with NO recorded version, because that is
+    a legacy daemon from before this stamp existed (a current daemon always
+    stamps a version when the metadata it reads is itself readable). Restarting
+    that legacy daemon is the whole point — it's exactly the process left on old
+    code that this feature exists to replace."""
     state = _read_daemon_state()
     if not state:
         return False
     pid = state.get("pid")
     if not _pid_alive(pid):
         return False
-    running = state.get("version")
     installed = _installed_daemon_version()
-    if not running or not installed or running == installed:
-        return False
+    if not installed:
+        return False  # can't tell what's installed — never restart blindly
+    if state.get("version") == installed:
+        return False  # up to date
     _stop_daemon(cast("int", pid))
     # Clear the spawn backoff so ensure_running() respawns immediately rather
     # than throttling this intentional restart as if it were a crash loop.
