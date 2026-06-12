@@ -25,7 +25,7 @@ LOCK="$DATA/.install.lock"
 # The install spec. scripts/set-version.sh rewrites the `@<ref>` here to the
 # release tag (`@vX.Y.Z`) at release time; between releases it tracks `@main`.
 # ULTAN_SPEC override lets scripts/validate-plugin.sh install the local tree.
-SPEC="${ULTAN_SPEC:-ultan[retrieval] @ git+https://github.com/nickroci/ultan@v0.3.2}"
+SPEC="${ULTAN_SPEC:-ultan[retrieval] @ git+https://github.com/nickroci/ultan@v0.3.3}"
 
 # The git ref the SPEC pins (the @<ref> at the very end) and the uv receipt that
 # records what is actually installed — together they drive the up-to-date check
