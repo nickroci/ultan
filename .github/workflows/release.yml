@@ -27,6 +27,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
       - name: Validate version
         run: |
           printf '%s' "${{ inputs.version }}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
@@ -37,6 +42,9 @@ jobs:
 
       - name: Verify coherence
         run: bash scripts/check-version-coherence.sh
+
+      - name: Verify the lockfile (the meaningful CI check for a version-only bump)
+        run: uv sync --locked
 
       - name: Open (or update) the release PR
         env:
@@ -65,14 +73,15 @@ jobs:
           set -euo pipefail
           # A PR opened by GITHUB_TOKEN does not trigger ci.yml (GitHub's loop
           # prevention), so the required `ci-success` check would never report and
-          # would block the merge. This diff is version/spec strings ONLY and its
-          # coherence is verified by the step above, so post a passing `ci-success`
-          # status on the release commit directly. Branch protection matches the
-          # context name, so this satisfies the gate.
+          # would block the merge. This diff is version/spec/lock strings ONLY, and
+          # the steps above verified both coherence AND `uv sync --locked` — the
+          # only checks that can change for a version bump — so post a passing
+          # `ci-success` status on the release commit directly. Branch protection
+          # matches the context name, so this satisfies the gate.
           # Safe ONLY because nothing but set-version.sh ever touches a release/*
           # branch — never hand-push code there.
           SHA="$(git rev-parse HEAD)"
           gh api -X POST "repos/${{ github.repository }}/statuses/$SHA" \
             -f state=success \
             -f context=ci-success \
-            -f description="version-only release bump; coherence verified by release workflow"
+            -f description="version-only release bump; coherence + lockfile verified by release workflow"

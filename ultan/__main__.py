@@ -15,8 +15,6 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import __version__
-
 
 def main() -> int:
     ap = argparse.ArgumentParser(prog="ultan", description="Ultan — local memory for Claude Code.")
@@ -48,6 +46,8 @@ def main() -> int:
     args = ap.parse_args()
 
     if args.version:
+        from . import __version__  # lazy: keeps the metadata lookup off the hook path
+
         print(f"ultan {__version__}")
         return 0
     if args.cmd == "doctor":
