@@ -536,3 +536,27 @@ def get_priming(
         char_budget=char_budget,
         deadline=max(deadline, time.monotonic() + _FALLBACK_FLOOR_S),
     )
+
+
+def probe_daemon(prompt: str, *, budget_ms: int = 5000) -> Optional[PrimingResponse]:
+    """Send a real priming request to the daemon and return its raw response,
+    or ``None`` if the daemon didn't answer within ``budget_ms`` (or the socket
+    is absent).
+
+    Unlike :func:`get_priming`, this does NOT fall back to the lexical scan —
+    ``ultan doctor`` needs to know whether the DAEMON itself responded, not
+    whether *some* lane produced text. A hung priming RPC (the daemon serving
+    one request then deadlocking) shows up here as ``None``.
+    """
+    socket_path = _priming_socket_path()
+    if not socket_path.exists():
+        return None
+    request: PrimingRequest = {
+        "op": "priming",
+        "prompt": prompt,
+        "project_slug": None,
+        "session_id": None,
+        "k": 1,
+        "char_budget": 200,
+    }
+    return _send_request(socket_path, request, total_budget_ms=budget_ms)

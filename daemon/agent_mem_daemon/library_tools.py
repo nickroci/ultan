@@ -27,6 +27,8 @@ from bm25 import load_or_build
 from claude_agent_sdk import create_sdk_mcp_server, tool
 from embeddings import load_or_build as embeddings_load_or_build
 
+from . import _inference
+
 if TYPE_CHECKING:
     from claude_agent_sdk.types import McpServerConfig
 
@@ -156,7 +158,9 @@ def _run_embedding_search(args: Dict[str, Any], root: Path) -> Dict[str, Any]:
     except Exception as e:
         log.exception("embedding index load/build failed")
         return _text_response(f"(embedding backend error: {e})")
-    raw = index.search(query, k=k)
+    # Embedding inference on the daemon's single inference thread — the
+    # Scholar/Librarian workers share the MPS model with priming (see _inference).
+    raw = _inference.run(index.search, query, k=k)
     as_tuples: list[Tuple[Path, float, str]] = [(h.path, h.score, h.snippet) for h in raw]
     return _format_hit_lines(as_tuples, root, query=query)
 

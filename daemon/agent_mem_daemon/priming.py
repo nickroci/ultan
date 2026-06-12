@@ -55,6 +55,7 @@ from bm25 import load_or_build as bm25_load_or_build
 from embeddings import load_or_build as embeddings_load_or_build
 from reranker import rerank as _cross_encoder_rerank
 
+from . import _inference
 from .paths import home as _agent_mem_home
 
 log = logging.getLogger("agent_mem_daemon.priming")
@@ -393,7 +394,9 @@ def _embedding_search(
         return []
 
     try:
-        hits = index.search(query, k=max(1, k))
+        # MUST run on the single inference thread — concurrent encode() calls
+        # from multiple threads deadlock MPS and corrupt tensors (see _inference).
+        hits = _inference.run(index.search, query, k=max(1, k))
     except Exception:
         log.exception("priming: embedding search raised")
         return []
@@ -505,7 +508,8 @@ def _rerank_candidates(
     if not bodies:
         return candidates[:k]
 
-    reranked = _cross_encoder_rerank(query, bodies)
+    # Cross-encoder predict on the single inference thread (MPS thread-safety).
+    reranked = _inference.run(_cross_encoder_rerank, query, bodies)
     if reranked is None:
         return candidates[:k]
     above_floor = [(p, s) for p, s in reranked if s >= _RERANK_SCORE_FLOOR]
