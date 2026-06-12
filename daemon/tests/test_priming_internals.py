@@ -7,6 +7,7 @@ RRF merge degenerates, bullet rendering with missing pieces).
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -233,6 +234,40 @@ def test_embedding_search_handles_filenotfound(tmp_path: Path, monkeypatch) -> N
 
     monkeypatch.setattr(priming, "embeddings_load_or_build", _missing)
     assert priming._embedding_search(k, "x", k=5) == []
+
+
+def test_embedding_search_build_and_query_run_on_inference_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The index BUILD (``embeddings_load_or_build``) and the query must BOTH run
+    on the single inference thread, not the calling (handler-pool) thread.
+
+    Regression guard: #37 funnelled only ``index.search``, leaving the build —
+    which re-encodes the whole corpus when the index is stale — on the handler
+    thread. Concurrent priming requests then each rebuild on their own thread,
+    and concurrent ``model.encode()`` deadlocks MPS (py-spy-confirmed). On the
+    pre-fix code ``seen["build"]`` is the caller thread and this assertion fails.
+    """
+    kdir = tmp_path / "knowledge"
+    kdir.mkdir()
+    seen: dict[str, str] = {}
+
+    class _Idx:
+        def search(self, _query: str, k: int) -> list[object]:  # noqa: ARG002
+            seen["query"] = threading.current_thread().name
+            return []
+
+    def _load(*_args: object, **_kwargs: object) -> _Idx:
+        seen["build"] = threading.current_thread().name
+        return _Idx()
+
+    monkeypatch.setattr(priming, "embeddings_load_or_build", _load)
+    caller = threading.current_thread().name
+    priming._embedding_search(kdir, "x", k=5)
+
+    assert seen["build"].startswith("mps-inference"), seen
+    assert seen["query"].startswith("mps-inference"), seen
+    assert seen["build"] != caller
 
 
 def test_embedding_search_handles_search_failure(tmp_path: Path, monkeypatch) -> None:
