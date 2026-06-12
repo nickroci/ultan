@@ -32,7 +32,6 @@ PYPROJECTS=(
   daemon/pyproject.toml
   tools/search/pyproject.toml
   tools/ultan/pyproject.toml
-  src/pyproject.toml
 )
 
 for rel in "${PYPROJECTS[@]}"; do

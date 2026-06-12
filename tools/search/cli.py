@@ -47,6 +47,7 @@ from typing import Callable, Iterable, Mapping, TextIO, cast
 
 from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
 
+import _lint
 from bm25 import load_or_build
 from frontmatter import (
     Frontmatter,
@@ -664,60 +665,16 @@ def _scope_label(fm: Mapping[str, object]) -> str:
 
 
 def _run_structural_lint(knowledge_dir: Path) -> tuple[int, str]:
-    """Best-effort: invoke src/scripts/lint.py via uv if reachable.
+    """Run the structural library-health checks in-process (broken links,
+    orphan pages, missing backlinks, sparse articles) over the live entry set.
 
-    Returns (exit_code, captured_output). exit_code < 0 means "could not run".
+    Returns ``(rc, report)``; ``rc == 1`` iff a broken link (error) was found,
+    ``rc < 0`` iff lint could not run (no knowledge dir). Ported from the
+    retired ``src/scripts/lint.py --structural-only`` — see :mod:`_lint`.
     """
-    # Resolve src dir: same layout as the agent-mem checkout.
-    src_dir = _find_src_dir()
-    if not src_dir:
-        return -1, "(lint skipped: could not locate src/ checkout)"
-    script = src_dir / "scripts" / "lint.py"
-    if not script.exists():
-        return -1, f"(lint skipped: {script} not found)"
-    env = os.environ.copy()
-    # Point lint at the same knowledge dir we're operating on.
-    env["AGENT_MEM_HOME"] = str(knowledge_dir.parent)
-    try:
-        result = subprocess.run(
-            [
-                "uv",
-                "run",
-                "--directory",
-                str(src_dir),
-                "python",
-                "scripts/lint.py",
-                "--structural-only",
-            ],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    except FileNotFoundError:
-        return -1, "(lint skipped: `uv` not on PATH)"
-    except subprocess.TimeoutExpired:
-        return -1, "(lint skipped: timed out after 120s)"
-    output = (result.stdout or "") + (result.stderr or "")
-    return result.returncode, output
-
-
-def _find_src_dir() -> Path | None:
-    """Look for the agent-mem `src/` checkout next to this CLI.
-
-    The CLI lives in `<repo>/tools/search/cli.py`; src is `<repo>/src/`.
-    """
-    here = Path(__file__).resolve().parent
-    candidate = here.parent.parent / "src"
-    if (candidate / "scripts" / "lint.py").exists():
-        return candidate
-    # Fall back to AGENT_MEM_SRC if set.
-    env = os.environ.get("AGENT_MEM_SRC")
-    if env:
-        p = Path(env).expanduser().resolve()
-        if (p / "scripts" / "lint.py").exists():
-            return p
-    return None
+    if not knowledge_dir.exists():
+        return -1, "(lint skipped: knowledge dir not found)"
+    return _lint.run_structural_lint(knowledge_dir, _iter_entries(knowledge_dir))
 
 
 @dataclass

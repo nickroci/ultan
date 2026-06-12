@@ -2,22 +2,17 @@
 
 The daemon (`agent-mem-daemon`) learns ONLY from ``events.jsonl``: it tails
 that file, seals a "turn" on every ``Stop`` event, and runs the Librarian on
-the sealed turn (see ``agent_mem_daemon/buffer.py``). This module is the
-plugin-side writer of that stream. The legacy ``src/hooks`` (wired by the
-from-source ``/ultan-install`` path) write the same file — exactly one of the
-two should be installed per machine, or every event lands twice (see the
-README's double-install warning).
+the sealed turn (see ``agent_mem_daemon/buffer.py``). This module is the sole
+writer of that stream, driven by the plugin's hook manifest (``hooks/hooks.json``).
 
 It is deliberately stdlib-only and torch-free: it sits on the hook hot path
 (every ``PostToolUse``), so ``tests/test_hook_import.py`` guards that nothing
 heavy leaks in through here.
 
-Ported from ``src/hooks/_events.py`` (still shipped for the from-source
-path): same frozen line schema ``{ts, session_id, type, cwd, payload}``, same
-``O_APPEND`` atomic write, same 3 KiB budget, same ``CLAUDE_INVOKED_BY``
-recursion guard. The only change is the path resolves via
-:func:`ultan._daemon._home`, so this module carries no dependency on the
-heavy ``src/scripts/config``.
+The frozen line schema is ``{ts, session_id, type, cwd, payload}``, written with
+an ``O_APPEND`` atomic write under a 3 KiB budget and a ``CLAUDE_INVOKED_BY``
+recursion guard. The path resolves via :func:`ultan._daemon._home`, so this
+module is pure-stdlib with no dependency on the search/retrieval stack.
 """
 
 from __future__ import annotations

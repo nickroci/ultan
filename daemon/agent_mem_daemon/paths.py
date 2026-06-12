@@ -55,6 +55,23 @@ def offset_state_path() -> Path:
     return home() / "daemon.offset.json"
 
 
+def transcript_marker_path() -> Path:
+    """Where the seal path persists which assistant-prose transcript turns
+    it has already folded into the buffer, keyed per session.
+
+    Keyed ``{session_id: [seen_transcript_uuid, ...]}``. A Stop /
+    SessionEnd event carries the Claude Code ``transcript_path``; the
+    daemon reads the assistant's natural-language turns since the last
+    read and injects them into the buffer so the Librarian sees the
+    model's reasoning (not just tool I/O). This marker is what makes that
+    read incremental — a Stop firing twice on a growing transcript only
+    yields the NEW turns. Follows the offset-state idiom
+    (``ingest._load_offset_state`` / ``_save_offset_state``): atomic
+    tmp+rename JSON. See ``transcript.read_new_assistant_prose``.
+    """
+    return home() / "daemon.transcript-marker.json"
+
+
 def fired_helpful_state_path() -> Path:
     """Where the Scholar persists the fired-helpful dedup high-water mark
     across daemon restarts.

@@ -96,10 +96,25 @@ def test_post_tool_use_marks_failure(_isolated_store: Path) -> None:
 
 
 def test_stop_writes_sealing_event(_isolated_store: Path) -> None:
+    # G1: Stop now carries transcript_path so the daemon's scheduler can read the
+    # turn's assistant prose (scheduler._transcript_path_of reads
+    # ev.payload["transcript_path"]).
+    _hooks.dispatch(
+        "stop",
+        {"session_id": "sess-1", "cwd": "/work/proj", "transcript_path": "/tmp/t.jsonl"},
+    )
+    (ev,) = _read_events(_isolated_store)
+    _assert_valid_event(ev, expected_type="Stop")
+    assert ev["payload"] == {"transcript_path": "/tmp/t.jsonl"}
+
+
+def test_stop_forwards_none_transcript_when_absent(_isolated_store: Path) -> None:
+    # Absent transcript_path in stdin → None in payload; harmless (the daemon
+    # degrades to no prose) and Stop still seals the turn.
     _hooks.dispatch("stop", {"session_id": "sess-1", "cwd": "/work/proj"})
     (ev,) = _read_events(_isolated_store)
     _assert_valid_event(ev, expected_type="Stop")
-    assert ev["payload"] == {}  # a bare marker is enough to seal the turn
+    assert ev["payload"] == {"transcript_path": None}
 
 
 def test_session_end_writes_event(_isolated_store: Path) -> None:
@@ -166,22 +181,34 @@ def test_user_prompt_submit_writes_event(
     assert ev["payload"]["content"] == "always use uv, never pip"
 
 
-def test_pre_tool_use_writes_nothing(_isolated_store: Path) -> None:
-    # Deliberately NOT wired: PostToolUse already captures tool usage. Wiring
-    # it would double-feed the buffer — this test fails loudly if someone does.
-    rc = _hooks.dispatch("pre-tool-use", {"session_id": "s", "tool_name": "Read"})
+def test_pre_tool_use_writes_pre_check_event(_isolated_store: Path) -> None:
+    # G2: PreToolUse is now wired (Tier 3 blocker check). With no blocker rules
+    # in the (empty) store nothing is denied, but we ALWAYS append a PreToolUse
+    # event so the daemon sees the call — PostToolUse won't fire for a denied
+    # call, so this is the only record of a blocked one.
+    rc = _hooks.dispatch(
+        "pre-tool-use", {"session_id": "s", "tool_name": "Read", "tool_input": {"file_path": "/x"}}
+    )
     assert rc == 0
-    assert _read_events(_isolated_store) == []
+    (ev,) = _read_events(_isolated_store)
+    _assert_valid_event(ev, expected_type="PreToolUse")
+    assert ev["payload"]["blocked"] is False
+    assert ev["payload"]["tool"] == "Read"
+    assert ev["payload"]["summary"] == "Read pre-check ok"
 
 
 def test_pre_compact_seals_turn_with_session_end(_isolated_store: Path) -> None:
     # Legacy parity (src/hooks/pre_compact.py): compaction discards transcript
     # detail, so the open turn must be sealed (SessionEnd → Librarian) FIRST.
-    rc = _hooks.dispatch("pre-compact", {"session_id": "s", "cwd": "/w"})
+    rc = _hooks.dispatch(
+        "pre-compact", {"session_id": "s", "cwd": "/w", "transcript_path": "/tmp/t.jsonl"}
+    )
     assert rc == 0
     (ev,) = _read_events(_isolated_store)
     _assert_valid_event(ev, expected_type="SessionEnd")
-    assert ev["payload"] == {"source": "pre-compact"}
+    # G1: pre-compact carries BOTH the source tag AND transcript_path, so the
+    # pre-compaction prose is captured before compaction discards it.
+    assert ev["payload"] == {"source": "pre-compact", "transcript_path": "/tmp/t.jsonl"}
 
 
 def test_session_start_writes_boundary_event(

@@ -44,9 +44,9 @@ build-backend = "hatchling.build"
 packages = ["ultan"]
 
 [tool.uv.workspace]
-# Root (ultan) is the workspace root + a member; tools/search, daemon, src (the
-# hooks), and tools/ultan (the slash-command logic) are the other members.
-members = ["tools/search", "daemon", "src", "tools/ultan"]
+# Root (ultan) is the workspace root + a member; tools/search, daemon, and
+# tools/ultan (the slash-command logic) are the other members.
+members = ["tools/search", "daemon", "tools/ultan"]
 
 [tool.uv.sources]
 agent-mem-daemon = { workspace = true }
@@ -62,11 +62,11 @@ testpaths = ["tests"]
 line-length = 100
 target-version = "py312"
 # This (root) job covers only the `ultan` package + its tests. The workspace
-# members — daemon, src, tools/* — are linted/typed by their own CI jobs, so
+# members — daemon, tools/* — are linted/typed by their own CI jobs, so
 # exclude them here to avoid double-coverage and conflicting results. skills/
 # ships a standalone stdlib script (a verbatim copy of the author's skill),
 # not package code.
-extend-exclude = [".venv", "build", "dist", "daemon", "src", "tools", "skills", "stubs"]
+extend-exclude = [".venv", "build", "dist", "daemon", "tools", "skills", "stubs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "C901", "PLR0912", "PLR0915", "PLC0415"]

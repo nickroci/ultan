@@ -27,6 +27,17 @@
         ]
       }
     ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -x \"${CLAUDE_PLUGIN_DATA}/bin/ultan\" ] && \"${CLAUDE_PLUGIN_DATA}/bin/ultan\" hook pre-tool-use || true",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "hooks": [

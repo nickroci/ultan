@@ -19,7 +19,7 @@ plugin_ver="$(perl -ne 'if (/"version":\s*"([^"]+)"/) { print $1; exit }' "$ROOT
 [ -n "$plugin_ver" ] || { echo "FAIL: could not read plugin.json version"; exit 1; }
 echo "plugin.json version: $plugin_ver"
 
-for rel in pyproject.toml daemon/pyproject.toml tools/search/pyproject.toml tools/ultan/pyproject.toml src/pyproject.toml; do
+for rel in pyproject.toml daemon/pyproject.toml tools/search/pyproject.toml tools/ultan/pyproject.toml; do
   v="$(perl -ne 'if (/^version = "([^"]+)"/) { print $1; exit }' "$ROOT/$rel")"
   if [ "$v" != "$plugin_ver" ]; then
     echo "FAIL: $rel version '$v' != plugin.json '$plugin_ver'"; fail=1

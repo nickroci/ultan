@@ -1,15 +1,14 @@
 [project]
 name = "agent-mem-tools"
 version = "0.3.2"
-description = "Ultan slash-command logic (advisor / remember / install) — the /ultan, /ultan-advisor and /ultan-install entry points."
+description = "Ultan slash-command logic (advisor / remember) — the /ultan and /ultan-advisor entry points."
 authors = [{ name = "Nicholas Holden", email = "nicholas.holden@banqora.com" }]
 requires-python = ">=3.12"
 # remember.py is stdlib-only but writes the daemon's events.jsonl contract,
-# which is owned by the agent-mem (src) package — depend on it so the schema
+# which is owned by the agent-mem-daemon package — depend on it so the schema
 # stays co-versioned. advisor.py drives the Librarian/Scholar via the Claude
 # Agent SDK and reuses the daemon's BM25 library_tools, so it needs both.
 dependencies = [
-    "agent-mem",
     "agent-mem-daemon",
     "claude-agent-sdk>=0.1.29",
 ]
@@ -19,13 +18,12 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-# Flat module layout: advisor.py, remember.py, install.py live at package root
-# and install top-level (same pattern as tools/search).
-only-include = ["advisor.py", "remember.py", "install.py"]
+# Flat module layout: advisor.py, remember.py live at package root and install
+# top-level (same pattern as tools/search).
+only-include = ["advisor.py", "remember.py"]
 sources = ["."]
 
 [tool.uv.sources]
-agent-mem = { workspace = true }
 agent-mem-daemon = { workspace = true }
 
 [dependency-groups]
@@ -54,7 +52,7 @@ select = ["E", "F", "I", "W", "C901", "PLR0912", "PLR0915", "PLC0415"]
 "advisor.py" = ["E501", "PLC0415", "C901", "PLR0912", "PLR0915"]
 
 [tool.pyright]
-include = ["advisor.py", "remember.py", "install.py"]
+include = ["advisor.py", "remember.py"]
 exclude = [".venv", "**/__pycache__", "build", "dist"]
 # Workspace member — resolves against the shared root venv (this package has
 # no .venv of its own, unlike the pre-workspace members).

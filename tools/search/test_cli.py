@@ -479,89 +479,51 @@ def test_scope_label_handles_project_scope() -> None:
     assert cli._scope_label({"scope": "project:vol-predictor"}) == "project:vol-predictor"
 
 
-def test_find_src_dir_returns_none_when_no_checkout(tmp_path: Path, monkeypatch) -> None:
-    """Move the CLI's notional location to a tmp dir with no src — function
-    should fall back to ``$AGENT_MEM_SRC`` and return ``None`` if that's also
-    bogus."""
-    monkeypatch.setenv("AGENT_MEM_SRC", str(tmp_path / "nope"))
-    # Patch __file__ resolution so the parent walk lands somewhere harmless.
-    monkeypatch.setattr(cli, "__file__", str(tmp_path / "fake_cli.py"))
-    assert cli._find_src_dir() is None
+def _write_entry(kdir: Path, rel: str, body: str) -> Path:
+    path = kdir / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    return path
 
 
-def test_find_src_dir_uses_agent_mem_src_env(tmp_path: Path, monkeypatch) -> None:
-    fake_src = tmp_path / "src-checkout"
-    (fake_src / "scripts").mkdir(parents=True)
-    (fake_src / "scripts" / "lint.py").write_text("# noop\n", encoding="utf-8")
-    # Make the auto-detect fail so we exercise the env fallback.
-    monkeypatch.setattr(cli, "__file__", str(tmp_path / "fake_cli.py"))
-    monkeypatch.setenv("AGENT_MEM_SRC", str(fake_src))
-    assert cli._find_src_dir() == fake_src.resolve()
+_BODY = "word " * 200  # >= the 200-word sparse threshold
 
 
-def test_run_structural_lint_skipped_when_no_src(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(cli, "_find_src_dir", lambda: None)
-    rc, output = cli._run_structural_lint(tmp_path / "knowledge")
-    assert rc < 0
-    assert "could not locate" in output
+def test_structural_lint_clean(tmp_path: Path) -> None:
+    """Two entries that link to each other, each long enough -> rc 0, clean."""
+    kdir = tmp_path / "knowledge"
+    _write_entry(kdir, "global/a.md", f"# A\nSee [[global/b]].\n{_BODY}")
+    _write_entry(kdir, "global/b.md", f"# B\nSee [[global/a]].\n{_BODY}")
+    rc, output = cli._run_structural_lint(kdir)
+    assert rc == 0
+    assert "passed" in output.lower()
 
 
-def test_run_structural_lint_skipped_when_script_missing(tmp_path: Path, monkeypatch) -> None:
-    fake_src = tmp_path / "src"
-    fake_src.mkdir()
-    monkeypatch.setattr(cli, "_find_src_dir", lambda: fake_src)
-    rc, output = cli._run_structural_lint(tmp_path / "knowledge")
+def test_structural_lint_flags_broken_link(tmp_path: Path) -> None:
+    """A wikilink with no backing entry is an error -> rc 1."""
+    kdir = tmp_path / "knowledge"
+    _write_entry(kdir, "global/a.md", f"# A\nSee [[global/missing]].\n{_BODY}")
+    rc, output = cli._run_structural_lint(kdir)
+    assert rc == 1
+    assert "broken_link" in output
+    assert "missing" in output
+
+
+def test_structural_lint_orphan_and_sparse_do_not_trip_rc(tmp_path: Path) -> None:
+    """A short, unlinked entry is an orphan + sparse (warning/suggestion) but
+    has no broken link, so rc stays 0 (parity with the old lint exit code)."""
+    kdir = tmp_path / "knowledge"
+    _write_entry(kdir, "global/lonely.md", "# Lonely\nonly three words")
+    rc, output = cli._run_structural_lint(kdir)
+    assert rc == 0
+    assert "orphan_page" in output
+    assert "sparse_article" in output
+
+
+def test_structural_lint_unavailable_without_knowledge_dir(tmp_path: Path) -> None:
+    rc, output = cli._run_structural_lint(tmp_path / "nope")
     assert rc < 0
     assert "not found" in output
-
-
-def test_run_structural_lint_skipped_when_uv_missing(tmp_path: Path, monkeypatch) -> None:
-    fake_src = tmp_path / "src"
-    (fake_src / "scripts").mkdir(parents=True)
-    (fake_src / "scripts" / "lint.py").write_text("# noop\n", encoding="utf-8")
-    monkeypatch.setattr(cli, "_find_src_dir", lambda: fake_src)
-
-    def fake_run(*_a, **_kw):
-        raise FileNotFoundError("uv not on PATH")
-
-    monkeypatch.setattr(cli.subprocess, "run", fake_run)
-    rc, output = cli._run_structural_lint(tmp_path / "knowledge")
-    assert rc < 0
-    assert "uv" in output.lower()
-
-
-def test_run_structural_lint_timeout(tmp_path: Path, monkeypatch) -> None:
-    fake_src = tmp_path / "src"
-    (fake_src / "scripts").mkdir(parents=True)
-    (fake_src / "scripts" / "lint.py").write_text("# noop\n", encoding="utf-8")
-    monkeypatch.setattr(cli, "_find_src_dir", lambda: fake_src)
-    import subprocess as sp
-
-    def fake_run(*a, **kw):
-        raise sp.TimeoutExpired(cmd="uv", timeout=1)
-
-    monkeypatch.setattr(cli.subprocess, "run", fake_run)
-    rc, output = cli._run_structural_lint(tmp_path / "knowledge")
-    assert rc < 0
-    assert "timed out" in output
-
-
-def test_run_structural_lint_returns_real_output(tmp_path: Path, monkeypatch) -> None:
-    """When the subprocess runs cleanly, output and rc are returned."""
-    fake_src = tmp_path / "src"
-    (fake_src / "scripts").mkdir(parents=True)
-    (fake_src / "scripts" / "lint.py").write_text("# noop\n", encoding="utf-8")
-    monkeypatch.setattr(cli, "_find_src_dir", lambda: fake_src)
-
-    class _Result:
-        returncode = 0
-        stdout = "lint ok\n"
-        stderr = ""
-
-    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **kw: _Result())
-    rc, output = cli._run_structural_lint(tmp_path / "knowledge")
-    assert rc == 0
-    assert "lint ok" in output
 
 
 def test_run_doctor_cost_rolled_over(home_and_knowledge: tuple[Path, Path], monkeypatch) -> None:

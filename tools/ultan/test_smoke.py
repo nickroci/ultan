@@ -19,7 +19,7 @@ _FORBIDDEN = ("torch", "sentence_transformers", "transformers", "claude_agent_sd
 def test_modules_import_without_heavy_deps() -> None:
     script = (
         "import sys\n"
-        "import advisor, install, remember\n"
+        "import advisor, remember\n"
         f"bad = [m for m in {_FORBIDDEN!r} if m in sys.modules]\n"
         "assert not bad, f'heavy imports leaked to module level: {bad}'\n"
     )
