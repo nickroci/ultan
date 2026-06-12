@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -30,18 +29,6 @@ def _fmt_age(seconds: float) -> str:
     if seconds < 86400:
         return f"{seconds / 3600:.1f}h ago"
     return f"{seconds / 86400:.1f}d ago"
-
-
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # exists, owned by someone else
-    except OSError:
-        return False
-    return True
 
 
 def _daemon_pid(home: Path) -> int | None:
@@ -84,7 +71,7 @@ def _daemon_phase(home: Path) -> dict[str, Any] | None:
 def _report_daemon(home: Path) -> tuple[bool, bool]:
     """Process + socket + priming round-trip. Returns (alive, socket_ok)."""
     pid = _daemon_pid(home)
-    alive = pid is not None and _pid_alive(pid)
+    alive = pid is not None and _daemon._pid_alive(pid)  # pyright: ignore[reportPrivateUsage]
     print(f"daemon process: {'running (pid ' + str(pid) + ')' if alive else 'not running'}")
     phase = _daemon_phase(home)
     if phase is not None and alive and phase.get("pid") == pid:

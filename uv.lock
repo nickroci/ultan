@@ -2050,6 +2050,7 @@ retrieval = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "pylint" },
     { name = "pyright" },
     { name = "pytest" },
     { name = "ruff" },
@@ -2065,6 +2066,7 @@ provides-extras = ["retrieval"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "pylint", specifier = ">=3.3" },
     { name = "pyright", specifier = ">=1.1.409" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "ruff", specifier = ">=0.15" },

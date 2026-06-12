@@ -53,7 +53,7 @@ agent-mem-daemon = { workspace = true }
 agent-mem-tools = { workspace = true }
 
 [dependency-groups]
-dev = ["pytest>=8.0", "pyright>=1.1.409", "ruff>=0.15"]
+dev = ["pytest>=8.0", "pyright>=1.1.409", "ruff>=0.15", "pylint>=3.3"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -95,3 +95,11 @@ reportMissingTypeStubs = false
 reportMissingImports = "warning"
 reportUnusedImport = "error"
 reportPrivateUsage = "warning"
+
+[tool.pylint.similarities]
+# Copy-paste detection (R0801) — the only pylint check we run; see the
+# duplicate-code (ultan) pre-commit hook. Tuned to flag genuine copy-paste while
+# tolerating short, naturally-similar blocks (imports, signatures, etc).
+min-similarity-lines = 8
+ignore-comments = true
+ignore-docstrings = true
