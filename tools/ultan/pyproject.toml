@@ -1,6 +1,6 @@
 [project]
 name = "agent-mem-tools"
-version = "0.2.0"
+version = "0.3.0"
 description = "Ultan slash-command logic (advisor / remember / install) — the /ultan, /ultan-advisor and /ultan-install entry points."
 authors = [{ name = "Nicholas Holden", email = "nicholas.holden@banqora.com" }]
 requires-python = ">=3.12"
