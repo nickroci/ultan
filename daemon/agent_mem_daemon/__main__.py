@@ -118,9 +118,20 @@ def release_pid_file(path: Path) -> None:
 def write_daemon_state(phase: str) -> None:
     """Publish the lifecycle flag other processes read (see
     ``paths.daemon_state_path``). Best-effort — a failed write must never
-    block startup; consumers fall back to pid/socket inference."""
+    block startup; consumers fall back to pid/socket inference.
+
+    Records the running code's ``version`` (read from on-disk metadata at this
+    process's startup, where it equals the code actually loaded). The ``ultan``
+    spawn path compares it against the live installed version to detect a daemon
+    left running OLD code after an ``uv tool install`` update, and restarts it."""
     import json  # noqa: PLC0415 — tiny, cold path
     from datetime import datetime, timezone  # noqa: PLC0415
+    from importlib.metadata import PackageNotFoundError, version  # noqa: PLC0415
+
+    try:
+        running_version: str | None = version("agent-mem-daemon")
+    except PackageNotFoundError:
+        running_version = None
 
     try:
         daemon_state_path().write_text(
@@ -129,6 +140,7 @@ def write_daemon_state(phase: str) -> None:
                     "phase": phase,
                     "pid": os.getpid(),
                     "since": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "version": running_version,
                 }
             ),
             encoding="utf-8",

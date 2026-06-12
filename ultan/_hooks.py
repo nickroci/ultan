@@ -87,6 +87,11 @@ def _user_prompt_submit(payload: dict[str, Any]) -> int:
 
 
 def _session_start(payload: dict[str, Any]) -> int:
+    # If a daemon is still running OLDER code than what's now installed (e.g.
+    # right after an `ultan` tool update), stop it so a fresh one starts on the
+    # current code — a long-running process keeps the code it loaded at spawn.
+    # Session-start, not the per-turn hot path, so the version check is fine here.
+    _daemon.restart_if_stale()
     # Warm the daemon at session start so the first prompt is already hot.
     _daemon.ensure_running()
     # Capture the session boundary (legacy parity: src/hooks/session_start.py

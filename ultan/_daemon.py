@@ -73,6 +73,34 @@ def _pid_alive(pid: object) -> bool:
     return True
 
 
+def _read_daemon_state() -> dict[str, Any] | None:
+    """The daemon's lifecycle flag ``{phase, pid, since, version}`` (written
+    between pid-acquire and exit), or ``None`` when absent/unreadable."""
+    try:
+        raw: Any = json.loads((_home() / "daemon.state").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return cast("dict[str, Any]", raw) if isinstance(raw, dict) else None
+
+
+def _installed_daemon_version() -> str | None:
+    """The agent-mem-daemon version installed in THIS venv right now, read live
+    from on-disk metadata — so it reflects an ``uv tool install`` update even
+    while an older daemon process keeps serving the previous code. ``None`` when
+    the daemon dist isn't installed (a thin/uvx env) or metadata is unreadable.
+
+    Cold path only (session-start / doctor): reading dist metadata is stdlib but
+    does I/O, so it must never land on the per-turn hook hot path."""
+    from importlib.metadata import PackageNotFoundError, version  # noqa: PLC0415 — cold path
+
+    try:
+        return version(_DAEMON_ENTRYPOINT)  # dist name == console-script name here
+    except PackageNotFoundError:
+        return None
+    except Exception:  # noqa: BLE001 — a broken install must not crash the caller
+        return None
+
+
 def status() -> str:
     """Coarse daemon state for consumers that must phrase fallbacks honestly:
     ``"ready"`` (socket answering), ``"warming"`` (daemon alive or freshly
@@ -82,12 +110,9 @@ def status() -> str:
         return "ready"
     home = _home()
     # The daemon's own lifecycle flag (written between pid-acquire and exit).
-    try:
-        raw: Any = json.loads((home / "daemon.state").read_text(encoding="utf-8"))
-        if isinstance(raw, dict) and _pid_alive(cast("dict[str, Any]", raw).get("pid")):
-            return "warming"
-    except (OSError, ValueError):
-        pass
+    state = _read_daemon_state()
+    if state is not None and _pid_alive(state.get("pid")):
+        return "warming"
     # A spawn was attempted moments ago (pre-flag window, or older daemon).
     try:
         if (time.time() - (home / ".daemon-spawn-attempt").stat().st_mtime) < 300.0:
@@ -95,6 +120,68 @@ def status() -> str:
     except OSError:
         pass
     return "down"
+
+
+def _stop_daemon(pid: int, *, timeout_s: float = 3.0) -> None:
+    """Stop a running daemon: SIGTERM, wait briefly for a clean exit, SIGKILL as
+    a last resort. The daemon installs a SIGTERM handler that flips its stop
+    event and shuts down gracefully (releasing the socket), so the common case is
+    a clean stop well under ``timeout_s``."""
+    import signal  # noqa: PLC0415 — cold path (session-start restart only)
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return  # already gone
+    deadline = time.monotonic() + timeout_s
+    while _pid_alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    if _pid_alive(pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def restart_if_stale() -> bool:
+    """If a daemon is running OLDER code than what's now installed in the venv,
+    stop it so a fresh daemon starts on current code. Returns True when a stale
+    daemon was stopped — the caller's :func:`ensure_running` then spawns the new
+    one (the stopped daemon no longer answers the socket).
+
+    SESSION-START PATH ONLY — never the per-turn hook hot path: it reads package
+    metadata (cold-cheap, hot-needless). The running version is what the daemon
+    stamped into ``daemon.state`` at ITS startup; the installed version is read
+    live, so an ``uv tool install`` update is detected even though the old
+    process keeps serving the previous code.
+
+    Anchored on the INSTALLED version: if we can't read it (a thin/uvx env with
+    no daemon dist, or unreadable metadata) we never restart — there's nothing to
+    compare against. Given a readable installed version, a daemon whose recorded
+    version differs is stale; so is one with NO recorded version, because that is
+    a legacy daemon from before this stamp existed (a current daemon always
+    stamps a version when the metadata it reads is itself readable). Restarting
+    that legacy daemon is the whole point — it's exactly the process left on old
+    code that this feature exists to replace."""
+    state = _read_daemon_state()
+    if not state:
+        return False
+    pid = state.get("pid")
+    if not _pid_alive(pid):
+        return False
+    installed = _installed_daemon_version()
+    if not installed:
+        return False  # can't tell what's installed — never restart blindly
+    if state.get("version") == installed:
+        return False  # up to date
+    _stop_daemon(cast("int", pid))
+    # Clear the spawn backoff so ensure_running() respawns immediately rather
+    # than throttling this intentional restart as if it were a crash loop.
+    try:
+        (_home() / ".daemon-spawn-attempt").unlink()
+    except OSError:
+        pass
+    return True
 
 
 def run_foreground(extra_args: list[str]) -> int:
