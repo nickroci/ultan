@@ -25,6 +25,7 @@ import threading
 from pathlib import Path
 from types import FrameType
 
+from . import _inference
 from .buffer import DEFAULT_INACTIVITY_SECONDS, DEFAULT_MAX_TURNS, RollingBuffer
 from .ingest import DEFAULT_POLL_INTERVAL, JsonlTailer
 from .logging_setup import configure as configure_logging
@@ -327,8 +328,10 @@ def _prewarm_indexes(knowledge_root: Path, log: logging.Logger) -> None:
         # Dummy search to JIT-compile the MPS kernels for the query path.
         # ``load_or_build`` only loads weights and computes doc vectors — it
         # never runs the query-side forward pass, so the first real priming
-        # request would pay a ~2-3s graph-compile cost without this.
-        idx.search("warmup query for kernel compile", k=1)
+        # request would pay a ~2-3s graph-compile cost without this. Run it on
+        # the single inference thread so the kernels compile on the thread that
+        # actually serves requests (else the first real request recompiles).
+        _inference.run(idx.search, "warmup query for kernel compile", k=1)
         log.info("startup: embedding index ready (%d docs)", len(idx.docs))
     except Exception:
         log.exception("startup: embedding prewarm failed (lazy rebuild on first use)")
@@ -477,6 +480,9 @@ def run(args: argparse.Namespace) -> int:
         # next start. Last — the hook can keep getting priming until
         # the moment we shut down.
         rpc_thread.stop(timeout=2.0)
+        # RPC stopped → no more inference requests; stop the single inference
+        # thread so the executor's at-exit join doesn't delay process exit.
+        _inference.shutdown()
         log.info(
             "shutdown complete: stats=librarian_runs=%d backpressure_skips=%d "
             "librarian_debounced=%d scholar_runs=%d packets_queued=%d "

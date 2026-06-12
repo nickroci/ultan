@@ -68,8 +68,10 @@ def _daemon_phase(home: Path) -> dict[str, Any] | None:
     return cast("dict[str, Any]", raw) if isinstance(raw, dict) else None
 
 
-def _report_daemon(home: Path) -> tuple[bool, bool]:
-    """Process + socket + priming round-trip. Returns (alive, socket_ok)."""
+def _report_daemon(home: Path) -> tuple[bool, bool, bool]:
+    """Process + socket + REAL priming probe. Returns (alive, socket_ok, priming_ok),
+    where priming_ok means the daemon itself answered a real priming request
+    (not that the socket merely accepts connections)."""
     pid = _daemon_pid(home)
     alive = pid is not None and _daemon._pid_alive(pid)  # pyright: ignore[reportPrivateUsage]
     print(f"daemon process: {'running (pid ' + str(pid) + ')' if alive else 'not running'}")
@@ -101,12 +103,27 @@ def _report_daemon(home: Path) -> tuple[bool, bool]:
     else:
         print("priming socket: absent (daemon lazy-starts on the next prompt)")
 
-    t0 = time.monotonic()
-    md = _priming.get_priming("doctor health probe: packaging daemon memory", k=1)
-    dt_ms = (time.monotonic() - t0) * 1000.0
-    lane = "daemon" if socket_ok else "lexical fallback"
-    print(f"priming round-trip: {'ok' if md else 'no matches'} ({dt_ms:.0f}ms, {lane})")
-    return alive, socket_ok
+    # Send a REAL priming request — the socket accepting a connection (above)
+    # does NOT mean the priming handler works: a hung RPC (serve-one-then-
+    # deadlock) still accepts connects but never answers. probe_daemon does not
+    # fall back to the lexical scan, so None here == the daemon didn't respond.
+    priming_ok = False
+    if socket_ok:
+        t0 = time.monotonic()
+        resp = _priming.probe_daemon("doctor health probe: packaging daemon memory")
+        dt_ms = (time.monotonic() - t0) * 1000.0
+        if resp is not None and resp.get("ok"):
+            priming_ok = True
+            print(
+                f"priming probe: daemon answered ({dt_ms:.0f}ms client / "
+                f"{resp.get('took_ms')}ms server, lane={resp.get('lane')})"
+            )
+        else:
+            print(
+                f"priming probe: DAEMON DID NOT ANSWER in {dt_ms:.0f}ms — the priming "
+                "RPC is hung; the hook falls back to the lexical scan (priming DEGRADED)"
+            )
+    return alive, socket_ok, priming_ok
 
 
 def _report_storage(home: Path) -> None:
@@ -134,13 +151,18 @@ def _report_storage(home: Path) -> None:
 def run() -> int:
     home = _daemon._home()  # pyright: ignore[reportPrivateUsage]  # intra-package
     broken = _report_runtime(home)
-    alive, socket_ok = _report_daemon(home)
+    alive, socket_ok, priming_ok = _report_daemon(home)
     _report_storage(home)
 
     if broken:
         verdict = "BROKEN — runtime deps missing (see above)"
-    elif socket_ok:
+    elif priming_ok:
         verdict = "HEALTHY"
+    elif socket_ok:
+        verdict = (
+            "DEGRADED — daemon up but the priming RPC isn't answering; the hook falls back "
+            "to the in-process lexical scan (see 'priming probe' above)"
+        )
     elif alive:
         verdict = "WARMING — daemon is loading models; priming uses the lexical fallback meanwhile"
     else:
