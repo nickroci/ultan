@@ -42,10 +42,16 @@ from typing_extensions import NotRequired
 from . import _agent_research, _validation, repair_queue, runs
 from . import librarian_prompt as lp
 from ._schemas import AbstractEntries, MergeEntries, ProposedActionT, UpdateEntry, WriteEntry
-from .config import LIBRARIAN_MODEL, LIBRARIAN_TIMEOUT_S
+from .config import (
+    LIBRARIAN_FIRST_PROGRESS_S,
+    LIBRARIAN_MAX_ATTEMPTS,
+    LIBRARIAN_MAX_TURNS,
+    LIBRARIAN_MODEL,
+    LIBRARIAN_TIMEOUT_S,
+)
 from .llm import LLMTimeout, recursion_guard_env
 from .paths import ensure_home, knowledge_dir
-from .typed_agent import ModelRetry, TypedAgentError, run_typed
+from .typed_agent import ModelRetry, TypedAgentError, run_typed, run_with_retry
 
 if TYPE_CHECKING:
     from ._schemas import LibrarianProposal
@@ -284,27 +290,37 @@ def run_librarian_agent(
         user_asserted_turns=user_asserted_turns,
     )
 
-    async def _run() -> "Tuple[LibrarianProposal, float]":
-        try:
-            res = await asyncio.wait_for(
-                run_typed(
-                    prompt,
-                    LibrarianProposal,
-                    deps=deps,
-                    system_prompt=_SYSTEM_PROMPT,
-                    model=LIBRARIAN_MODEL,
-                    mcp_servers=mcp_servers,
-                    allowed_tools=allowed_tools,
-                    validators=[validate_proposal, validate_user_asserted_filed],
-                    max_retries=OUTPUT_RETRIES,
-                    cwd=knowledge_dir,
-                    env=recursion_guard_env(),
-                ),
-                timeout=timeout_s,
-            )
-        except asyncio.TimeoutError as e:
-            raise LLMTimeout(f"Librarian agent exceeded {timeout_s}s") from e
+    async def _attempt() -> "Tuple[LibrarianProposal, float]":
+        res = await asyncio.wait_for(
+            run_typed(
+                prompt,
+                LibrarianProposal,
+                deps=deps,
+                system_prompt=_SYSTEM_PROMPT,
+                model=LIBRARIAN_MODEL,
+                mcp_servers=mcp_servers,
+                allowed_tools=allowed_tools,
+                validators=[validate_proposal, validate_user_asserted_filed],
+                max_retries=OUTPUT_RETRIES,
+                max_turns=LIBRARIAN_MAX_TURNS,
+                first_progress_timeout_s=LIBRARIAN_FIRST_PROGRESS_S,
+                cwd=knowledge_dir,
+                env=recursion_guard_env(),
+            ),
+            timeout=timeout_s,
+        )
         return res.output, res.cost_usd
+
+    # Retry stalls/timeouts. The Librarian only PROPOSES (the Scholar is the sole
+    # writer), so re-running a scan is fully idempotent — worst case it
+    # re-proposes, which the Scholar dedups.
+    async def _run() -> "Tuple[LibrarianProposal, float]":
+        return await run_with_retry(
+            _attempt,
+            role="librarian",
+            max_attempts=LIBRARIAN_MAX_ATTEMPTS,
+            timeout_s=timeout_s,
+        )
 
     return asyncio.run(_run())
 
