@@ -51,10 +51,15 @@ from . import (
     scholar_executor,
     scholar_prompt,
 )
-from .config import SCHOLAR_MODEL, SCHOLAR_TIMEOUT_S
+from .config import (
+    SCHOLAR_FIRST_PROGRESS_S,
+    SCHOLAR_MAX_ATTEMPTS,
+    SCHOLAR_MODEL,
+    SCHOLAR_TIMEOUT_S,
+)
 from .llm import LLMTimeout, recursion_guard_env
 from .paths import ensure_home, hot_context_path, knowledge_dir
-from .typed_agent import ModelRetry, TypedAgentError, run_typed
+from .typed_agent import ModelRetry, TypedAgentError, run_typed, run_with_retry
 
 if TYPE_CHECKING:
     from ._schemas import ScholarAction, ScholarDecisions
@@ -399,27 +404,36 @@ def run_scholar_agent(
     mcp_servers, allowed_tools = _agent_research.research_server_and_tools(knowledge_dir)
     deps = ScholarDeps(knowledge_dir=knowledge_dir.resolve())
 
-    async def _run() -> "tuple[ScholarDecisions, float]":
-        try:
-            res = await asyncio.wait_for(
-                run_typed(
-                    prompt,
-                    ScholarDecisions,
-                    deps=deps,
-                    system_prompt=_SYSTEM_PROMPT,
-                    model=SCHOLAR_MODEL,
-                    mcp_servers=mcp_servers,
-                    allowed_tools=allowed_tools,
-                    validators=[validate_decisions],
-                    max_retries=OUTPUT_RETRIES,
-                    cwd=knowledge_dir,
-                    env=recursion_guard_env(),
-                ),
-                timeout=timeout_s,
-            )
-        except asyncio.TimeoutError as e:
-            raise LLMTimeout(f"Scholar agent exceeded {timeout_s}s") from e
+    async def _attempt() -> "tuple[ScholarDecisions, float]":
+        res = await asyncio.wait_for(
+            run_typed(
+                prompt,
+                ScholarDecisions,
+                deps=deps,
+                system_prompt=_SYSTEM_PROMPT,
+                model=SCHOLAR_MODEL,
+                mcp_servers=mcp_servers,
+                allowed_tools=allowed_tools,
+                validators=[validate_decisions],
+                max_retries=OUTPUT_RETRIES,
+                first_progress_timeout_s=SCHOLAR_FIRST_PROGRESS_S,
+                cwd=knowledge_dir,
+                env=recursion_guard_env(),
+            ),
+            timeout=timeout_s,
+        )
         return res.output, res.cost_usd
+
+    # Retry stalls/timeouts. The executor applies decisions only AFTER a
+    # successful call returns, so a stalled/timed-out attempt writes nothing —
+    # re-running is idempotent.
+    async def _run() -> "tuple[ScholarDecisions, float]":
+        return await run_with_retry(
+            _attempt,
+            role="scholar",
+            max_attempts=SCHOLAR_MAX_ATTEMPTS,
+            timeout_s=timeout_s,
+        )
 
     return asyncio.run(_run())
 
