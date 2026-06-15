@@ -69,15 +69,13 @@ log = logging.getLogger("agent_mem_daemon.librarian")
 # precision).
 OUTPUT_RETRIES = 3
 
-_SYSTEM_PROMPT = (
-    "You are the Librarian, the recall tier of a two-tier memory curator. "
-    "Use the read-only research tools (read_entry, grep_library, bm25_search, "
-    "embedding_search) to inspect the existing library before proposing "
-    "actions. You write nothing to disk and you only PROPOSE — the Scholar "
-    "approves or vetoes. When ready, call submit_result EXACTLY ONCE with a "
-    "LibrarianProposal object. Follow the detailed instructions in the user "
-    "message."
-)
+# The big static instruction prefix that the SDK/engine prompt-caches across
+# scans. Built once and reused — it is byte-identical every call (the
+# per-scan dynamic data lives in the user message, not here), so the engine's
+# prefix cache (system_prompt + tool defs) hits. The short role preamble that
+# used to live here is now folded into the TOP of this prompt by
+# ``librarian_prompt.librarian_system_prompt``.
+_SYSTEM_PROMPT = lp.librarian_system_prompt()
 
 
 class EvidencePacket(TypedDict):
@@ -405,7 +403,10 @@ def _scan_for_packet(
         bucket = lp.derive_project_bucket(buffer_snapshot)
 
         # ── Step 3: assemble + invoke ──────────────────────────────
-        prompt = lp.assemble_prompt(
+        # The big static instructions live in the SDK-cached system prompt
+        # (_SYSTEM_PROMPT, byte-stable). Only the per-scan dynamic blocks go
+        # in the user message, so the engine's prefix cache hits across scans.
+        prompt = lp.build_librarian_user_message(
             project_slug=bucket,
             rolling_buffer=formatted_buffer,
             library_snapshot=library_snapshot,
@@ -415,12 +416,14 @@ def _scan_for_packet(
         record.input_prompt = prompt
 
         log.debug(
-            "librarian.scan: session=%s bucket=%s turns=%d repair_tasks=%d prompt_chars=%d",
+            "librarian.scan: session=%s bucket=%s turns=%d repair_tasks=%d "
+            "prompt_chars=%d system_prompt_chars=%d",
             session_id,
             bucket,
             len(flat),
             len(repair_tasks),
             len(prompt),
+            len(_SYSTEM_PROMPT),
         )
 
         # The Librarian needs the knowledge dir so its read/grep/bm25/

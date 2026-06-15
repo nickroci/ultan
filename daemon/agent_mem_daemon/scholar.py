@@ -76,18 +76,13 @@ log = logging.getLogger("agent_mem_daemon.scholar")
 # Role-specific (higher than the Librarian's — precision over recall).
 OUTPUT_RETRIES = 4
 
-# Concise framing for the model; the heavy role instructions live in the
-# user prompt built by ``scholar_prompt.build_prompt`` (single source of
-# truth). The shim wires ``submit_result`` whose schema is ScholarDecisions.
-_SYSTEM_PROMPT = (
-    "You are the Scholar, the precision gatekeeper of a two-tier memory curator. "
-    "Use the read-only research tools (read_entry, grep_library, bm25_search, "
-    "embedding_search) to verify the Librarian's proposals against the real "
-    "library — never trust its summary. You write nothing to disk: when you have "
-    "decided which proposals to approve, call submit_result EXACTLY ONCE with a "
-    "ScholarDecisions object holding the approved actions. A deterministic "
-    "executor applies them. Follow the detailed instructions in the user message."
-)
+# The big static instruction prefix that the SDK/engine prompt-caches across
+# batches. Built once and reused — it is byte-identical every call (the
+# per-batch dynamic data lives in the user message, not here), so the
+# engine's prefix cache (system_prompt + tool defs) hits. The short role
+# preamble that used to live here is now folded into the TOP of this prompt
+# by ``scholar_prompt.scholar_system_prompt``.
+_SYSTEM_PROMPT = scholar_prompt.scholar_system_prompt()
 
 
 _HETEROGENEOUS_SESSION_ID = "batch"
@@ -726,7 +721,11 @@ def _review_inner(
     session_id = _batch_session_id(packets)
     ensure_home()  # create ~/.agent-mem/ if missing (side effect only)
     knowledge_root = knowledge_dir()
-    prompt = scholar_prompt.build_prompt(packets)
+    # The big static instructions live in the SDK-cached system prompt
+    # (_SYSTEM_PROMPT, byte-stable). Only the per-batch dynamic blocks
+    # (timestamp / snapshot / proposals) go in the user message, so the
+    # engine's prefix cache hits across batches.
+    prompt = scholar_prompt.build_scholar_user_message(packets)
 
     record = runs.InvocationRecord(
         role="scholar",
@@ -745,11 +744,14 @@ def _review_inner(
     _bump_fired_helpful_counters(packets, record)
 
     log.info(
-        "scholar.review: invoking agent (session=%s packets=%d proposals=%d interrupts=%d)",
+        "scholar.review: invoking agent (session=%s packets=%d proposals=%d "
+        "interrupts=%d prompt_chars=%d system_prompt_chars=%d)",
         session_id,
         n_packets,
         n_props,
         n_ints,
+        len(prompt),
+        len(_SYSTEM_PROMPT),
     )
 
     try:

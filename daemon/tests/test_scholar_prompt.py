@@ -14,10 +14,14 @@ from typing import Any, Dict, List
 from agent_mem_daemon import scholar_prompt
 from agent_mem_daemon._schemas import ScholarDecisions
 
-# ── prompt assembly ───────────────────────────────────────────────────
+# ── prompt assembly: system prompt / user message split ──────────────
+#
+# The big static instructions now live in a byte-stable ``system_prompt``
+# (the cacheable prefix); the three per-batch dynamic blocks (timestamp,
+# library snapshot, packets JSON) move to the first user message.
 
 
-def test_build_prompt_includes_proposals_and_library_snapshot():
+def test_user_message_includes_proposals_and_library_snapshot():
     packets = [
         {
             "session_id": "s1",
@@ -33,18 +37,21 @@ def test_build_prompt_includes_proposals_and_library_snapshot():
             "interrupts": [],
         }
     ]
-    prompt = scholar_prompt.build_prompt(
+    msg = scholar_prompt.build_scholar_user_message(
         packets,
         now=datetime(2026, 5, 19, 15, 0, 0, tzinfo=timezone.utc),
         library_snapshot="## Tree\n```\nglobal/\n```",
     )
-    assert "global/tooling/uv-basics.md" in prompt
-    assert "2026-05-19T15:00:00" in prompt
-    assert "## Tree" in prompt
-    # Veto language and the typed-output language must survive into the prompt.
-    assert "VETO" in prompt
-    assert "ScholarDecisions" in prompt
-    # The action enumeration (Librarian's full vocabulary) is still inlined.
+    # Per-batch dynamic data is in the user message.
+    assert "global/tooling/uv-basics.md" in msg
+    assert "2026-05-19T15:00:00" in msg
+    assert "## Tree" in msg
+    assert "<librarian_proposals>" in msg
+    # Instructions (veto/typed-output language, action vocabulary) live in
+    # the system prompt, not the user message.
+    sp = scholar_prompt.scholar_system_prompt()
+    assert "VETO" in sp
+    assert "ScholarDecisions" in sp
     for action in (
         "write_entry",
         "merge_entries",
@@ -52,10 +59,30 @@ def test_build_prompt_includes_proposals_and_library_snapshot():
         "move_entry",
         "update_entry",
     ):
-        assert action in prompt, f"action {action!r} missing from Scholar prompt"
+        assert action in sp, f"action {action!r} missing from Scholar system prompt"
 
 
-def test_build_prompt_annotates_action_indices():
+def test_system_prompt_is_byte_stable():
+    # The whole point of the refactor: the system prompt must be identical
+    # on every call so the engine's prefix cache hits across batches.
+    assert scholar_prompt.scholar_system_prompt() == scholar_prompt.scholar_system_prompt()
+
+
+def test_system_prompt_has_no_placeholders_or_dynamic_markers():
+    sp = scholar_prompt.scholar_system_prompt()
+    # No leftover template placeholders.
+    assert "{{" not in sp and "}}" not in sp
+    # The instructions survived.
+    assert "You are the Scholar" in sp
+    assert "HARD RULE" in sp
+    # No per-batch dynamic data leaked into the static prefix: the data-block
+    # openers and a sample timestamp must be absent.
+    assert "<batch_timestamp>\n" not in sp
+    assert "<librarian_proposals>\n" not in sp
+    assert "_action_index" not in sp
+
+
+def test_user_message_annotates_action_indices():
     """Each proposal in the rendered JSON carries an ``_action_index`` so the
     Scholar can refer to the Librarian's proposals while verifying them."""
     packets = [
@@ -75,45 +102,39 @@ def test_build_prompt_annotates_action_indices():
             "interrupts": [],
         },
     ]
-    prompt = scholar_prompt.build_prompt(
+    msg = scholar_prompt.build_scholar_user_message(
         packets,
         library_snapshot="(empty)",
     )
     # Flat indexing across packets: 0, 1, 2.
-    assert '"_action_index": 0' in prompt
-    assert '"_action_index": 1' in prompt
-    assert '"_action_index": 2' in prompt
+    assert '"_action_index": 0' in msg
+    assert '"_action_index": 1' in msg
+    assert '"_action_index": 2' in msg
 
 
-def test_build_prompt_handles_empty_proposals():
+def test_user_message_handles_empty_proposals():
     packets = [{"session_id": "s1", "proposals": [], "interrupts": []}]
-    prompt = scholar_prompt.build_prompt(packets, library_snapshot="(empty)")
-    assert "s1" in prompt
+    msg = scholar_prompt.build_scholar_user_message(packets, library_snapshot="(empty)")
+    assert "s1" in msg
 
 
-def test_build_prompt_embeds_scholar_decisions_schema():
-    """The output schema inlined into the prompt is the ScholarDecisions
-    model's JSON Schema (actions + interrupts_processed), not the old
-    approve/veto ScholarReview shape."""
-    prompt = scholar_prompt.build_prompt(
-        [{"session_id": "s1", "proposals": [], "interrupts": []}],
-        library_snapshot="(empty)",
-    )
-    assert "interrupts_processed" in prompt
-    assert '"actions"' in prompt
+def test_system_prompt_embeds_scholar_decisions_schema():
+    """The output schema inlined into the system prompt is the
+    ScholarDecisions model's JSON Schema (actions + interrupts_processed),
+    not the old approve/veto ScholarReview shape."""
+    sp = scholar_prompt.scholar_system_prompt()
+    assert "interrupts_processed" in sp
+    assert '"actions"' in sp
 
 
-def test_build_prompt_documents_abstract_entries_gate():
-    """The Scholar prompt names abstract_entries in its vocabulary and carries
-    the aha/abstraction gate with its GOOD + MUST-VETO examples."""
-    prompt = scholar_prompt.build_prompt(
-        [{"session_id": "s1", "proposals": [], "interrupts": []}],
-        library_snapshot="(empty)",
-    )
-    assert "abstract_entries" in prompt
-    assert "ABSTRACTION GATE" in prompt
-    assert "linting across languages" in prompt  # the GOOD example
-    assert "likes good code" in prompt  # a MUST-VETO example
+def test_system_prompt_documents_abstract_entries_gate():
+    """The Scholar system prompt names abstract_entries in its vocabulary and
+    carries the aha/abstraction gate with its GOOD + MUST-VETO examples."""
+    sp = scholar_prompt.scholar_system_prompt()
+    assert "abstract_entries" in sp
+    assert "ABSTRACTION GATE" in sp
+    assert "linting across languages" in sp  # the GOOD example
+    assert "likes good code" in sp  # a MUST-VETO example
 
 
 # ── decision accounting (typed-output era) ────────────────────────────
@@ -1070,29 +1091,29 @@ def test_apply_fired_helpful_persists_high_water_across_calls(tmp_path: Path):
 # ── Secrets-redaction invariant ──────────────────────────────────────
 
 
-def test_build_prompt_includes_no_literal_secrets_invariant():
-    """Hierarchy invariant #6 must surface in the assembled prompt
+def test_system_prompt_includes_no_literal_secrets_invariant():
+    """Hierarchy invariant #6 must surface in the system prompt
     so the Scholar has explicit veto criteria for credential leaks."""
-    prompt = scholar_prompt.build_prompt([], library_snapshot="(empty)")
-    assert "NO LITERAL SECRETS" in prompt
-    assert "contains-secret" in prompt
+    sp = scholar_prompt.scholar_system_prompt()
+    assert "NO LITERAL SECRETS" in sp
+    assert "contains-secret" in sp
     for pattern in ("API key", "ghp_", "AKIA", "sk-", "BEGIN ... PRIVATE KEY"):
-        assert pattern in prompt, f"secrets invariant missing pattern: {pattern!r}"
+        assert pattern in sp, f"secrets invariant missing pattern: {pattern!r}"
 
 
-def test_build_prompt_exempts_repair_proposals_from_novelty():
+def test_system_prompt_exempts_repair_proposals_from_novelty():
     """Repair-originated proposals must be verify-and-execute, NOT judged
-    for novelty/dedupe. The prompt must say so explicitly and tie the
+    for novelty/dedupe. The system prompt must say so explicitly and tie the
     exemption to the packet's ``repair_fingerprints`` marker."""
-    prompt = scholar_prompt.build_prompt([], library_snapshot="(empty)")
-    assert "INTEGRITY-REPAIR PROPOSALS" in prompt
-    assert "repair_fingerprints" in prompt
-    assert "VERIFY-AND-RETURN" in prompt
+    sp = scholar_prompt.scholar_system_prompt()
+    assert "INTEGRITY-REPAIR PROPOSALS" in sp
+    assert "repair_fingerprints" in sp
+    assert "VERIFY-AND-RETURN" in sp
     # The salience filter must tell the Scholar to skip repair proposals.
-    assert "SKIP it" in prompt or "SKIP this section" in prompt or "bypass this filter" in prompt
+    assert "SKIP it" in sp or "SKIP this section" in sp or "bypass this filter" in sp
     # And it must spell out that "not novel"/"duplicate" are not valid veto
     # reasons for a repair.
-    assert "NEVER valid veto reasons for a repair proposal" in prompt
+    assert "NEVER valid veto reasons for a repair proposal" in sp
 
 
 # ── repair_broken_wikilinks (post-write self-healing) ─────────────────
