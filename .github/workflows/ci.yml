@@ -55,6 +55,15 @@ jobs:
 
       - name: Tests (pytest)
         run: uv run pytest
+        env:
+          # The tools/search (and daemon) suites download embedding +
+          # cross-encoder models from the HuggingFace Hub at test time.
+          # Unauthenticated requests are rate-limited — a transient HTTP 429
+          # then fails the whole job with "couldn't connect to huggingface.co".
+          # A token raises the per-account ceiling so CI stops flaking on it.
+          # Optional secret: empty on forks / if unset, which just reverts to
+          # the unauthenticated (rate-limited) behaviour — no hard dependency.
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
   version-coherence:
     # Guard: plugin.json version, every workspace package version, and the
