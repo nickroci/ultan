@@ -355,37 +355,60 @@ def test_derive_project_bucket_falls_back_to_slug_without_cwd():
     assert lp.derive_project_bucket(snap) == "github-com-nickroci-ultan"
 
 
-# ── load_prompt_template / assemble_prompt ────────────────────────────
+# ── system prompt / user message split (prompt-cache refactor) ────────
+#
+# The big static instructions now live in a byte-stable ``system_prompt``
+# (the cacheable prefix); the five per-scan dynamic blocks (project slug,
+# rolling buffer, library snapshot, applies-when table, repair tasks) move
+# to the first user message. The combined view (system + user) is what the
+# model effectively sees, so legacy content assertions check that.
 
 
-def test_template_contains_expected_placeholders():
+def test_template_contains_dynamic_placeholders():
+    # The raw template still carries the two STATIC schema placeholders
+    # (substituted into the system prompt). The five DYNAMIC placeholders
+    # have been removed — their data now rides in the user message.
     t = lp.load_prompt_template()
-    for needle in (
+    for gone in (
         "{{PROJECT_SLUG}}",
         "{{ROLLING_BUFFER}}",
         "{{LIBRARY_SNAPSHOT}}",
         "{{APPLIES_WHEN_TABLE}}",
+        "{{REPAIR_TASKS}}",
     ):
-        assert needle in t, f"missing placeholder: {needle}"
+        assert gone not in t, f"dynamic placeholder should be gone from template: {gone}"
+    for static in ("{{ACTION_TYPES}}", "{{RESPONSE_SHAPE}}"):
+        assert static in t, f"static placeholder missing from template: {static}"
     # BM25_SEEDS used to be a placeholder; it's now an in-process research
     # tool the Librarian invokes itself. Regression guard:
     assert "{{BM25_SEEDS}}" not in t
     assert "bm25_search" in t  # the Librarian must be told about the tool
 
 
-def test_template_describes_all_action_types():
-    """The Librarian must know about every legal action type by name.
+def test_system_prompt_is_byte_stable():
+    # The whole point of the refactor: the system prompt must be identical
+    # on every call so the engine's prefix cache hits across scans.
+    assert lp.librarian_system_prompt() == lp.librarian_system_prompt()
 
-    Now generated from ``_schemas.py`` via the ``{{ACTION_TYPES}}``
-    placeholder, so we assert against the assembled prompt rather than
-    the raw template.
-    """
-    p = lp.assemble_prompt(
-        project_slug="x",
-        rolling_buffer="(empty)",
-        library_snapshot="(empty)",
-        applies_when_table="(empty)",
-    )
+
+def test_system_prompt_has_no_placeholders_or_dynamic_markers():
+    sp = lp.librarian_system_prompt()
+    # No leftover template placeholders.
+    assert "{{" not in sp and "}}" not in sp
+    # The instructions survived.
+    assert "You are the Librarian" in sp
+    assert "THE SALIENCE TEST" in sp
+    # The dynamic data tags are described (referenced) but NOT filled with
+    # data — the data lives only in the user message. The opening data
+    # lines must NOT appear in the static prefix.
+    assert "slug:" not in sp
+    assert "<rolling_buffer>\n" not in sp  # the data block opener, not prose
+
+
+def test_system_prompt_describes_all_action_types():
+    """The Librarian must know about every legal action type by name. The
+    ACTION_TYPES table lives in the (static) system prompt."""
+    sp = lp.librarian_system_prompt()
     for action in (
         "write_entry",
         "update_entry",
@@ -397,36 +420,53 @@ def test_template_describes_all_action_types():
         "split_folder",
         "abstract_entries",
     ):
-        assert action in p, f"action type {action!r} missing from assembled prompt"
+        assert action in sp, f"action type {action!r} missing from system prompt"
 
 
-def test_assembled_prompt_documents_abstract_entries_aha_gate():
-    """The Librarian prompt must carry the four-part aha gate plus the GOOD
-    and MUST-REJECT examples so the model only proposes genuine abstractions."""
-    p = lp.assemble_prompt(
-        project_slug="x",
-        rolling_buffer="(empty)",
-        library_snapshot="(empty)",
-        applies_when_table="(empty)",
-    )
-    assert "AHA GATE" in p
-    assert "Predictive lift" in p
-    assert "linting across languages" in p  # the GOOD example
-    assert "likes good code" in p  # a MUST-REJECT example
+def test_system_prompt_documents_abstract_entries_aha_gate():
+    """The Librarian system prompt must carry the four-part aha gate plus the
+    GOOD and MUST-REJECT examples so the model only proposes genuine
+    abstractions."""
+    sp = lp.librarian_system_prompt()
+    assert "AHA GATE" in sp
+    assert "Predictive lift" in sp
+    assert "linting across languages" in sp  # the GOOD example
+    assert "likes good code" in sp  # a MUST-REJECT example
 
 
-def test_assemble_prompt_substitutes_all_placeholders():
-    p = lp.assemble_prompt(
+def test_user_message_carries_all_dynamic_blocks():
+    msg = lp.build_librarian_user_message(
         project_slug="acme-widget-svc",
         rolling_buffer="[1] [user] hi",
         library_snapshot="## Tree\n```\nglobal/\n```",
         applies_when_table="factory | global | designing or building any new API",
     )
-    assert "{{" not in p, "unsubstituted placeholder remains"
-    assert "acme-widget-svc" in p
-    assert "[1] [user] hi" in p
-    assert "global/" in p
-    assert "factory | global | designing or building any new API" in p
+    # Each block present, tagged, with its data.
+    assert "<project_context>\nslug: acme-widget-svc\n</project_context>" in msg
+    assert "<rolling_buffer>\n[1] [user] hi\n</rolling_buffer>" in msg
+    assert "<library_snapshot>\n## Tree\n```\nglobal/\n```\n</library_snapshot>" in msg
+    assert (
+        "<applies_when_table>\nfactory | global | designing or building any new API\n"
+        "</applies_when_table>" in msg
+    )
+    # No instructions leaked into the user message — it is data only.
+    assert "You are the Librarian" not in msg
+    assert "THE SALIENCE TEST" not in msg
+
+
+def test_user_message_empty_value_fallbacks():
+    # Preserve the old assemble_prompt fallbacks: "unknown"/"(empty)"/sentinel.
+    msg = lp.build_librarian_user_message(
+        project_slug="",
+        rolling_buffer="",
+        library_snapshot="",
+        applies_when_table="",
+    )
+    assert "slug: unknown" in msg
+    assert "<rolling_buffer>\n(empty)\n</rolling_buffer>" in msg
+    assert "<library_snapshot>\n(empty)\n</library_snapshot>" in msg
+    assert "<applies_when_table>\n(empty)\n</applies_when_table>" in msg
+    assert lp._NO_REPAIR_TASKS in msg
 
 
 # ── format_repair_tasks / repair-task prompt block ────────────────────
@@ -456,7 +496,7 @@ def test_format_repair_tasks_renders_each_field():
     assert "context: …see [[global/ghost/bar]] for details…" in out
 
 
-def test_assemble_prompt_renders_repair_tasks_block():
+def test_user_message_renders_repair_tasks_block():
     from agent_mem_daemon import repair_queue
 
     tasks = [
@@ -467,31 +507,31 @@ def test_assemble_prompt_renders_repair_tasks_block():
             context="ctx",
         )
     ]
-    p = lp.assemble_prompt(
+    # The dedicated highest-priority SECTION (instructions) lives in the
+    # system prompt; the rendered TASK data lives in the user message.
+    sp = lp.librarian_system_prompt()
+    assert "INTEGRITY-REPAIR TASKS" in sp
+    assert "update_entry" in sp  # one of the prescribed repair actions
+    msg = lp.build_librarian_user_message(
         project_slug="x",
         rolling_buffer="(empty)",
         library_snapshot="(empty)",
         applies_when_table="(empty)",
         repair_tasks=lp.format_repair_tasks(tasks),
     )
-    # The dedicated highest-priority section and the rendered task land in
-    # the prompt, and the Librarian is told to fix it with an EXISTING action.
-    assert "INTEGRITY-REPAIR TASKS" in p
-    assert "target: global/ghost/bar" in p
-    assert "update_entry" in p  # one of the prescribed repair actions
-    assert "{{" not in p
+    assert "<repair_tasks>" in msg
+    assert "target: global/ghost/bar" in msg
 
 
-def test_assemble_prompt_repair_tasks_defaults_to_sentinel():
+def test_user_message_repair_tasks_defaults_to_sentinel():
     # Callers that don't escalate anything need not pass repair_tasks.
-    p = lp.assemble_prompt(
+    msg = lp.build_librarian_user_message(
         project_slug="x",
         rolling_buffer="(empty)",
         library_snapshot="(empty)",
         applies_when_table="(empty)",
     )
-    assert lp._NO_REPAIR_TASKS in p
-    assert "{{" not in p
+    assert lp._NO_REPAIR_TASKS in msg
 
 
 def test_format_repair_tasks_renders_overcap_and_bad_frontmatter():
@@ -533,7 +573,7 @@ def test_prompt_template_dispatches_on_repair_kind():
     assert "salience_signal: null" in tmpl
 
 
-def test_assemble_prompt_renders_overcap_task_block():
+def test_user_message_renders_overcap_task_block():
     from agent_mem_daemon import repair_queue
 
     tasks = [
@@ -544,32 +584,27 @@ def test_assemble_prompt_renders_overcap_task_block():
             context="6 entries in global/python/ (cap 5): a, b, c, d, e, f",
         )
     ]
-    p = lp.assemble_prompt(
+    msg = lp.build_librarian_user_message(
         project_slug="x",
         rolling_buffer="(empty)",
         library_snapshot="(empty)",
         applies_when_table="(empty)",
         repair_tasks=lp.format_repair_tasks(tasks),
     )
-    assert "kind: overcap_dir" in p
-    assert "split_folder" in p
-    assert "{{" not in p
+    assert "kind: overcap_dir" in msg
+    # The split_folder repair guidance lives in the (static) system prompt.
+    assert "split_folder" in lp.librarian_system_prompt()
 
 
 # ── Secrets-redaction guidance ───────────────────────────────────────
 
 
-def test_assemble_prompt_includes_secrets_redaction_rule():
-    """Ground rule 7 must surface in the assembled prompt — covers the
+def test_system_prompt_includes_secrets_redaction_rule():
+    """Ground rule 7 must surface in the system prompt — covers the
     common credential patterns so the Librarian can't claim ignorance."""
-    p = lp.assemble_prompt(
-        project_slug="x",
-        rolling_buffer=[],
-        library_snapshot="(empty)",
-        applies_when_table="(none)",
-    )
-    assert "NEVER quote secrets or credentials" in p
+    sp = lp.librarian_system_prompt()
+    assert "NEVER quote secrets or credentials" in sp
     # Pin a handful of the named patterns so a future prompt edit
     # can't silently drop them.
     for pattern in ("API keys", "ghp_", "AKIA", "sk-", "BEGIN ... PRIVATE KEY"):
-        assert pattern in p, f"secrets rule missing pattern: {pattern!r}"
+        assert pattern in sp, f"secrets rule missing pattern: {pattern!r}"

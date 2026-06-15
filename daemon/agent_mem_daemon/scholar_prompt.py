@@ -245,23 +245,20 @@ often git-tracked — assume the worst. **VETO reason:** \
 The lesson can recur with the secret redacted.
 
 ═══════════════════════════════════════════════════════════════════
-INPUTS
+INPUTS (provided as tagged blocks in the user message)
 ═══════════════════════════════════════════════════════════════════
 
-<batch_timestamp>
-{{ISO_TIMESTAMP}}
-</batch_timestamp>
+The user message for this batch supplies three tagged blocks:
+  - ``<batch_timestamp>`` — the ISO timestamp of this review batch, to \
+stamp ``created`` / ``updated`` dates with when the Librarian left them as \
+placeholders.
+  - ``<library_snapshot>`` — your read-only view of the library's current \
+state. Verify any entry's contents against disk via ``read_entry`` before \
+acting on it; never trust the snapshot alone.
+  - ``<librarian_proposals>`` — the proposals you are reviewing.
 
-<library_snapshot>
-{{LIBRARY_SNAPSHOT}}
-</library_snapshot>
-
-<librarian_proposals>
-{{PACKETS_JSON}}
-</librarian_proposals>
-
-The proposals are a JSON array of Librarian packets accumulated since your \
-last run. Each packet contains:
+The ``<librarian_proposals>`` block is a JSON array of Librarian packets \
+accumulated since your last run. Each packet contains:
   - ``session_id`` — which conversation produced it
   - ``proposals`` — list of ProposedAction items in order
   - ``interrupts`` — interrupt nudge candidates (orthogonal — see B below)
@@ -588,22 +585,75 @@ def _packets_to_indexed_json(
     return json.dumps(annotated, indent=2, ensure_ascii=False), cursor
 
 
-def build_prompt(
+# Role preamble folded in at the top of the system prompt (was the short
+# ``_SYSTEM_PROMPT`` in scholar.py). Its final line points at the
+# user-message blocks rather than "the detailed instructions".
+_SYSTEM_PREAMBLE = (
+    "You are the Scholar, the precision gatekeeper of a two-tier memory curator. "
+    "Use the read-only research tools (read_entry, grep_library, bm25_search, "
+    "embedding_search) to verify the Librarian's proposals against the real "
+    "library — never trust its summary. You write nothing to disk: when you have "
+    "decided which proposals to approve, call submit_result EXACTLY ONCE with a "
+    "ScholarDecisions object holding the approved actions. A deterministic "
+    "executor applies them. The batch timestamp, library snapshot, and the "
+    "Librarian proposals to review are provided as tagged blocks in the user "
+    "message.\n\n"
+)
+
+
+def scholar_system_prompt() -> str:
+    """The byte-stable static Scholar system prompt (the cacheable prefix).
+
+    Prompt caching: the SDK/engine caches ``system_prompt + tool defs``. To
+    make that cache hit across batches the system prompt must be
+    byte-identical every call — so it carries ONLY the static instructions
+    plus the two schema-derived blocks (ACTION_TYPES / RESPONSE_SHAPE), and
+    NONE of the per-batch dynamic data (timestamp / library snapshot /
+    packets), which moves to the first user message via
+    :func:`build_scholar_user_message`.
+
+    ACTION_TYPES and RESPONSE_SHAPE come from ``_schemas.py`` and are
+    deterministic (fixed ``_ACTION_CLASSES`` order, ``model_fields`` in
+    declaration order, stable ``model_json_schema()``), so the output is
+    byte-identical across calls.
+    """
+    # We use .replace() rather than .format() so the schema-derived blocks
+    # (which contain literal `{` and `}` from JSON examples) can be inlined
+    # without escaping.
+    from ._schemas import (  # noqa: PLC0415 — lazy schema-shape import
+        describe_action_types_markdown,
+        describe_scholar_decisions_shape,
+    )
+
+    out = _SYSTEM_PREAMBLE + _PROMPT_TEMPLATE
+    for needle, value in (
+        ("{{ACTION_TYPES}}", describe_action_types_markdown()),
+        ("{{RESPONSE_SHAPE}}", describe_scholar_decisions_shape()),
+    ):
+        out = out.replace(needle, value)
+    return out
+
+
+def build_scholar_user_message(
     packets: Sequence[Mapping[str, Any]],
     *,
     now: Optional[datetime] = None,
     library_snapshot: Optional[str] = None,
 ) -> str:
-    """Render the Scholar prompt for a given batch.
+    """Emit ONLY the three per-batch dynamic blocks for the Scholar, each in
+    a clearly-labelled tag, in a STABLE order.
+
+    This is the first user message; the static instructions (which reference
+    these blocks by tag) live in :func:`scholar_system_prompt`.
 
     Args:
         packets: list of Librarian EvidencePackets (or compatible
             dict-shaped mappings).
         now: override clock for tests; defaults to ``datetime.now(UTC)``.
-        library_snapshot: pre-built snapshot string. When None, the
-            Scholar builds its own via Read/Glob during the call. We
-            still pass an excerpt so it doesn't have to spend a turn
-            on it.
+        library_snapshot: pre-built snapshot string. When None, this builds
+            it via ``librarian_prompt.build_library_snapshot`` (same logic
+            and truncation policy as the Librarian) so the Scholar doesn't
+            have to spend a turn on it.
     """
     if now is None:
         now = datetime.now(timezone.utc)
@@ -614,27 +664,17 @@ def build_prompt(
         from . import librarian_prompt as lp  # noqa: PLC0415
 
         library_snapshot = lp.build_library_snapshot(knowledge_dir())
-    # We use .replace() rather than .format() so the schema-derived
-    # blocks (which contain literal `{` and `}` from JSON examples)
-    # can be inlined without escaping. The ACTION_TYPES and
-    # RESPONSE_SHAPE placeholders are generated from _schemas.py at
-    # call time so the prompt instructions can never drift from the
-    # Pydantic models the agent's typed output validates against.
-    from ._schemas import (  # noqa: PLC0415 — lazy schema-shape import
-        describe_action_types_markdown,
-        describe_scholar_decisions_shape,
+    return (
+        "<batch_timestamp>\n"
+        f"{now.isoformat(timespec='seconds')}\n"
+        "</batch_timestamp>\n"
+        "<library_snapshot>\n"
+        f"{library_snapshot}\n"
+        "</library_snapshot>\n"
+        "<librarian_proposals>\n"
+        f"{packets_json}\n"
+        "</librarian_proposals>\n"
     )
-
-    out = _PROMPT_TEMPLATE
-    for needle, value in (
-        ("{{ISO_TIMESTAMP}}", now.isoformat(timespec="seconds")),
-        ("{{LIBRARY_SNAPSHOT}}", library_snapshot),
-        ("{{PACKETS_JSON}}", packets_json),
-        ("{{ACTION_TYPES}}", describe_action_types_markdown()),
-        ("{{RESPONSE_SHAPE}}", describe_scholar_decisions_shape()),
-    ):
-        out = out.replace(needle, value)
-    return out
 
 
 # ── Decision accounting (typed-output era) ─────────────────────────────

@@ -887,47 +887,39 @@ doubt, omit. Memory is plain markdown on disk and often \
 git-tracked — assume the worst.
 
 ═══════════════════════════════════════════════════════════════════
-INPUTS
+INPUTS (provided as tagged blocks in the user message)
 ═══════════════════════════════════════════════════════════════════
 
-<active_project>
-slug: {{PROJECT_SLUG}}
-(use this when picking paths; lessons clearly tied to {{PROJECT_SLUG}} → \
-``projects/{{PROJECT_SLUG}}/...``; lessons that apply across repos → \
-``global/...``)
-</active_project>
+The user message for this scan supplies five tagged blocks. Read them \
+there; this section explains how to use each.
 
-<rolling_buffer>
-{{ROLLING_BUFFER}}
-</rolling_buffer>
+``<project_context>`` carries the active project's ``slug``. Use it when \
+picking paths: lessons clearly tied to that slug → \
+``projects/<slug>/...``; lessons that apply across repos → ``global/...``.
 
-Each turn is ``[turn_id] (turn_seq=S) [role] <text>``. ``[turn_id]`` is a \
-scan-local label you may quote in ``reasoning``; ``(turn_seq=S)`` is a \
-STABLE id you MUST echo in ``cited_turn_seq`` when emitting a \
-``used_helpfully`` signal (it is how the daemon avoids double-counting a \
-re-seen turn). ``[USER-ASSERTED]`` marks turns that arrived via the \
-user's /ultan command — file these by default unless they are \
-nonsensical.
+``<rolling_buffer>`` is the conversation buffer. Each turn is \
+``[turn_id] (turn_seq=S) [role] <text>``. ``[turn_id]`` is a scan-local \
+label you may quote in ``reasoning``; ``(turn_seq=S)`` is a STABLE id you \
+MUST echo in ``cited_turn_seq`` when emitting a ``used_helpfully`` signal \
+(it is how the daemon avoids double-counting a re-seen turn). \
+``[USER-ASSERTED]`` marks turns that arrived via the user's /ultan \
+command — file these by default unless they are nonsensical.
 
-<library_snapshot>
-{{LIBRARY_SNAPSHOT}}
-</library_snapshot>
-
-This is your read-only view of the library's current state. If you need \
-to verify an entry's contents before proposing an action against it, use \
-``read_entry`` with the relative path of an entry you see in the snapshot \
-above. Use ``grep_library`` / ``bm25_search`` / ``embedding_search`` to \
-find anything you suspect exists but don't see in the snapshot.
+``<library_snapshot>`` is your read-only view of the library's current \
+state. If you need to verify an entry's contents before proposing an \
+action against it, use ``read_entry`` with the relative path of an entry \
+you see in that snapshot. Use ``grep_library`` / ``bm25_search`` / \
+``embedding_search`` to find anything you suspect exists but don't see in \
+the snapshot.
 
 ═══════════════════════════════════════════════════════════════════
 INTEGRITY-REPAIR TASKS (HIGHEST PRIORITY — fix these first)
 ═══════════════════════════════════════════════════════════════════
 
-<repair_tasks>
-{{REPAIR_TASKS}}
-</repair_tasks>
+The ``<repair_tasks>`` block in the user message lists any integrity-repair \
+tasks for this scan.
 
-If the block above is not empty, the daemon's deterministic post-write \
+If that block is not empty, the daemon's deterministic post-write \
 pass found library invariants it could NOT fix on its own and is handing \
 them to you. These are NOT discretionary — propose an action to repair \
 each one. They take priority over salience-driven proposals.
@@ -1213,11 +1205,10 @@ parseable YAML frontmatter block.
 APPLIES-WHEN TABLE (for interrupt candidates only)
 ═══════════════════════════════════════════════════════════════════
 
-<applies_when_table>
-{{APPLIES_WHEN_TABLE}}
-</applies_when_table>
+The ``<applies_when_table>`` block in the user message lists one \
+``<lesson_id> | <scope> | <applies-when phrase>`` row per confirmed entry.
 
-Scan the buffer against these phrases. If a buffer turn matches a phrase \
+Scan the buffer against those phrases. If a buffer turn matches a phrase \
 (intent, not literal substring), emit an interrupt candidate. Score 0.5+ \
 only. Max 5 interrupts per run.
 
@@ -1254,7 +1245,57 @@ def format_repair_tasks(tasks: Sequence[repair_queue.RepairTask]) -> str:
     return "\n".join(lines)
 
 
-def assemble_prompt(
+# ── System prompt (byte-stable static prefix — the cacheable region) ──
+#
+# Prompt caching: the SDK/Claude Code engine prompt-caches the prefix
+# ``system_prompt + tool definitions`` automatically. To make that cache
+# hit across scans, the system prompt must be BYTE-IDENTICAL on every
+# call — so it carries ONLY the static instructions (plus the two
+# schema-derived, deterministic blocks ACTION_TYPES / RESPONSE_SHAPE), and
+# NONE of the per-scan dynamic data. All five dynamic blocks (project
+# context, rolling buffer, library snapshot, applies-when table, repair
+# tasks) move to the first user message via :func:`build_librarian_user_message`.
+
+# Role preamble folded in at the top of the system prompt (was the short
+# ``_SYSTEM_PROMPT`` in librarian.py). Its final line now points at the
+# user-message blocks rather than "the detailed instructions".
+_SYSTEM_PREAMBLE = (
+    "You are the Librarian, the recall tier of a two-tier memory curator. "
+    "Use the read-only research tools (read_entry, grep_library, bm25_search, "
+    "embedding_search) to inspect the existing library before proposing "
+    "actions. You write nothing to disk and you only PROPOSE — the Scholar "
+    "approves or vetoes. When ready, call submit_result EXACTLY ONCE with a "
+    "LibrarianProposal object. The conversation buffer, library snapshot, "
+    "project context, applies-when table, and any repair tasks are provided "
+    "as tagged blocks in the user message.\n\n"
+)
+
+
+def librarian_system_prompt() -> str:
+    """The byte-stable static Librarian system prompt (the cacheable prefix).
+
+    It is the full instruction template with the FIVE dynamic placeholders
+    removed (their data now rides in the user message — see
+    :func:`build_librarian_user_message`) and the TWO static, schema-derived
+    placeholders substituted. ACTION_TYPES and RESPONSE_SHAPE are generated
+    from ``_schemas.py``; both are deterministic (they iterate a fixed
+    ``_ACTION_CLASSES`` list and ``model_fields`` in declaration order, and
+    ``model_json_schema()`` is stable), so the output is byte-identical on
+    every call and the engine's prefix cache hits across scans.
+
+    Contains NO timestamp, slug, buffer, snapshot, applies-when table, or
+    repair tasks — anything per-scan would defeat the cache.
+    """
+    out = _SYSTEM_PREAMBLE + load_prompt_template()
+    for needle, value in (
+        ("{{ACTION_TYPES}}", describe_action_types_markdown()),
+        ("{{RESPONSE_SHAPE}}", describe_librarian_response_shape()),
+    ):
+        out = out.replace(needle, value)
+    return out
+
+
+def build_librarian_user_message(
     *,
     project_slug: str,
     rolling_buffer: str,
@@ -1262,27 +1303,33 @@ def assemble_prompt(
     applies_when_table: str,
     repair_tasks: str = _NO_REPAIR_TASKS,
 ) -> str:
-    """Substitute placeholders into the prompt template.
+    """Emit ONLY the five per-scan dynamic blocks, each in a clearly-labelled
+    tag, in a STABLE order.
 
-    ACTION_TYPES and RESPONSE_SHAPE are generated from ``_schemas.py``
-    at call time so the prompt instructions can never drift from the
-    Pydantic models the parser actually validates against. ``repair_tasks``
-    is the pre-rendered ``<repair_tasks>`` body (see
-    :func:`format_repair_tasks`); it defaults to the empty sentinel so
-    callers that don't escalate anything need not pass it.
+    This is the first user message; the static instructions (which reference
+    these blocks by tag) live in :func:`librarian_system_prompt`. The
+    empty-value fallbacks match the old ``assemble_prompt`` behaviour so
+    nothing the model sees changes apart from where the data lives.
+    ``repair_tasks`` is the pre-rendered ``<repair_tasks>`` body (see
+    :func:`format_repair_tasks`); it defaults to the empty sentinel.
     """
-    out = load_prompt_template()
-    for needle, value in (
-        ("{{PROJECT_SLUG}}", project_slug or "unknown"),
-        ("{{ROLLING_BUFFER}}", rolling_buffer or "(empty)"),
-        ("{{LIBRARY_SNAPSHOT}}", library_snapshot or "(empty)"),
-        ("{{REPAIR_TASKS}}", repair_tasks or _NO_REPAIR_TASKS),
-        ("{{APPLIES_WHEN_TABLE}}", applies_when_table or "(empty)"),
-        ("{{ACTION_TYPES}}", describe_action_types_markdown()),
-        ("{{RESPONSE_SHAPE}}", describe_librarian_response_shape()),
-    ):
-        out = out.replace(needle, value)
-    return out
+    return (
+        "<project_context>\n"
+        f"slug: {project_slug or 'unknown'}\n"
+        "</project_context>\n"
+        "<rolling_buffer>\n"
+        f"{rolling_buffer or '(empty)'}\n"
+        "</rolling_buffer>\n"
+        "<library_snapshot>\n"
+        f"{library_snapshot or '(empty)'}\n"
+        "</library_snapshot>\n"
+        "<applies_when_table>\n"
+        f"{applies_when_table or '(empty)'}\n"
+        "</applies_when_table>\n"
+        "<repair_tasks>\n"
+        f"{repair_tasks or _NO_REPAIR_TASKS}\n"
+        "</repair_tasks>\n"
+    )
 
 
 # ── Convenience: flatten + format in one shot ─────────────────────────

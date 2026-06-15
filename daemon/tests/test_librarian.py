@@ -205,8 +205,8 @@ def test_scan_happy_path_proposals_and_interrupts(home, monkeypatch):
     # The Librarian's knowledge_dir must be the knowledge directory.
     assert captured["knowledge_dir"] == home / "knowledge"
 
-    # Prompt contents: project slug, buffer text, library snapshot tree,
-    # applies-when row, the in-process research tools.
+    # User-message (the captured prompt) carries the per-scan dynamic data:
+    # project slug, buffer text, library snapshot tree, applies-when row.
     p = captured["prompt"]
     assert p is not None
     assert "acme-widget-svc" in p
@@ -215,8 +215,11 @@ def test_scan_happy_path_proposals_and_interrupts(home, monkeypatch):
     assert "global/" in p
     assert "tooling/" in p
     assert "factory-pattern-for-apis | global | designing or building any new API" in p
-    # The Librarian researches dedup with its own bm25_search tool.
-    assert "bm25_search" in p
+    # The in-process research tools are described in the (static, cached)
+    # system prompt, not the per-scan user message.
+    from agent_mem_daemon import librarian_prompt as _lp
+
+    assert "bm25_search" in _lp.librarian_system_prompt()
 
 
 def test_scan_user_asserted_event_propagates_to_prompt(home, monkeypatch):
@@ -358,7 +361,11 @@ def test_scan_drains_repair_task_into_prompt_and_attaches_fingerprint(home, monk
     packet = librarian.scan(snap)
 
     assert captured["prompt"] is not None
-    assert "INTEGRITY-REPAIR TASKS" in captured["prompt"]
+    # The INTEGRITY-REPAIR instructions live in the (static) system prompt;
+    # the drained task DATA is rendered into the per-scan user message.
+    from agent_mem_daemon import librarian_prompt as _lp
+
+    assert "INTEGRITY-REPAIR TASKS" in _lp.librarian_system_prompt()
     assert "target: global/ghost/missing" in captured["prompt"]
     assert packet.get("repair_fingerprints") == [fp]
     # Drained — no longer pending, but still in-flight until the Scholar
