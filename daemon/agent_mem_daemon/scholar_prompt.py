@@ -144,6 +144,15 @@ existing library entry OR to a path that another action in your same \
 ``actions`` list creates. The boundary validator REJECTS an unresolvable \
 wikilink and re-prompts you with the offending target — remove it or fix \
 the path.
+  - For an approved ``update_entry`` carrying ``salience_signal: "drift"``: \
+if the new body changed what the entry asserts about its subject's STATE \
+(an open problem the body now reports as fixed/resolved/implemented) but \
+the Librarian left the old problem-framed ``title``/``# H1`` in place, \
+re-derive them to match the body you are approving — and re-check \
+``applies-when``. A stale title on a resolved body is a defect the \
+load-bearing-claim rule does not catch, and correcting it is your job as \
+curator: this is the one substantive normalisation you may make. (Do NOT \
+touch the title on non-drift actions — there, copy it faithfully.)
 
 Anything more substantial is a VETO. The lesson will recur in a future session.
 
@@ -409,6 +418,13 @@ qualifier/edge-case from the cited turns, or it sharpens (pulls the rule \
 up, cuts a stale tangent). A stylistic rewrite that adds no information \
 and sharpens nothing is churn; VETO with "no new info and no sharpening — \
 churn risks distortion."
+    TITLE↔BODY CHECK: before approving, read the ``title``/``# H1`` against \
+the new body. If the body now resolves a problem the title still poses \
+(e.g. title says "X is a blind spot" but the body added a "fixed in vY" \
+section), re-derive the title/H1 to match the resolved body — per the \
+title rule in the modifications list above. Do not approve an entry whose \
+index card contradicts its own contents; a lying title is worse churn than \
+a re-title.
     Size is managed by SPLITTING, not by a cap: if a drift update would \
 make one entry sprawl across more than one claim, the Librarian should \
 have proposed a split (a trimming ``update_entry`` on the original + a \

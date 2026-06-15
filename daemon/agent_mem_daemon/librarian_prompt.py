@@ -720,6 +720,18 @@ rule pulled to the top, a stale tangent cut).
       - The load-bearing claim MUST survive intact. You are integrating or \
 sharpening, NOT rewriting from scratch. If you can't keep the core claim \
 verbatim-in-spirit, this is ``contradicts``, not ``drift``.
+      - **RE-TITLE when the body's STATE changes.** If your mutation changes \
+what the entry reports about its subject's status — most often flipping an \
+open problem to fixed/resolved/implemented, or a doubt to settled — you \
+MUST re-derive the ``title:`` frontmatter AND the ``# H1`` heading (and \
+re-check ``applies-when``/``keywords``/``summary``) so the index card \
+describes the NEW state, then carry them in ``new_body``. A problem-framed \
+title sitting on a body that now says the problem is solved is the single \
+most common drift defect — the card ends up lying about its own contents. \
+This does NOT violate the load-bearing-claim rule above: that rule governs \
+the CLAIM, not its framing. Reframing "X is a blind spot" into "X was \
+fixed by Y; the lesson is Z" is REQUIRED here, not a forbidden \
+rewrite-from-scratch.
       - Pure rephrasing that adds no information and sharpens nothing → \
 DON'T. That is exactly the churn that turns memories to mush over time.
       - **SPLIT instead of cramming when the entry sprawls.** Two cases: \
