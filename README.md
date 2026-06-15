@@ -1,6 +1,6 @@
-# Ultan
+# Ultan — Persistent Memory for Claude Code
 
-A personal memory system for coding agents. Built for Claude Code; lives outside any one session, project, or machine.
+**Ultan is a local, brain-inspired memory plugin for Claude Code** — persistent agent memory that learns your preferences and coding conventions and surfaces them when they matter. It lives outside any one session, project, or machine: plain markdown on your disk, no cloud.
 
 > ⚠️ **Beta.** Under active development. Expect breaking changes and rough edges — feedback welcome.
 
