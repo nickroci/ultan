@@ -20,6 +20,7 @@ import pytest
 from claude_agent_sdk import AssistantMessage, ResultMessage, ToolUseBlock
 from pydantic import BaseModel, field_validator
 
+from agent_mem_daemon.llm import LLMStalled, LLMTimeout
 from agent_mem_daemon.typed_agent import (
     ModelRetry,
     TypedAgentError,
@@ -27,6 +28,7 @@ from agent_mem_daemon.typed_agent import (
     _single_user_message,
     evaluate_submission,
     run_typed,
+    run_with_retry,
     submit_tool_ref,
 )
 
@@ -301,3 +303,122 @@ async def test_run_typed_cancellation_closes_the_stream() -> None:
             timeout=0.05,
         )
     assert stream.aclosed, "cancellation must aclose() the SDK stream (subprocess leak)"
+
+
+# ── run_typed: first-progress stall watchdog ──────────────────────────────────
+
+
+async def test_run_typed_first_progress_stall_raises_and_closes_stream() -> None:
+    """A subprocess that produces no FIRST message within
+    ``first_progress_timeout_s`` is a startup/transport stall: run_typed must
+    raise :class:`LLMStalled` AND aclose() the stream (kill the subprocess),
+    not sit until the outer wall-clock budget. Same non-generator stream as the
+    cancellation test, so only run_typed's own handler can close it."""
+
+    class _Stream:
+        def __init__(self) -> None:
+            self.aclosed = False
+
+        def __aiter__(self) -> "_Stream":
+            return self
+
+        async def __anext__(self) -> object:
+            await asyncio.sleep(3600)  # never produce a first message
+            raise StopAsyncIteration
+
+        async def aclose(self) -> None:
+            self.aclosed = True
+
+    stream = _Stream()
+
+    def fake_query(*, prompt: object, options: object) -> _Stream:  # noqa: ARG001
+        return stream
+
+    with pytest.raises(LLMStalled):
+        await run_typed(
+            "p",
+            Decision,
+            deps=None,
+            system_prompt="s",
+            model="m",
+            mcp_servers={},
+            allowed_tools=[],
+            first_progress_timeout_s=0.05,
+            _query=fake_query,
+        )
+    assert stream.aclosed, "a first-progress stall must aclose() the stream (subprocess leak)"
+
+
+async def test_run_typed_first_progress_does_not_trip_when_stream_starts() -> None:
+    """The watchdog bounds only the FIRST message. A stream that yields its first
+    message promptly must complete normally even with first_progress_timeout_s
+    set — no false positive on a healthy (or slow-but-streaming) run."""
+    shared: _RunState[Decision] = _RunState()
+
+    async def fake_query(*, prompt: object, options: object):  # noqa: ARG001
+        evaluate_submission({"n": 1, "label": "ok"}, Decision, None, [], shared, 4)
+        yield _assistant_calling_submit()
+        yield _result(0.01)
+
+    res = await run_typed(
+        "p",
+        Decision,
+        deps=None,
+        system_prompt="s",
+        model="m",
+        mcp_servers={},
+        allowed_tools=[],
+        first_progress_timeout_s=0.05,
+        _query=fake_query,
+        _state=shared,
+    )
+    assert res.output == Decision(n=1, label="ok")
+
+
+# ── run_with_retry: shared connection-resilience seam ─────────────────────────
+
+
+async def test_run_with_retry_succeeds_after_a_stall() -> None:
+    """A stalled attempt (LLMStalled) is retried; the next success is returned.
+    Verifies attempts are counted and the result propagates."""
+    calls = {"n": 0}
+
+    async def attempt() -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise LLMStalled("no first message")
+        return "ok"
+
+    out = await run_with_retry(attempt, role="scholar", max_attempts=3, timeout_s=600.0)
+    assert out == "ok"
+    assert calls["n"] == 2, "should have retried exactly once after the stall"
+
+
+async def test_run_with_retry_retries_on_wall_clock_timeout() -> None:
+    """A bare ``asyncio.TimeoutError`` (the outer wait_for budget) is also
+    retried, not just LLMStalled."""
+    calls = {"n": 0}
+
+    async def attempt() -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise asyncio.TimeoutError
+        return "done"
+
+    out = await run_with_retry(attempt, role="librarian", max_attempts=2, timeout_s=1800.0)
+    assert out == "done"
+    assert calls["n"] == 2
+
+
+async def test_run_with_retry_raises_llmtimeout_after_exhausting_attempts() -> None:
+    """All attempts stall → raises LLMTimeout (so existing ``except LLMTimeout``
+    handlers degrade gracefully) after exactly ``max_attempts`` tries."""
+    calls = {"n": 0}
+
+    async def attempt() -> str:
+        calls["n"] += 1
+        raise LLMStalled("stalled again")
+
+    with pytest.raises(LLMTimeout):
+        await run_with_retry(attempt, role="scholar", max_attempts=3, timeout_s=600.0)
+    assert calls["n"] == 3, "must try exactly max_attempts times before giving up"

@@ -31,6 +31,15 @@ class LLMTimeout(RuntimeError):
     """A role's model call exceeded its wall-clock budget."""
 
 
+class LLMStalled(LLMTimeout):
+    """The agent subprocess produced NO first message within the stall window
+    (no AssistantMessage / ResultMessage, $0 cost). This is a startup/transport
+    stall, not slow work — legitimate runs stream within seconds. Distinct from
+    :class:`LLMTimeout` so the caller can retry fast instead of burning the full
+    budget; subclasses it so existing ``except LLMTimeout`` handlers still catch
+    it as a graceful degrade."""
+
+
 # Marker the hook layer checks to skip its work — without it, the Claude
 # process the SDK spawns runs the user's UserPromptSubmit/PostToolUse/Stop/
 # SessionEnd hooks normally, which append to events.jsonl, which the daemon

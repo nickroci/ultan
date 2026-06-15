@@ -43,12 +43,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Generic, TypeVar
 
 from pydantic import BaseModel, ValidationError
+
+from .llm import LLMStalled, LLMTimeout
 
 if TYPE_CHECKING:
     from claude_agent_sdk.types import McpServerConfig
@@ -225,6 +227,21 @@ async def _single_user_message(prompt: str) -> AsyncIterator[dict[str, Any]]:
     yield {"type": "user", "message": {"role": "user", "content": prompt}}
 
 
+async def _next_message(aiter: Any, *, bounded: bool, timeout_s: float | None) -> Any:
+    """Pull the next message from the SDK stream. When ``bounded`` and
+    ``timeout_s`` is set, the wait is capped — a stalled subprocess that never
+    produces this message raises :class:`LLMStalled` instead of hanging. Used to
+    bound only the FIRST message (caller passes ``bounded=not saw_message``);
+    later messages stream unbounded. Propagates ``StopAsyncIteration`` so the
+    caller's loop terminates normally."""
+    if bounded and timeout_s is not None:
+        try:
+            return await asyncio.wait_for(aiter.__anext__(), timeout=timeout_s)
+        except asyncio.TimeoutError as e:
+            raise LLMStalled(f"agent produced no first message within {timeout_s}s") from e
+    return await aiter.__anext__()
+
+
 # Injection seam: the default is the real SDK ``query``; tests pass a fake that
 # drives the registered ``submit_result`` handler and yields a ``ResultMessage``.
 _QueryFn = Callable[..., Any]
@@ -242,6 +259,7 @@ async def run_typed(
     validators: Sequence[Validator[DepsT, OutputT]] = (),
     max_retries: int = 4,
     max_turns: int = 20,
+    first_progress_timeout_s: float | None = None,
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
     _query: _QueryFn | None = None,
@@ -253,6 +271,14 @@ async def run_typed(
     this function adds the ``submit_result`` server/tool. The model writes
     nothing to disk — it returns a typed result that a deterministic executor
     applies — so no file-write tools or path guards are wired here.
+
+    ``first_progress_timeout_s`` (opt-in; ``None`` = off, the default, so callers
+    that don't pass it are byte-for-byte unchanged) bounds the wait for the
+    agent's FIRST streamed message. A spawned subprocess that never reaches a
+    first message (startup/transport stall) would otherwise sit until the outer
+    wall-clock budget; tripping this raises :class:`LLMStalled` so the caller can
+    retry fast. Once any message has arrived, only the caller's overall timeout
+    applies — legitimate long runs stream early and never trip this.
 
     Raises :class:`TypedAgentError` if no valid result is produced within
     ``max_retries`` (or the model never calls ``submit_result``).
@@ -293,17 +319,33 @@ async def run_typed(
 
     run = _query or query
     submitted = False
+    saw_message = False
     stream = run(prompt=_single_user_message(prompt), options=options)
     try:
-        async for message in stream:
+        # Manual iteration (vs ``async for``) so the FIRST message can carry a
+        # short stall deadline while later messages stream unbounded. Identical
+        # to ``async for`` when first_progress_timeout_s is None.
+        aiter = stream.__aiter__()
+        while True:
+            try:
+                message = await _next_message(
+                    aiter,
+                    bounded=not saw_message,
+                    timeout_s=first_progress_timeout_s,
+                )
+            except StopAsyncIteration:
+                break
+            saw_message = True
             if isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, ToolUseBlock) and block.name.endswith(SUBMIT_TOOL_NAME):
                         submitted = True
             elif isinstance(message, ResultMessage):
                 state.cost_usd = float(message.total_cost_usd or 0.0)
-    except asyncio.CancelledError:
-        # A wait_for timeout (or daemon shutdown) cancelled us mid-stream.
+    except (asyncio.CancelledError, LLMStalled):
+        # An outer wait_for timeout / daemon shutdown cancelled us mid-stream,
+        # OR the first-progress watchdog tripped (LLMStalled). Either way the
+        # spawned subprocess is still live, so the same cleanup applies.
         # Close the SDK generator NOW: its close path terminates the spawned
         # CLI subprocess (SIGTERM, then SIGKILL after grace). Abandoning the
         # generator instead leaks a live `claude` process — the cancelled
@@ -326,3 +368,51 @@ async def run_typed(
         )
 
     return TypedResult(output=state.result, cost_usd=state.cost_usd, attempts=state.attempts)
+
+
+_RetryT = TypeVar("_RetryT")
+
+
+async def run_with_retry(
+    attempt: Callable[[], Awaitable[_RetryT]],
+    *,
+    role: str,
+    max_attempts: int,
+    timeout_s: float,
+) -> _RetryT:
+    """Run ``attempt`` (one wrapped ``wait_for(run_typed(...))`` call) with retry
+    on a stall or wall-clock timeout, and return its result.
+
+    Connection-resilience seam shared by both curator roles. ``attempt`` must be
+    idempotent — re-running it produces no duplicate side effects — which holds
+    for both: the Librarian only proposes, and the Scholar's executor writes only
+    AFTER a successful call returns. A stall (:class:`LLMStalled`) is killed fast
+    by run_typed's first-progress watchdog, so a retry frees the worker slot in
+    seconds rather than blocking it for the whole budget. After ``max_attempts``
+    failures, raises :class:`LLMTimeout` so existing handlers degrade gracefully.
+    """
+    last_exc: BaseException | None = None
+    for n in range(1, max_attempts + 1):
+        try:
+            return await attempt()
+        except LLMStalled as e:  # subclass of LLMTimeout — catch the narrower first
+            last_exc = e
+            log.warning(
+                "%s agent stalled (no first message), attempt %d/%d; retrying: %s",
+                role,
+                n,
+                max_attempts,
+                e,
+            )
+        except asyncio.TimeoutError as e:
+            last_exc = e
+            log.warning(
+                "%s agent exceeded %.0fs, attempt %d/%d; retrying",
+                role,
+                timeout_s,
+                n,
+                max_attempts,
+            )
+    raise LLMTimeout(
+        f"{role} agent failed after {max_attempts} attempt(s): {last_exc}"
+    ) from last_exc
