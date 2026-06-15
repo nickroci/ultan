@@ -24,10 +24,12 @@ from bm25 import (
     _one_line,
     _strip_and_extract_frontmatter,
     build_index,
+    index_content_hash,
     is_stale,
     iter_markdown,
     load_or_build,
     load_pickled,
+    only_bookkeeping_changed,
     save_index,
     tokenize,
 )
@@ -143,6 +145,126 @@ def test_load_or_build_caches_and_rebuilds() -> None:
         assert third.built_at > second.built_at
 
 
+# ── Content-hash staleness (bookkeeping writes must not trigger a rebuild) ──────
+
+
+def _bump_mtime(path: Path, seconds: float = 5.0) -> None:
+    """Advance a file's mtime so the staleness check sees it as changed."""
+    import os
+    import time
+
+    future = time.time() + seconds
+    os.utime(path, (future, future))
+
+
+def test_index_content_hash_ignores_bookkeeping_but_tracks_body() -> None:
+    """The hash must be blind to bookkeeping/title frontmatter and sensitive to
+    the body, keywords and applies-when (everything the index actually uses)."""
+    base = (
+        "---\n"
+        "title: Original title\n"
+        "keywords: [alpha, beta]\n"
+        "applies-when: when alpha happens\n"
+        "fired: 0\n"
+        "last_surfaced: '2026-06-01'\n"
+        "---\n"
+        "# Heading\n\nThe load-bearing claim.\n"
+    )
+    h0 = index_content_hash(base)
+
+    # Bookkeeping bump only (fired + last_surfaced) → identical hash.
+    bookkeeping = base.replace("fired: 0", "fired: 9").replace("2026-06-01", "2026-06-15")
+    assert index_content_hash(bookkeeping) == h0
+
+    # Re-title → different hash: the title IS indexed, so a re-title reindexes.
+    retitled = base.replace("Original title", "A completely different, resolved title")
+    assert index_content_hash(retitled) != h0
+
+    # Body change → different hash.
+    assert index_content_hash(base.replace("load-bearing claim", "different claim")) != h0
+    # Keywords change → different hash (keywords ARE indexed).
+    assert index_content_hash(base.replace("[alpha, beta]", "[gamma]")) != h0
+    # applies-when change → different hash (it IS indexed).
+    assert index_content_hash(base.replace("when alpha happens", "when omega happens")) != h0
+
+
+def test_load_or_build_reuses_on_bookkeeping_only_change() -> None:
+    """A write that only bumps a bookkeeping field (the priming surface case)
+    must NOT trigger a rebuild, even though the file's mtime advanced."""
+    with tempfile.TemporaryDirectory() as td:
+        knowledge = Path(td) / "knowledge"
+        shutil.copytree(FIXTURES, knowledge)
+
+        first = load_or_build(knowledge)
+        target = knowledge / "global" / "concepts" / "factory-pattern-for-apis.md"
+
+        # Rewrite changing ONLY the `fired` counter; body + keywords untouched.
+        text = target.read_text(encoding="utf-8")
+        assert "fired: 0" in text
+        target.write_text(text.replace("fired: 0", "fired: 12"), encoding="utf-8")
+        _bump_mtime(target)
+
+        second = load_or_build(knowledge)
+        # Reused, not rebuilt — built_at is preserved.
+        assert second.built_at == first.built_at
+
+
+def test_load_or_build_rebuilds_on_indexed_frontmatter_change() -> None:
+    """Changing an INDEXED frontmatter field (keywords) must still rebuild."""
+    with tempfile.TemporaryDirectory() as td:
+        knowledge = Path(td) / "knowledge"
+        shutil.copytree(FIXTURES, knowledge)
+
+        first = load_or_build(knowledge)
+        target = knowledge / "global" / "concepts" / "factory-pattern-for-apis.md"
+        text = target.read_text(encoding="utf-8")
+        target.write_text(
+            text.replace("[factory, paradigm, api, construction]", "[factory, newkeyword]"),
+            encoding="utf-8",
+        )
+        _bump_mtime(target)
+
+        second = load_or_build(knowledge)
+        assert second.built_at > first.built_at
+
+
+def test_only_bookkeeping_changed_distinguishes_cases(tmp_path: Path) -> None:
+    """Unit-level: bookkeeping bump → True; real body change → False; add/remove
+    → False; pre-upgrade record with empty content_hash → False."""
+    knowledge = tmp_path / "knowledge"
+    knowledge.mkdir()
+    entry = knowledge / "e.md"
+    entry.write_text(
+        "---\nid: e\nkeywords: [k]\napplies-when: w\nfired: 0\n---\n# T\n\nClaim.\n",
+        encoding="utf-8",
+    )
+    idx = build_index(knowledge)
+
+    # Bookkeeping-only bump → only_bookkeeping_changed True.
+    entry.write_text(
+        "---\nid: e\nkeywords: [k]\napplies-when: w\nfired: 5\n---\n# T\n\nClaim.\n",
+        encoding="utf-8",
+    )
+    _bump_mtime(entry)
+    current = {str(p): p.stat().st_mtime for p in iter_markdown(knowledge)}
+    assert is_stale(idx.docs, current) is True
+    assert only_bookkeeping_changed(idx.docs, current) is True
+
+    # Real body change → False.
+    entry.write_text(
+        "---\nid: e\nkeywords: [k]\napplies-when: w\nfired: 5\n---\n# T\n\nDifferent claim.\n",
+        encoding="utf-8",
+    )
+    _bump_mtime(entry, seconds=10.0)
+    current = {str(p): p.stat().st_mtime for p in iter_markdown(knowledge)}
+    assert only_bookkeeping_changed(idx.docs, current) is False
+
+    # A new file appearing → False (set differs).
+    (knowledge / "f.md").write_text("---\nid: f\n---\n# F\n\nx\n", encoding="utf-8")
+    current = {str(p): p.stat().st_mtime for p in iter_markdown(knowledge)}
+    assert only_bookkeeping_changed(idx.docs, current) is False
+
+
 # ── Edge cases ─────────────────────────────────────────────────────────────────
 
 
@@ -177,6 +299,37 @@ def test_frontmatter_search_text_handles_string_keywords() -> None:
 def test_frontmatter_search_text_handles_list_applies_when() -> None:
     out = _frontmatter_search_text({"applies-when": ["one", "two"]})
     assert "one" in out and "two" in out
+
+
+def test_frontmatter_search_text_includes_title() -> None:
+    """The title is indexed so its terms are searchable even when the body H1
+    phrases the claim differently."""
+    out = _frontmatter_search_text({"title": "Compromised Site flag", "keywords": ["redirect"]})
+    assert "Compromised Site flag" in out
+    assert "redirect" in out
+
+
+def test_search_finds_term_present_only_in_title(tmp_path: Path) -> None:
+    """A distinctive word that appears ONLY in the frontmatter title (not the
+    body or keywords) is still retrievable now that titles are indexed.
+
+    Seed the fixture corpus first so the term has df=1 against a multi-doc N —
+    BM25Okapi's IDF goes non-positive for a term present in >=half the corpus
+    (which a lone document trivially is)."""
+    knowledge = tmp_path / "knowledge"
+    shutil.copytree(FIXTURES, knowledge)
+    (knowledge / "global" / "concepts" / "title-only-term.md").write_text(
+        "---\n"
+        "id: title-only-term\n"
+        "title: Quokkavirus mitigation runbook\n"
+        "keywords: [runbook]\n"
+        "---\n"
+        "# Incident response steps\n\nFollow the on-call rotation and page the lead.\n",
+        encoding="utf-8",
+    )
+    index = build_index(knowledge)
+    hits = index.search("quokkavirus", k=5)
+    assert any(h.path.name == "title-only-term.md" for h in hits)
 
 
 def test_search_empty_query_returns_empty() -> None:

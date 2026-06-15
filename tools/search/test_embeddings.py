@@ -169,7 +169,8 @@ def test_archive_subtree_excluded(tmp_path: Path) -> None:
 
 
 def test_load_or_build_caches_and_rebuilds(tmp_path: Path) -> None:
-    """Index is reused when fresh, rebuilt when a file's mtime advances."""
+    """Index is reused when fresh, reused on a content-preserving mtime touch,
+    and rebuilt only when the indexed content actually changes."""
     knowledge = tmp_path / "knowledge"
     shutil.copytree(FIXTURES, knowledge)
 
@@ -182,12 +183,22 @@ def test_load_or_build_caches_and_rebuilds(tmp_path: Path) -> None:
     assert first.built_at == second.built_at
     assert second.embeddings.shape == first.embeddings.shape
 
-    # Touch a file's mtime far enough into the future to defeat any rounding,
-    # then confirm we rebuild.
     target = knowledge / "global" / "concepts" / "factory-pattern-for-apis.md"
+
+    # A pure mtime touch with NO content change must NOT rebuild — this is the
+    # bookkeeping-write case the content-hash gate exists for.
     future = time.time() + 5
     os.utime(target, (future, future))
+    touched = load_or_build(knowledge)
+    assert touched.built_at == second.built_at
 
+    # An actual body change DOES rebuild.
+    target.write_text(
+        target.read_text(encoding="utf-8") + "\n\nNew sentence for cache-invalidation.\n",
+        encoding="utf-8",
+    )
+    later = time.time() + 10
+    os.utime(target, (later, later))
     third = load_or_build(knowledge)
     assert third.built_at > second.built_at
     assert third.embeddings.shape[0] == len(third.docs) == 5
@@ -238,6 +249,47 @@ def test_load_or_build_incremental_reencodes_only_changed(
 
     assert np.array_equal(_row(first, "a.md"), _row(second, "a.md"))
     assert np.array_equal(_row(first, "c.md"), _row(second, "c.md"))
+
+
+def test_load_or_build_bookkeeping_change_does_not_reencode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bookkeeping-only write (the priming surface case: bump fired/last_surfaced)
+    must trigger NO re-encode at all, even though the file mtime advanced — the
+    encoder is never touched a second time."""
+    knowledge = tmp_path / "knowledge"
+    knowledge.mkdir()
+    for name in ("a", "b", "c"):
+        (knowledge / f"{name}.md").write_text(
+            f"---\nid: {name}\nkeywords: [{name}]\nfired: 0\n---\n# {name}\nbody about {name}\n",
+            encoding="utf-8",
+        )
+
+    batches: list[int] = []
+
+    class _FakeModel:
+        def encode(self, texts: list[str], **_kwargs: object) -> object:
+            batches.append(len(texts))
+            return np.zeros((len(texts), 4), dtype=np.float32)
+
+    fake = _FakeModel()
+    monkeypatch.setattr(embeddings, "_load_model", lambda *_a, **_k: fake)
+
+    first = load_or_build(knowledge)
+    assert batches == [3]
+
+    # Bump ONLY the `fired` counter on one entry; body + keywords untouched.
+    target = knowledge / "b.md"
+    target.write_text(
+        target.read_text(encoding="utf-8").replace("fired: 0", "fired: 7"), encoding="utf-8"
+    )
+    future = time.time() + 5
+    os.utime(target, (future, future))
+
+    second = load_or_build(knowledge)
+    # No new encode batch — the bookkeeping short-circuit reused the cached index.
+    assert batches == [3]
+    assert second.built_at == first.built_at
 
 
 # ── Edge cases that don't need the model loaded ──────────────────────────────

@@ -2,9 +2,12 @@
 
 Tokenization rules (v1, see README for rationale):
   - YAML frontmatter is stripped entirely BEFORE tokenization, except:
+      * `title:` is appended to the body text (high-signal; some titles phrase
+        the claim differently from the body `# H1`).
       * `keywords:` values (list or inline) are appended to the body text.
       * `applies-when:` values (block scalar or inline) are appended to the body.
-    Those two fields are explicitly search-relevant per PLAN section 2.
+    `keywords`/`applies-when` are search-relevant per PLAN section 2; `title`
+    was added later (see `_frontmatter_search_text`).
   - Code fences are kept verbatim. Code identifiers are valuable search terms.
   - Markdown is otherwise treated as plain text: we don't strip headings,
     wikilinks, list markers, etc. (BM25 handles the noise; over-stripping
@@ -22,6 +25,7 @@ Index persistence:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import pickle
 import re
@@ -75,8 +79,22 @@ def _strip_and_extract_frontmatter(text: str) -> tuple[str, FrontmatterDict]:
 
 
 def _frontmatter_search_text(fm: Mapping[str, object]) -> str:
-    """Pull out the search-relevant frontmatter fields per PLAN section 2."""
+    """Pull out the search-relevant frontmatter fields: ``title``, ``keywords``
+    and ``applies-when``.
+
+    ``title`` is included (beyond PLAN section 2's original keywords/applies-when)
+    so titles are first-class search signal: most titles are mirrored by the body
+    ``# H1`` and would be found anyway, but a real minority phrase the claim
+    differently in the title than the H1, and those terms are only searchable if
+    the title is indexed. A side effect makes the contract clean: because this is
+    the single text source shared by BM25, the embedding index AND
+    :func:`index_content_hash`, indexing the title also means a re-title changes
+    the content hash and correctly triggers a reindex."""
     parts: list[str] = []
+
+    title = fm.get("title")
+    if isinstance(title, str) and title.strip():
+        parts.append(title)
 
     keywords = fm.get("keywords")
     if isinstance(keywords, list):
@@ -98,13 +116,34 @@ def _frontmatter_search_text(fm: Mapping[str, object]) -> str:
 def tokenize(text: str) -> list[str]:
     """Tokenize a full markdown document for BM25.
 
-    Strips YAML frontmatter from the body, but pulls `keywords` and
+    Strips YAML frontmatter from the body, but pulls `title`, `keywords` and
     `applies-when` into the searchable text first.
     """
     body, fm = _strip_and_extract_frontmatter(text)
     fm_text = _frontmatter_search_text(fm)
     combined = (fm_text + "\n" + body).lower()
     return [tok for tok in _TOKEN_SPLIT_RE.split(combined) if len(tok) >= 2]
+
+
+def index_content_hash(raw: str) -> str:
+    """Stable hash of the text that actually feeds the indexes.
+
+    Both BM25 (:func:`tokenize`) and the embedding index
+    (``embeddings._embedding_text``) index the body plus the ``title``,
+    ``keywords`` and ``applies-when`` frontmatter — and nothing else (all three
+    derive their text from :func:`_frontmatter_search_text`, so this hash covers
+    exactly what is searched, no more). Mutable bookkeeping fields (``fired``,
+    ``last_surfaced``, ``reconsolidated``, …) are stripped before indexing, so a
+    write that only touches them leaves every token and every embedding
+    byte-identical. Keying staleness on this hash instead of the file mtime means
+    such writes no longer trigger a needless re-tokenise / re-encode on the
+    priming hot path — which is what made every priming surface (it bumps
+    ``fired``/``last_surfaced``) re-index the corpus. A re-title, by contrast,
+    DOES change this hash and so reindexes — correct, since the title is searched.
+    """
+    body, fm = _strip_and_extract_frontmatter(raw)
+    indexed_text = _frontmatter_search_text(fm) + "\n" + body
+    return hashlib.blake2b(indexed_text.encode("utf-8"), digest_size=16).hexdigest()
 
 
 # ── Public aliases for cross-module use ────────────────────────────────────────
@@ -126,6 +165,12 @@ class _DocRecord:
     path: str  # absolute path string
     mtime: float
     raw_text: str  # full file text, kept for snippet generation
+    # blake2b of the indexed text (body + title + keywords + applies-when). Lets
+    # the staleness check tell a real content edit from a bookkeeping-only mtime
+    # bump. Defaults to "" so indexes pickled before this field existed still
+    # unpickle — a missing hash never matches, so the first staleness check
+    # after an upgrade falls through to a rebuild that repopulates it.
+    content_hash: str = ""
 
 
 class BM25Hit(NamedTuple):
@@ -280,7 +325,14 @@ def build_index(knowledge_dir: Path) -> BM25Index:
         toks = tokenize(raw)
         if not toks:
             continue
-        docs.append(_DocRecord(path=str(md), mtime=md.stat().st_mtime, raw_text=raw))
+        docs.append(
+            _DocRecord(
+                path=str(md),
+                mtime=md.stat().st_mtime,
+                raw_text=raw,
+                content_hash=index_content_hash(raw),
+            )
+        )
         tokenized.append(toks)
 
     bm25 = BM25Okapi(tokenized) if tokenized else None
@@ -375,6 +427,42 @@ def is_stale(docs: Sequence[_TimestampedDoc], current_files: Mapping[str, float]
     return False
 
 
+def only_bookkeeping_changed(
+    docs: Sequence[_TimestampedDoc],
+    current_files: Mapping[str, float],
+) -> bool:
+    """True iff every change since the index was built is confined to non-indexed
+    (bookkeeping/title) frontmatter — so a rebuild would be byte-identical and the
+    cached index can be reused as-is.
+
+    Call only after :func:`is_stale` returned True. Returns False (→ caller must
+    rebuild) if any file was added or removed, if a changed file can't be read,
+    or if a changed file's indexed-content hash differs from its cached record.
+    Only files whose mtime advanced are read; the unchanged majority is skipped
+    via the same cheap mtime comparison ``is_stale`` uses. A cached record with no
+    stored ``content_hash`` (index pickled before that field existed) never
+    matches, so the first post-upgrade staleness check falls through to a rebuild
+    that repopulates the hashes. Shared by the BM25 and embedding indices.
+    """
+    tracked: dict[str, _TimestampedDoc] = {rec.path: rec for rec in docs}
+    if set(current_files) != set(tracked):
+        return False
+    for path, mtime in current_files.items():
+        rec = tracked[path]
+        if mtime <= rec.mtime + 1e-6:
+            continue  # unchanged — no need to read the file
+        cached_hash = getattr(rec, "content_hash", "")
+        if not cached_hash:
+            return False  # pre-upgrade record (or genuinely empty) → rebuild
+        try:
+            raw = Path(path).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return False
+        if index_content_hash(raw) != cached_hash:
+            return False  # indexed content really changed
+    return True
+
+
 def load_or_build(
     knowledge_dir: Path,
     index_path: Path | None = None,
@@ -389,6 +477,14 @@ def load_or_build(
         if cached is not None and cached.knowledge_dir == knowledge_dir:
             current_files = {str(p): p.stat().st_mtime for p in _iter_markdown(knowledge_dir)}
             if not is_stale(cached.docs, current_files):
+                return cached
+            # Stale by mtime, but if the only writes were bookkeeping/title
+            # frontmatter the indexed text is unchanged — reuse without a
+            # rebuild. (We don't re-save: stored mtimes stay behind, so the
+            # next request re-reads the same handful and confirms again. That
+            # read is sub-millisecond; a full re-tokenise + BM25Okapi rebuild
+            # on every priming surface is what we're avoiding.)
+            if only_bookkeeping_changed(cached.docs, current_files):
                 return cached
 
     index = build_index(knowledge_dir)

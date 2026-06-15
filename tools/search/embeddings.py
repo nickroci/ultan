@@ -8,8 +8,9 @@ sole engine behind those; an integrator will fuse the two later.
 File selection rules (same as BM25):
   - skip ``_archive/`` subtrees
   - skip the top-level ``index.md`` and ``log.md`` catalogs
-  - YAML frontmatter is stripped from the embedded text, except ``keywords:``
-    and ``applies-when:`` which are preserved (PLAN section 2)
+  - YAML frontmatter is stripped from the embedded text, except ``title:``,
+    ``keywords:`` and ``applies-when:`` which are preserved (keywords/applies-when
+    per PLAN section 2; title added later — see ``bm25._frontmatter_search_text``)
 
 Model:
   - Default ``sentence-transformers/all-MiniLM-L6-v2``: 80 MB, 384-dim, CPU-fast.
@@ -40,7 +41,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 import numpy.typing as npt
@@ -52,7 +53,7 @@ from sentence_transformers import SentenceTransformer
 from _device import select_device
 from bm25 import build_snippet as _build_snippet
 from bm25 import frontmatter_search_text as _frontmatter_search_text
-from bm25 import is_stale, load_pickled, save_pickled
+from bm25 import index_content_hash, is_stale, load_pickled, only_bookkeeping_changed, save_pickled
 from bm25 import iter_markdown as _iter_markdown
 from bm25 import strip_and_extract_frontmatter as _strip_and_extract_frontmatter
 
@@ -178,6 +179,11 @@ class _DocRecord:
     path: str  # absolute path string
     mtime: float
     raw_text: str  # full file text, kept for snippet generation
+    # blake2b of the indexed text (see ``bm25.index_content_hash``). Lets the
+    # incremental build skip re-encoding an entry whose mtime bumped but whose
+    # embedded content is unchanged (a bookkeeping/title-only write). "" for
+    # records pickled before this field existed — treated as "must re-check".
+    content_hash: str = ""
 
 
 @dataclass
@@ -257,8 +263,9 @@ def _embedding_text(raw: str) -> str:
     """The text we feed to the encoder for a given .md file.
 
     Same discipline as ``bm25.tokenize`` — frontmatter stripped except for
-    ``keywords:`` and ``applies-when:``, which are prepended to the body.
-    Unlike BM25 we keep the original casing: sentence-transformers handle case.
+    ``title:``, ``keywords:`` and ``applies-when:``, which are prepended to the
+    body. Unlike BM25 we keep the original casing: sentence-transformers handle
+    case.
     """
     body, fm = _strip_and_extract_frontmatter(raw)
     fm_text = _frontmatter_search_text(fm)
@@ -294,7 +301,14 @@ def build_index(
         text = _embedding_text(raw).strip()
         if not text:
             continue
-        docs.append(_DocRecord(path=str(md), mtime=md.stat().st_mtime, raw_text=raw))
+        docs.append(
+            _DocRecord(
+                path=str(md),
+                mtime=md.stat().st_mtime,
+                raw_text=raw,
+                content_hash=index_content_hash(raw),
+            )
+        )
         texts.append(text)
 
     if not docs:
@@ -329,20 +343,76 @@ def build_index(
     )
 
 
+class _EntryPlan(NamedTuple):
+    """How :func:`_incremental_build` will handle one entry.
+
+    ``row`` set → reuse that cached embedding (no encode). ``encode_text`` set →
+    encode this text fresh. Exactly one of the two is non-None."""
+
+    record: _DocRecord
+    row: _FloatArray | None
+    encode_text: str | None
+
+
+def _plan_entry(
+    md: Path,
+    cached: EmbeddingIndex,
+    by_path: dict[str, int],
+    n_cached: int,
+) -> _EntryPlan | None:
+    """Decide whether one markdown file can reuse its cached embedding row or must
+    be re-encoded. Returns None to skip (unreadable / empty).
+
+    Reuse happens in two cases: the mtime hasn't advanced (no read needed), or it
+    advanced but the indexed-content hash is unchanged — a bookkeeping- or
+    title-only write, which leaves the embedding identical. Only genuine content
+    changes (and new files) fall through to ``encode_text``."""
+    try:
+        mtime = md.stat().st_mtime
+    except OSError:
+        return None
+    path = str(md)
+    ci = by_path.get(path)
+    cached_rec = cached.docs[ci] if (ci is not None and ci < n_cached) else None
+
+    if cached_rec is not None and cached_rec.mtime + 1e-6 >= mtime:
+        # Mtime unchanged → reuse without reading. Backfill hash for pre-upgrade
+        # records so later checks are exact (cheap; no re-encode).
+        chash = getattr(cached_rec, "content_hash", "") or index_content_hash(cached_rec.raw_text)
+        rec = _DocRecord(path=path, mtime=mtime, raw_text=cached_rec.raw_text, content_hash=chash)
+        return _EntryPlan(rec, cached.embeddings[ci], None)  # type: ignore[index]
+
+    try:
+        raw = md.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    text = _embedding_text(raw).strip()
+    if not text:
+        return None
+    chash = index_content_hash(raw)
+    rec = _DocRecord(path=path, mtime=mtime, raw_text=raw, content_hash=chash)
+    if cached_rec is not None and getattr(cached_rec, "content_hash", "") == chash:
+        # Mtime advanced but indexed text identical → reuse the cached row.
+        return _EntryPlan(rec, cached.embeddings[ci], None)  # type: ignore[index]
+    return _EntryPlan(rec, None, text)  # genuinely new or content-changed → encode
+
+
 def _incremental_build(
     cached: EmbeddingIndex,
     knowledge_dir: Path,
     model_name: str,
 ) -> EmbeddingIndex:
-    """Rebuild re-encoding ONLY the entries that changed since ``cached``.
+    """Rebuild re-encoding ONLY the entries whose indexed content changed since
+    ``cached``.
 
-    Reuses ``cached``'s embedding row for every entry whose path is unchanged and
-    whose mtime hasn't advanced (matching :func:`is_stale`); encodes only new or
-    modified entries; drops deleted ones. A full :func:`build_index` re-encodes
-    the whole corpus — expensive on the priming hot path, which rebuilds after
-    every Scholar write. The ``model.encode`` here is funnelled onto the daemon's
-    single inference thread by the callers (``_inference.run``), so it stays
-    MPS-safe. Falls back to a full build if the cached rows can't be reused.
+    Reuses ``cached``'s embedding row for every entry that is unchanged OR whose
+    mtime bumped without the indexed text changing (a bookkeeping/title write —
+    see :func:`_plan_entry`); encodes only new or genuinely-modified entries;
+    drops deleted ones. A full :func:`build_index` re-encodes the whole corpus —
+    expensive on the priming hot path, which rebuilds after every Scholar write.
+    The ``model.encode`` here is funnelled onto the daemon's single inference
+    thread by the callers (``_inference.run``), so it stays MPS-safe. Falls back
+    to a full build if the cached rows can't be reused.
     """
     knowledge_dir = knowledge_dir.expanduser().resolve()
     n_cached = cached.embeddings.shape[0] if cached.embeddings.ndim == 2 else 0
@@ -353,29 +423,16 @@ def _incremental_build(
     encode_texts: list[str] = []
     encode_slots: list[int] = []
     for md in _iter_markdown(knowledge_dir):
-        try:
-            mtime = md.stat().st_mtime
-        except OSError:
+        plan = _plan_entry(md, cached, by_path, n_cached)
+        if plan is None:
             continue
-        path = str(md)
-        ci = by_path.get(path)
-        if ci is not None and ci < n_cached and cached.docs[ci].mtime + 1e-6 >= mtime:
-            # Unchanged → reuse the cached embedding row (refresh stored mtime so
-            # the next staleness check is exact).
-            docs.append(_DocRecord(path=path, mtime=mtime, raw_text=cached.docs[ci].raw_text))
-            rows.append(cached.embeddings[ci])
-            continue
-        try:
-            raw = md.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        text = _embedding_text(raw).strip()
-        if not text:
-            continue
-        docs.append(_DocRecord(path=path, mtime=mtime, raw_text=raw))
-        rows.append(np.zeros((0,), dtype=np.float32))  # placeholder; overwritten below
-        encode_texts.append(text)
-        encode_slots.append(len(docs) - 1)
+        docs.append(plan.record)
+        if plan.row is not None:
+            rows.append(plan.row)
+        else:
+            rows.append(np.zeros((0,), dtype=np.float32))  # placeholder; overwritten below
+            encode_texts.append(plan.encode_text or "")
+            encode_slots.append(len(docs) - 1)
 
     if not docs:
         return EmbeddingIndex(
@@ -453,6 +510,13 @@ def load_or_build(
         ):
             current = {str(p): p.stat().st_mtime for p in _iter_markdown(knowledge_dir)}
             if not is_stale(cached.docs, current):
+                return cached
+            # Stale by mtime, but if the only writes were bookkeeping/title
+            # frontmatter the embeddings are unchanged — reuse without touching
+            # the encoder. This is the priming hot path's biggest win: every
+            # surface bumps fired/last_surfaced, which used to force a re-encode
+            # (and an MPS graph recompile) of the surfaced entries on each call.
+            if only_bookkeeping_changed(cached.docs, current):
                 return cached
             # Compatible but stale → re-encode only the entries that changed.
             index = _incremental_build(cached, knowledge_dir, model_name)
