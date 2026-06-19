@@ -450,6 +450,11 @@ def test_bullet_format_includes_title_hook_and_count(tmp_path):
             applies_when="writing a Dockerfile or docker-compose service",
             keywords=["docker", "image", "version", "pin"],
             reinforced=4,
+            # Fixed old date: this test pins the title/(×N)/hook wire-shape, not
+            # the freshness ★ marker (entries updated within 7 days get a star).
+            # render_entry now defaults to today, which would add the star here.
+            created="2026-01-01",
+            updated="2026-01-01",
         ),
     )
     plain_path = k / "global" / "use-ripgrep.md"
@@ -460,6 +465,8 @@ def test_bullet_format_includes_title_hook_and_count(tmp_path):
             title="Prefer ripgrep over grep",
             applies_when="searching through a code repository",
             keywords=["ripgrep", "grep", "search"],
+            created="2026-01-01",
+            updated="2026-01-01",
         ),
     )
 

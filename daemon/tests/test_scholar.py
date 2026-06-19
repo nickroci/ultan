@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -33,6 +34,12 @@ from agent_mem_daemon.runs import InvocationRecord
 from agent_mem_daemon.typed_agent import TypedAgentError
 
 from .conftest import scholar_entry_body
+
+# Inline seed entries must be dated TODAY, not a fixed calendar date: a
+# hardcoded date ages past DECAY_AGE_DAYS, after which the Scholar review's
+# opportunistic decay sweep archives the seed entry mid-test (a time-bomb that
+# broke these tests on 2026-06-19, 31 days after the old 2026-05-19 literal).
+_TODAY = date.today().isoformat()
 
 
 @pytest.fixture(autouse=True)
@@ -354,7 +361,7 @@ def test_review_repairs_phantom_index_row(monkeypatch, tmp_path):
     (k / "global" / "python" / "use-uv.md").write_text(
         "---\nid: use-uv\ntype: lesson\nscope: global\nstatus: provisional\n"
         "confidence: 0.7\napplies-when: |\n  x\nkeywords: [a, b, c]\n"
-        'title: "use-uv"\ncreated: 2026-05-19\nupdated: 2026-05-19\n'
+        f'title: "use-uv"\ncreated: {_TODAY}\nupdated: {_TODAY}\n'
         "fired: 0\nfired-helpful: 0\nsources:\n  - manual\n---\n\n# uv\n\nUse uv always for python.\n",
         encoding="utf-8",
     )
@@ -729,7 +736,7 @@ def test_end_to_end_proposal_approved_writes_entry_to_knowledge_dir(
         "applies-when: |\n  testing a service with a factory\n"
         "keywords: [test, stub, factory]\n"
         'title: "Stub the factory"\n'
-        "created: 2026-05-19\nupdated: 2026-05-19\n"
+        f"created: {_TODAY}\nupdated: {_TODAY}\n"
         "fired: 0\nfired-helpful: 0\nsources:\n  - manual\n"
         "---\n\n# Stub the factory\n\nBody sentence long enough to pass.\n"
     )
@@ -795,7 +802,7 @@ def _seed_library_with_broken_link(k: Path, *, broken: str = "global/ghost/never
     entry.write_text(
         "---\nid: narr\ntype: lesson\nscope: global\nstatus: provisional\n"
         "confidence: 0.7\napplies-when: |\n  x\nkeywords: [a, b, c]\n"
-        'title: "narr"\ncreated: 2026-05-19\nupdated: 2026-05-19\n'
+        f'title: "narr"\ncreated: {_TODAY}\nupdated: {_TODAY}\n'
         "fired: 0\nfired-helpful: 0\nsources:\n  - manual\n---\n\n"
         f"# narr\n\nThis references [[{broken}]] in a sentence we keep.\n",
         encoding="utf-8",
@@ -950,7 +957,7 @@ def _entry_frontmatter(id_: str) -> str:
     return (
         f"---\nid: {id_}\ntype: lesson\nscope: global\nstatus: provisional\n"
         "confidence: 0.7\napplies-when: |\n  x\nkeywords: [a, b, c]\n"
-        f'title: "{id_}"\ncreated: 2026-05-19\nupdated: 2026-05-19\n'
+        f'title: "{id_}"\ncreated: {_TODAY}\nupdated: {_TODAY}\n'
         "fired: 0\nfired-helpful: 0\nsources:\n  - manual\n---\n\n"
         f"# {id_}\n\nA real body sentence that is clearly long enough.\n"
     )

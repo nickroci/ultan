@@ -77,6 +77,35 @@ jobs:
       - name: Check version coherence
         run: bash scripts/check-version-coherence.sh
 
+  security-audit:
+    # Scan third-party dependencies for known vulnerabilities (PyPI Advisory
+    # DB / OSV) via pip-audit. `uv sync --all-packages` installs every
+    # workspace member's deps into one env; pip-audit audits that env directly
+    # (environment mode — no resolver venv, which is robust across runners).
+    # Local workspace packages (ultan, agent-mem-daemon, …) aren't on PyPI and
+    # are skipped automatically.
+    #
+    # Required, blocking gate (wired into `ci-success` below): a new advisory
+    # in any dependency fails this and blocks merges until the dep is bumped
+    # or the advisory is explicitly ignored here. Keep the ignore list curated
+    # — each entry must carry a reason and a revisit trigger.
+    #
+    # Ignored advisories:
+    #   - CVE-2025-3000 (torch 2.12.0): no patched torch release exists yet.
+    #     Drop this ignore once upstream ships a fixed version.
+    name: security-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install the full workspace
+        run: uv sync --locked --all-packages
+      - name: Audit dependencies (pip-audit)
+        run: uv run --with pip-audit pip-audit --ignore-vuln CVE-2025-3000
+
   ci-success:
     # Single required check for branch protection. It goes green only when
     # every job above has succeeded, so protection on `main` can require
@@ -86,11 +115,12 @@ jobs:
     # skipped past a failing matrix.
     name: ci-success
     if: always()
-    needs: [build, version-coherence]
+    needs: [build, version-coherence, security-audit]
     runs-on: ubuntu-latest
     steps:
       - name: Require all CI jobs to have passed
         run: |
-          echo "build=${{ needs.build.result }} version-coherence=${{ needs.version-coherence.result }}"
+          echo "build=${{ needs.build.result }} version-coherence=${{ needs.version-coherence.result }} security-audit=${{ needs.security-audit.result }}"
           test "${{ needs.build.result }}" = "success"
           test "${{ needs.version-coherence.result }}" = "success"
+          test "${{ needs.security-audit.result }}" = "success"

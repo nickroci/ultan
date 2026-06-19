@@ -756,6 +756,30 @@ split, emit the trimming ``update_entry`` (also ``salience_signal: \
 ``used_helpfully`` (that only counts the hit; ``drift`` actually edits the \
 entry) — you may emit both for the same entry in one scan.
 
+  **RECALL-GAP — sharpen an entry's retrieval triggers** (mutate in place, \
+sparingly)
+    Each turn may carry a ``[recall]`` line — ``instant-recall surfaced: \
+[[…]], [[…]]`` — listing what the fast trigger tier actually showed the \
+assistant for that turn. When the turn's query clearly needed a library \
+entry that is NOT in that ``[recall]`` line, the entry exists but its \
+triggers missed the query's vocabulary. Confirm with ``bm25_search`` / \
+``embedding_search`` that such an entry exists and genuinely answers the \
+query — never infer a gap from the recall line alone.
+    Action: propose ``update_entry`` with ``salience_signal: "drift"``, \
+adding the query's distinctive term(s) to that entry's ``paraphrases`` \
+(preferred — query-shaped phrasings BM25 indexes) and/or ``keywords``. The \
+load-bearing claim and body stay INTACT; you are only widening how the \
+entry is FOUND, not what it says. E.g. a "you can't reliably profit from \
+crypto" entry that missed a "how do I make money from BTC" query gains the \
+paraphrase "make money from BTC / bitcoin".
+    PRECISION GATE (critical): add a trigger ONLY when the entry is \
+genuinely THE right recall for that class of query, not merely adjacent. A \
+loose addition makes the entry fire as NOISE on unrelated future queries — \
+polluting the instant tier for every session, which is worse than an \
+occasional miss. When in doubt, DON'T; never pad with near-synonyms the \
+entry already matches. The embedding tier already catches paraphrases, so \
+reserve this for genuine lexical/cue gaps the fast path keeps missing.
+
   **REDUNDANT / no signal** (skip silently — no proposal)
     Things every competent assistant would already produce or that don't carry information:
       - Code-as-code: "added a for loop", "created a class", "fixed indentation"

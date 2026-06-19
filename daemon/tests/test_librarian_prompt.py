@@ -79,6 +79,34 @@ def test_flatten_buffer_user_asserted_flag_propagates():
     assert flat[0][4] is True
 
 
+def test_flatten_buffer_renders_recall_surfaced_event():
+    # The hook emits a `Surfaced` event (role="recall") recording what the
+    # instant triggers showed; the Librarian must see it inline with the turn
+    # so it can spot recall gaps. It renders like any text-bearing turn line.
+    snap = _snap(
+        [
+            [
+                _ev("UserPromptSubmit", {"text": "how do I make money from BTC"}),
+                _ev(
+                    "Surfaced",
+                    {"role": "recall", "content": "instant-recall surfaced: [[a/b]], [[c/d]]"},
+                ),
+            ]
+        ]
+    )
+    flat = lp.flatten_buffer(snap)
+    roles = [r for _id, _seq, r, _t, _u in flat]
+    assert "recall" in roles
+    recall_text = next(t for _id, _seq, r, t, _u in flat if r == "recall")
+    assert "[[a/b]]" in recall_text and "[[c/d]]" in recall_text
+
+
+def test_system_prompt_includes_recall_gap_signal():
+    s = lp.librarian_system_prompt()
+    assert "RECALL-GAP" in s
+    assert "PRECISION GATE" in s  # the keyword-pollution safeguard must survive
+
+
 def test_flatten_buffer_empty_when_no_turns():
     assert lp.flatten_buffer({"turns": []}) == []
     assert lp.flatten_buffer({}) == []

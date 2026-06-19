@@ -112,6 +112,24 @@ def _user_prompt_submit(payload: dict[str, Any]) -> int:
             "minute or two.*\n"
         )
 
+    # Record WHAT priming surfaced this turn so the daemon's Librarian can spot
+    # recall gaps — an entry relevant to the turn that did NOT surface — and
+    # sharpen its retrieval triggers (retrieval-cue learning). File write only,
+    # independent of the stdout priming below; a cheap regex over the rendered
+    # markdown, so it stays within the per-turn hook budget.
+    if sid:
+        surfaced = _priming.extract_surfaced_links(md)
+        if surfaced:
+            _events.append_event(
+                "Surfaced",
+                payload,
+                payload={
+                    "role": "recall",
+                    "content": "instant-recall surfaced: "
+                    + ", ".join(f"[[{t}]]" for t in surfaced),
+                },
+            )
+
     # G3: consume + render any pending nudges for this turn (budget-gated,
     # cross-project filtered). Needs a session_id to key the per-session budget;
     # take_and_render no-ops to "" without one.
