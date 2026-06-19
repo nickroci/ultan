@@ -161,3 +161,25 @@ repos:
         files: ^(ultan/|tests/|pyproject\.toml)
         pass_filenames: false
         stages: [pre-push]
+
+      # Behavioural evals for the curator agents (Librarian/Scholar). Plain
+      # pytest tests under daemon/evals/ (outside testpaths, so a normal pytest
+      # run never collects them), but they make REAL agent calls through the
+      # Claude Code subscription (claude_agent_sdk — never the metered API), so
+      # they're pre-push only and gated to the files that define curator
+      # behaviour: a doc/typo push never spins them up. --no-cov because the
+      # daemon's 90%-coverage gate would fail an eval-only run. Each case is a
+      # clear-cut situation (dedupe an existing rule; file an explicit /ultan
+      # memory) scored on the agent's typed output. See daemon/evals/README.md.
+      #
+      # Skip a one-off push:  SKIP=ultan-agent-evals git push
+      # Skip always (env):    ULTAN_SKIP_EVALS=1 git push
+      # A wrong answer (failed assert) blocks the push; an infra hiccup
+      # (timeout / transport / not authenticated) is a pytest skip, not a fail.
+      - id: ultan-agent-evals
+        name: ultan agent evals (subscription; dedupe + write)
+        language: system
+        entry: bash -c 'cd daemon && uv run --frozen pytest evals/ --no-cov'
+        files: ^daemon/(agent_mem_daemon/(librarian|scholar|librarian_prompt|scholar_prompt|_schemas|typed_agent|_agent_research)\.py|evals/(.*\.py|corpus/.*))$
+        pass_filenames: false
+        stages: [pre-push]
