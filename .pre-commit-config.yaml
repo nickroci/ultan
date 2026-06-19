@@ -179,7 +179,7 @@ repos:
       - id: ultan-agent-evals
         name: ultan agent evals (subscription; dedupe + write)
         language: system
-        entry: bash -c 'cd daemon && uv run --frozen pytest evals/ --no-cov'
+        entry: bash -c 'cd daemon && uv run --frozen pytest evals/ --no-cov -n auto'
         files: ^daemon/(agent_mem_daemon/(librarian|scholar|librarian_prompt|scholar_prompt|_schemas|typed_agent|_agent_research)\.py|evals/(.*\.py|corpus/.*))$
         pass_filenames: false
         stages: [pre-push]

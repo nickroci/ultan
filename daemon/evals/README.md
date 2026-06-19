@@ -14,13 +14,16 @@ and takes ~1 minute).
 
 ```sh
 cd daemon
-uv run --frozen pytest evals/ --no-cov              # run all
+uv run --frozen pytest evals/ --no-cov -n auto      # run all (parallel)
 uv run --frozen pytest evals/ --no-cov -k dedupe    # one case
 uv run --frozen pytest evals/ --co -q               # list cases, no agent calls
 ```
 
 `--no-cov` is required: the daemon's 90%-coverage gate (in `addopts`) would
-otherwise fail an eval-only run.
+otherwise fail an eval-only run. `-n auto` (pytest-xdist) runs cases in
+parallel worker *processes* — each gets its own env and agent subprocess, so
+there's no shared-state race. For a large suite you may want to cap it
+(e.g. `-n 4`) since these are subscription calls and could hit rate limits.
 
 - A **wrong answer** is a failed assertion → non-zero exit (blocks a push).
 - An **infra hiccup** (timeout / transport / not authenticated) is a
