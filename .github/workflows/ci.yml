@@ -85,13 +85,14 @@ jobs:
     # Local workspace packages (ultan, agent-mem-daemon, …) aren't on PyPI and
     # are skipped automatically.
     #
-    # NOT wired into `ci-success` (below): this surfaces vulnerabilities
-    # without blocking merges — a freshly-disclosed or fix-less CVE in a
-    # transitive dep (e.g. an upstream with no patched release yet) shouldn't
-    # wedge the merge train. To make it a required, blocking gate, add
-    # `security-audit` to `ci-success.needs` and its result assertion; pin
-    # known-unfixable advisories with `pip-audit --ignore-vuln <ID>` so the
-    # gate stays actionable.
+    # Required, blocking gate (wired into `ci-success` below): a new advisory
+    # in any dependency fails this and blocks merges until the dep is bumped
+    # or the advisory is explicitly ignored here. Keep the ignore list curated
+    # — each entry must carry a reason and a revisit trigger.
+    #
+    # Ignored advisories:
+    #   - CVE-2025-3000 (torch 2.12.0): no patched torch release exists yet.
+    #     Drop this ignore once upstream ships a fixed version.
     name: security-audit
     runs-on: ubuntu-latest
     steps:
@@ -103,7 +104,7 @@ jobs:
       - name: Install the full workspace
         run: uv sync --locked --all-packages
       - name: Audit dependencies (pip-audit)
-        run: uv run --with pip-audit pip-audit
+        run: uv run --with pip-audit pip-audit --ignore-vuln CVE-2025-3000
 
   ci-success:
     # Single required check for branch protection. It goes green only when
@@ -114,11 +115,12 @@ jobs:
     # skipped past a failing matrix.
     name: ci-success
     if: always()
-    needs: [build, version-coherence]
+    needs: [build, version-coherence, security-audit]
     runs-on: ubuntu-latest
     steps:
       - name: Require all CI jobs to have passed
         run: |
-          echo "build=${{ needs.build.result }} version-coherence=${{ needs.version-coherence.result }}"
+          echo "build=${{ needs.build.result }} version-coherence=${{ needs.version-coherence.result }} security-audit=${{ needs.security-audit.result }}"
           test "${{ needs.build.result }}" = "success"
           test "${{ needs.version-coherence.result }}" = "success"
+          test "${{ needs.security-audit.result }}" = "success"
