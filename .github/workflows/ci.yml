@@ -77,6 +77,34 @@ jobs:
       - name: Check version coherence
         run: bash scripts/check-version-coherence.sh
 
+  security-audit:
+    # Scan third-party dependencies for known vulnerabilities (PyPI Advisory
+    # DB / OSV) via pip-audit. `uv sync --all-packages` installs every
+    # workspace member's deps into one env; pip-audit audits that env directly
+    # (environment mode — no resolver venv, which is robust across runners).
+    # Local workspace packages (ultan, agent-mem-daemon, …) aren't on PyPI and
+    # are skipped automatically.
+    #
+    # NOT wired into `ci-success` (below): this surfaces vulnerabilities
+    # without blocking merges — a freshly-disclosed or fix-less CVE in a
+    # transitive dep (e.g. an upstream with no patched release yet) shouldn't
+    # wedge the merge train. To make it a required, blocking gate, add
+    # `security-audit` to `ci-success.needs` and its result assertion; pin
+    # known-unfixable advisories with `pip-audit --ignore-vuln <ID>` so the
+    # gate stays actionable.
+    name: security-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install the full workspace
+        run: uv sync --locked --all-packages
+      - name: Audit dependencies (pip-audit)
+        run: uv run --with pip-audit pip-audit
+
   ci-success:
     # Single required check for branch protection. It goes green only when
     # every job above has succeeded, so protection on `main` can require
