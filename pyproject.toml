@@ -7,7 +7,7 @@
 # stays small and starts fast.
 [project]
 name = "ultan"
-version = "0.4.1"
+version = "0.4.2"
 description = "Ultan — local markdown memory for Claude Code (thin CLI + hooks + lazy daemon launcher)."
 requires-python = ">=3.12"
 license = { text = "MIT" }
