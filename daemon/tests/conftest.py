@@ -17,6 +17,7 @@ place rather than being copy-pasted per module.
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 from typing import List, Optional
 
@@ -39,6 +40,8 @@ def render_entry(
     fired_helpful: int = 0,
     body: str = "",
     scope: str = "global",
+    created: Optional[str] = None,
+    updated: Optional[str] = None,
     default_body_template: str = DEFAULT_BODY_TEMPLATE,
 ) -> str:
     """Render a valid library entry as a YAML-frontmattered markdown
@@ -46,7 +49,16 @@ def render_entry(
     ``scholar_prompt._REQUIRED_FRONTMATTER_FIELDS``.
 
     When ``body`` is the empty string the body is synthesised from
-    ``default_body_template`` (which sees ``id_`` and ``applies_when``)."""
+    ``default_body_template`` (which sees ``id_`` and ``applies_when``).
+
+    ``created``/``updated`` default to TODAY (ISO) rather than a fixed date:
+    a hardcoded date silently ages past the decay window (``DECAY_AGE_DAYS``),
+    after which the Scholar review's opportunistic decay sweep archives the
+    fixture entry mid-test — a calendar time-bomb. Pass an explicit date only
+    when a test deliberately needs a stale (or specific-dated) entry."""
+    _today = date.today().isoformat()
+    created = created or _today
+    updated = updated or created
     lines = [
         "---",
         f"id: {id_}",
@@ -60,8 +72,8 @@ def render_entry(
         lines.append(f"  {line}")
     lines.append("keywords: [" + ", ".join(keywords) + "]")
     lines.append(f'title: "{title}"')
-    lines.append("created: 2026-05-19")
-    lines.append("updated: 2026-05-19")
+    lines.append(f"created: {created}")
+    lines.append(f"updated: {updated}")
     lines.append(f"fired: {fired}")
     lines.append(f"fired-helpful: {fired_helpful}")
     if reinforced is not None:
