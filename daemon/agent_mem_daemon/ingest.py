@@ -71,6 +71,7 @@ KNOWN_TYPES = {
     "SessionEnd",
     "UserPromptSubmit",
     "SessionStart",
+    "Surfaced",
 }
 
 

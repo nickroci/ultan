@@ -92,6 +92,55 @@ def test_post_tool_use_marks_failure(_isolated_store: Path) -> None:
     assert ev["payload"]["summary"].endswith("FAILED")
 
 
+# ── user-prompt-submit → Surfaced (what the instant triggers showed) ─────────
+
+
+def test_extract_surfaced_links_dedups_and_handles_empty() -> None:
+    from ultan import _priming
+
+    md = "## Ultan says\n- [[projects/x/foo]] ★ — a\n- [[global/y/bar]] — b\n- [[projects/x/foo]] dup\n"
+    assert _priming.extract_surfaced_links(md) == ["projects/x/foo", "global/y/bar"]
+    assert _priming.extract_surfaced_links("") == []
+    assert _priming.extract_surfaced_links("no links here") == []
+
+
+def _stub_priming(monkeypatch: pytest.MonkeyPatch, md: str) -> None:
+    # Don't spawn a daemon or hit the socket; pin the priming output.
+    monkeypatch.setattr(_hooks._daemon, "ensure_running", lambda: None)
+    monkeypatch.setattr(_hooks._daemon, "status", lambda: "ready")
+    monkeypatch.setattr(_hooks._priming, "get_priming", lambda *a, **k: md)
+
+
+def test_user_prompt_submit_emits_surfaced_event(
+    _isolated_store: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_priming(
+        monkeypatch,
+        "## Ultan says\n- [[projects/x/crypto-no-profit]] — you can't profit from crypto\n",
+    )
+    rc = _hooks.dispatch(
+        "user-prompt-submit",
+        {"session_id": "s1", "cwd": "/w", "prompt": "how do I make money from BTC"},
+    )
+    assert rc == 0
+    by_type = {e["type"]: e for e in _read_events(_isolated_store)}
+    assert "UserPromptSubmit" in by_type  # the prompt itself still captured
+    assert "Surfaced" in by_type  # and what the instant triggers surfaced
+    surfaced = by_type["Surfaced"]
+    _assert_valid_event(surfaced, expected_type="Surfaced")
+    assert surfaced["payload"]["role"] == "recall"
+    assert "[[projects/x/crypto-no-profit]]" in surfaced["payload"]["content"]
+
+
+def test_user_prompt_submit_no_surfaced_event_when_nothing_primed(
+    _isolated_store: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_priming(monkeypatch, "")  # daemon found nothing → no Surfaced line
+    _hooks.dispatch("user-prompt-submit", {"session_id": "s1", "prompt": "hi"})
+    types = {e["type"] for e in _read_events(_isolated_store)}
+    assert "Surfaced" not in types
+
+
 # ── stop / session-end → turn-sealing events (the Librarian triggers) ────────
 
 

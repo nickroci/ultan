@@ -218,6 +218,38 @@ def _tokenize(text: str) -> List[str]:
     return [t for t in _TOKEN_SPLIT_RE.split(text.lower()) if len(t) >= 2]
 
 
+_WIKILINK_RE = re.compile(r"\[\[([^\]\n|]+)(?:\|[^\]\n]*)?\]\]")
+
+
+def extract_surfaced_links(md: str) -> List[str]:
+    """Pull the entry wikilink targets out of a rendered priming block.
+
+    The priming markdown lists each surfaced entry as ``- [[<target>]] …``;
+    this returns those ``<target>`` paths (deduped, order preserved) so the
+    hook can record WHAT the instant triggers surfaced this turn. The daemon's
+    Librarian uses that to spot recall gaps — an entry that was relevant to the
+    turn but did NOT surface — and sharpen its retrieval triggers. Pure stdlib;
+    safe on the per-turn hook hot path. Returns ``[]`` for empty input.
+
+    Grounding (retrieval-cue learning): retrieval reopens a trace for re-storage
+    with altered associations (Bridge & Paller 2012, J Neurosci,
+    doi:10.1523/JNEUROSCI.1378-12.2012); fast recall misses when the query's
+    terms were not encoded as cues (encoding specificity — Tulving & Thomson
+    1973, Psychol Rev, doi:10.1037/h0020071); the deliberative tier links the
+    missed memory to the new cue (memory integration — Schlichting & Preston
+    2015, Curr Opin Behav Sci, doi:10.1016/j.cobeha.2014.07.005)."""
+    if not md:
+        return []
+    seen: set[str] = set()
+    out: List[str] = []
+    for target in _WIKILINK_RE.findall(md):
+        t = target.strip()
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
 def _parse_yaml_lite(fm_block: str) -> Frontmatter:
     """Just enough YAML to pull ``reinforced``, ``title``, ``applies-when``,
     ``keywords``. Pure stdlib — no PyYAML dep.
