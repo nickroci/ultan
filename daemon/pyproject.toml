@@ -73,7 +73,9 @@ select = ["E", "F", "I", "W", "C901", "PLR0912", "PLR0915", "PLC0415"]
 "tests/**" = ["E501", "C901", "PLR0912", "PLR0915", "PLC0415"]
 
 [tool.pyright]
-include = ["agent_mem_daemon"]
+# evals/ is a maintained tool (drives the real curator agents), not throwaway
+# test code, so it's strict-checked alongside the package — unlike tests/.
+include = ["agent_mem_daemon", "evals"]
 exclude = [".venv", "**/__pycache__", "build", "dist", "tests"]
 venvPath = "."
 venv = ".venv"
@@ -102,4 +104,5 @@ dev = [
     "pytest-cov>=7.1.0",
     "pylint>=3.3",
     "pytest-asyncio>=1.4.0",
+    "pytest-xdist>=3.6",
 ]
