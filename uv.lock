@@ -12,7 +12,7 @@ members = [
 
 [[package]]
 name = "agent-mem-daemon"
-version = "0.4.2"
+version = "0.4.3"
 source = { editable = "daemon" }
 dependencies = [
     { name = "agent-mem-search" },
@@ -59,7 +59,7 @@ dev = [
 
 [[package]]
 name = "agent-mem-search"
-version = "0.4.2"
+version = "0.4.3"
 source = { editable = "tools/search" }
 dependencies = [
     { name = "claude-agent-sdk" },
@@ -100,7 +100,7 @@ dev = [
 
 [[package]]
 name = "agent-mem-tools"
-version = "0.4.2"
+version = "0.4.3"
 source = { editable = "tools/ultan" }
 dependencies = [
     { name = "agent-mem-daemon" },
@@ -451,34 +451,34 @@ wheels = [
 
 [package.optional-dependencies]
 cudart = [
-    { name = "nvidia-cuda-runtime", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-cuda-runtime" },
 ]
 cufft = [
-    { name = "nvidia-cufft", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-cufft" },
 ]
 cufile = [
-    { name = "nvidia-cufile", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-cufile" },
 ]
 cupti = [
-    { name = "nvidia-cuda-cupti", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-cuda-cupti" },
 ]
 curand = [
-    { name = "nvidia-curand", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-curand" },
 ]
 cusolver = [
-    { name = "nvidia-cusolver", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-cusolver" },
 ]
 cusparse = [
-    { name = "nvidia-cusparse", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-cusparse" },
 ]
 nvjitlink = [
-    { name = "nvidia-nvjitlink", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-nvjitlink" },
 ]
 nvrtc = [
-    { name = "nvidia-cuda-nvrtc", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-cuda-nvrtc" },
 ]
 nvtx = [
-    { name = "nvidia-nvtx", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-nvtx" },
 ]
 
 [[package]]
@@ -2057,7 +2057,7 @@ wheels = [
 
 [[package]]
 name = "ultan"
-version = "0.4.2"
+version = "0.4.3"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
