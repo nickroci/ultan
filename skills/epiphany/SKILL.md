@@ -1,6 +1,6 @@
 ---
 name: epiphany
-description: Roam the Ultan memory library and surface ONE non-obvious, useful connection between distant entries — an on-demand "epiphany". Use when the user asks for a spark/insight/epiphany from their memory, wants a hidden cross-cutting pattern surfaced, asks "show me something interesting in my notes", or runs /epiphany. Can be scoped to a single project (e.g. /epiphany vol-predictor) to surface a cross-subsystem insight about that project. Read-only — it never writes to the library. Works by fanning out parallel scouts (Opus) across the knowledge base, then adversarially filtering to the single best connection.
+description: Roam the Ultan memory library and surface ONE non-obvious, useful connection between distant entries — an on-demand "epiphany". Use when the user asks for a spark/insight/epiphany from their memory, wants a hidden cross-cutting pattern surfaced, asks "show me something interesting in my notes", or runs /epiphany. Can be scoped to a single project (e.g. /epiphany vol-predictor) to surface a cross-subsystem insight about that project. Read-only — it never writes to the library. Works by fanning out parallel scouts (Opus), converging over rounds with iterative grounding against the actual source artifacts the entries point at, then filtering to the single best connection.
 ---
 
 # Epiphany
@@ -77,19 +77,28 @@ entries scouts surfaced into a shared **blackboard**. Continue the SAME scouts w
 `SendMessage` (their context persists — they keep their own reasoning) and hand each
 the blackboard:
 
-> Here is the full pool of candidates and entries the other scouts found. Do three
+> Here is the full pool of candidates and entries the other scouts found. Do four
 > things: **(1) build** — find a stronger connection bridging ACROSS two *different*
 > scouts' material that none of them saw alone; **(2) challenge** — name the weakest
 > candidate in the pool and why it's coincidental, already-linked, or hollow;
-> **(3) vote** — your single best with one line of why. Do NOT just agree: if the
-> pool is converging on something shallow, say so and pull it apart.
+> **(3) ground** — for any candidate resting on a technical claim, do NOT trust the
+> entry's wording: follow its pointers (`sources:`, file paths, repo/tool names in the
+> body) to the **actual artifact** — locate it on disk (`find`/`grep`), read it, quote
+> the real thing — and refine or kill the bridge by what the source actually says;
+> **(4) vote** — your single best with one line of why. Do NOT just agree: if the pool
+> is converging on something shallow, or on a claim no one has checked against the
+> source, say so and pull it apart.
 
-Assign **one scout a standing skeptic role** — its job is to refute, never to
-ratify. This is the *lateral inhibition* that stops the group converging on a
-confident-but-wrong answer (see the convergence note below). Repeat until **stable**:
-the same 1–2 candidates win the vote across a round with no new far pair appearing.
-Cap at ~3 convergence rounds. The goal is convergence by **evidence survival**, not
-by agreement.
+Assign **one scout a standing skeptic role** — its job is to refute, never to ratify,
+and in particular to **demand the source**: "which line of which file shows that?" This
+is the *lateral inhibition* that stops the group converging on a confident-but-wrong
+answer (see the notes below). Grounding is **iterative, not one-shot**: a technical claim
+gets checked against the artifact, the verbatim finding goes back on the blackboard, and
+the next round refines, narrows, or kills the bridge in response — so the epiphany is
+*shaped by the source*, not merely approved by it. Repeat until **stable**: the same 1–2
+candidates win across a round, no new far pair appears, **and the survivor's technical
+claims have each been confirmed against the source artifact, not the summary.** Cap at
+~3–4 rounds. Convergence is by **evidence survival**, not agreement.
 
 **3 — Judge ratifies.** The orchestrator does NOT just rubber-stamp the vote winner.
 Cut hard:
@@ -105,9 +114,12 @@ Cut hard:
   each other in frontmatter before treating the convergence as signal — convergence
   onto a pre-wired cluster is the link graph reflected back, not independent discovery.
 - **Not a far pair** → drop same-subsystem / same-topic pairings.
-- **Confabulated** → spot-check the `evidence` against the real entries. If the entry
-  doesn't actually say it, kill it — a fluent link the text doesn't support is the
-  most common failure.
+- **Confabulated, or summary-only** → grounding should already have happened in the
+  rounds; the judge confirms it held. For every technical claim the survivor rests on,
+  the check is against the **source artifact** the entry points at (the code/file/data),
+  not the entry's prose. A bridge that holds only at the summary level is the most
+  dangerous failure — it reads as profound and cites real entries. If a claim was never
+  source-checked, send it back for grounding rather than ratifying.
 - **No "so what"** → if it doesn't change a decision or explain something, drop it.
 
 Run a final refute pass, then surface the single best (or a short ranked few if the
@@ -123,12 +135,34 @@ until one survives. So convergence here must stay adversarial: independent round
 first, a standing skeptic throughout, and a final judge that ratifies on grounded
 evidence, not on vote count. Convergence is the mechanism; evidence is the criterion.
 
-And discount convergence that lands on an **already-cross-linked cluster** — that is
-the corpus's existing link structure reflected back, not N independent discoveries.
-The richest epiphany is often a *tension* (two of the user's own entries that quietly
-contradict), not a restatement the scouts agree on; a live `research` run found exactly
-this — the agreed-upon cluster was pre-wired, while the real find was an unlinked
-contradiction the skeptic had to dig out.
+And discount convergence that lands on an **already-cross-linked cluster** — that is the
+corpus's existing link structure reflected back, not N independent discoveries. The
+richest epiphany is often a *tension* (two entries that quietly contradict), not a
+restatement the scouts agree on — but a tension only counts **once it survives the source**.
+
+### Ground the epiphany in the source, iteratively (the load-bearing fix)
+
+Memory entries are **leads, not ground truth** — a gist, often vague, sometimes just a
+pointer at a repo or file. A connection that rhymes at the *summary* level can be an
+artifact of lossy wording, and the convergence round will happily agree on it. So
+grounding is a **dimension of the discussion, not a final gate**: whenever a candidate
+rests on a technical claim, an agent follows the entry's pointers to the **actual
+artifact** (locate the repo/file on disk — `find`/`grep` for the path the `sources:` or
+body names — and read it), quotes the real thing, and the bridge is refined or killed by
+what the source says. This repeats across rounds until the survivor has met the code.
+
+Why this is load-bearing: a live `research` run produced a confident epiphany — *"your
+prime-Kt measurement contradicts your v2-lean result"* — that the converge round **and**
+the skeptic both endorsed, because every entry said "isolated cost." It was **wrong**.
+Opening the actual Lean (`TimeHierarchy.lean:128` → `Lnat n ≤ 1`) showed the v2 result is
+about a single **bit**, not a multi-digit prime; the "contradiction" dissolved on contact
+with the code. The summaries agreed; the source refuted. The skill is a **hypothesis
+generator** — it proposes the bridge; the source decides.
+
+Neurologically this is the **active-inference loop**: a candidate bridge is a *prediction*,
+reading the source is *sampling the world*, and iterating until the prediction survives the
+evidence is prediction-error minimisation. Settling on the prior (the remembered gist)
+without sampling the world is exactly the failure mode to design against.
 
 ## The quality bar (this is the whole point)
 
@@ -139,7 +173,10 @@ output to all four:
 - **Novel** — not already linked, not already a `connection` entry.
 - **Non-obvious** — a genuine far pair, not two siblings.
 - **Useful** — changes a decision or explains something you didn't see.
-- **Grounded** — every claim traces to actual entry text. No confabulation.
+- **Grounded in the source, not the summary** — every technical claim traces to the
+  **artifact the entry points at** (the code/file/data it references), not the entry's
+  own prose. Entries are *leads*, often vague; a bridge that only rhymes at the summary
+  level dies on contact with the source. No confabulation.
 
 If nothing clears the bar, **say so** and report the closest near-miss rather
 than inventing a flashy-but-hollow link. A false epiphany is worse than none.
@@ -176,3 +213,8 @@ write to the library unprompted.
 even while the daemon is warming. Scouts use the `ultan-search` skill to read
 full entries (that one does need the daemon; if it's still warming, scouts can
 fall back to reading the `.md` files directly under `~/.agent-mem/knowledge/`).
+
+For the **grounding** step, scouts follow an entry's pointers out to the referenced
+**source artifacts** — the code/data repo an entry's `sources:` or body names (e.g. a
+Lean or code project) — by locating it on disk (`find`/`grep` from `~`) and reading the
+real files. The entry is the lead; the artifact is the evidence.
