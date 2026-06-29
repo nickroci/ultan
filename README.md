@@ -170,9 +170,10 @@ Ultan is modelled — deliberately, at the level of the architecture, not as dec
 - **Use-tracking, not a write trigger.** A fourth `salience_signal` value, **used_helpfully**, fires when the agent actually *relied on* a surfaced entry to answer — the Librarian judges genuine reliance (a mere mention is not use; disagreement stays *contradicts*), and the Scholar deterministically bumps a separate `fired-helpful` counter on the cited entry, deduped per turn so a re-scanned turn never double-counts. It is the positive-evidence half of the prefrontal-inhibition analog (see *Roadmap*), kept distinct from the three write-gating signals above. *(Now consumed by Tier-1 ranking as a gentle usefulness tiebreaker; feeding it into decay resistance is still a TODO — see Roadmap.)*
 - **Two-tier curator with asymmetric bars.** The Librarian (Sonnet) does fast salience detection — low bar, recall-tuned. The Scholar (Opus) deliberates — higher bar, precision-tuned. System 1 gates System 2; cheap-and-broad gates expensive-and-narrow.
 - **Organises a real library, not a flat pile.** Topical hierarchy emerges from content. Every folder has a README. ≤5 entries per directory before splitting. Auto-maintained child listings between marker comments. Wikilinks validate. Frontmatter validates. Scope/path agreement enforced.
-- **Two slash commands** wire it into Claude Code without ceremony:
+- **Slash commands** wire it into Claude Code without ceremony:
   - `/ultan <text>` — drop something into memory now, no extraction needed.
   - `/ultan-advisor <question>` — query the library before asking the user a preference question. The advisor finds relevant entries (Sonnet, BM25 + embeddings + Read), writes a referenced answer (Opus), and clearly distinguishes stored knowledge from its own opinion. *Always cheaper to check than to ask.*
+  - `/epiphany [project]` — hunt for one non-obvious connection between distant entries the graph never linked (see *Epiphany*, below). Read-only.
 - **Pure markdown store.** No database. The library is `~/.agent-mem/knowledge/` — `ls`, `cat`, `git` it. Two derived indexes alongside (`.bm25.idx` for keyword, `.embeddings.idx` for semantic) auto-rebuild on drift.
 
 ### Three retrieval tiers
@@ -197,6 +198,37 @@ Retrieval over the graph is split across tiers:
 - **Tier 2 (deliberate recall) is agent-driven graph traversal.** The agent sees wikilinks in priming context and follows them via the `ultan-search` skill, which returns the entry plus its local neighborhood — siblings, subfolders, parent README — in one read. The agent decides which edges to follow and when to stop, the same "memory as tools" pattern Letta and Wire have shown beats pre-baked retrieval expansion on cross-document queries.
 
 The deliberate choice: deterministic-and-cheap text retrieval at always-on Tier 1, semantic-and-expensive graph traversal at on-demand Tier 2. PageRank-style structural expansion at Tier 1 is a possible addition (see *Roadmap*), not a current capability.
+
+---
+
+## Epiphany — the connection nothing indexed
+
+The three tiers above *retrieve* what's relevant to the current moment. **Epiphany inverts that**: with no query, it goes looking for a genuinely non-obvious connection between two distant entries the graph never linked — and surfaces the single best one. If Tier 1 is spreading activation (what fires near the prompt), this is **deliberate divergent–convergent search** (what you find when you set out to roam). Read-only; it never writes.
+
+```
+/epiphany            # roam the whole library, bridge across domains
+/epiphany <project>  # roam one project, bridge across its subsystems
+```
+
+**The method — map → fan out → converge → judge.**
+
+1. **Map.** A stdlib filesystem walk partitions the library (or one project) into regions/subsystems — the territory the scouts divide up. Daemon-independent, so it works during warmup.
+2. **Fan out (blind generation).** 5–8 scout agents (Opus) run in parallel, each owning a home region, each bridging *out* to a distant region for *far pairs that share deep structure* — same failure mode, trade-off, or mechanism under unrelated surface topics. They are blind to each other: independent diversity is the asset being protected.
+3. **Converge (the agents talk).** Candidates pool onto a shared blackboard; the same scouts continue — building across each other's findings, challenging the weakest, voting — with **one standing skeptic** whose only job is to refute. Recurrent message-passing relaxes the group toward a stable winner.
+4. **Judge ratifies** on **grounded evidence**, not vote count — every claim must trace to actual entry text. It kills the four false positives: already-linked, abstraction-of-its-own-instance, confabulated, and "both are hard" analogies. The richest find is often a *tension* — two of your own entries that quietly contradict — not a restatement the scouts agree on.
+
+**Neuroscience-inspired.** The shape — over-produce diverse candidates, then competitively select one — is a named model of creativity, not a loose metaphor:
+
+| Stage | Cognitive analog | Backing |
+|---|---|---|
+| Blind fan-out | Blind variation → selective retention | Campbell 1960; Simonton 1999 |
+| Over-produce, then prune | Neuronal selectionism ("neural Darwinism") | Edelman 1987 |
+| Generator/evaluator split | DMN generation ↔ executive-control evaluation, salience switching | Beaty et al. 2016; DMN↔ECN switching predicts creative ability (*Communications Biology*, 2025) |
+| Converge by message-passing | Recurrent settling to an attractor; global-workspace "ignition" | Hopfield 1982; Dehaene & Changeux 2011 |
+| Surface ONE | Winner-take-all broadcast (global workspace) | Baars 1988 |
+| Standing skeptic | Lateral inhibition — competition, not agreement | *(keeps convergence honest)* |
+
+**The honest caveats.** This mechanizes *deliberate* creativity, not the spontaneous "aha" (which is incubation/DMN-driven and non-deliberate). And letting agents talk risks **groupthink**: independent estimates that communicate can herd onto a confident-but-wrong answer — social influence measurably erodes the wisdom-of-crowds effect (Lorenz et al., 2011). The standing skeptic and the evidence-not-votes judge are the lateral-inhibition guard that keeps convergence *competitive* rather than agreeable. A live `research`-project run bore this out: five "blind" scouts converged hard on one cluster — which the skeptic then showed was **already cross-linked in the corpus** (the existing link graph reflected back, not discovery), while the real epiphany was an *unlinked contradiction* it had to dig out.
 
 ---
 
