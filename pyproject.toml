@@ -14,9 +14,12 @@ license = { text = "MIT" }
 authors = [{ name = "Nicholas Holden", email = "nicholas.holden@banqora.com" }]
 # `mcp` is the MCP protocol SDK for the light MCP server (no ML deps); it is
 # lazy-imported only by `ultan mcp`, never on the hook hot path. The hook hot
-# path itself is pure stdlib (guarded by tests/test_hook_import.py).
+# path is otherwise stdlib plus `stopwordsiso` — a data-only stopword list
+# (no transitive deps, ~27ms import) used by the priming-query low-signal
+# gate. Import speed and torch-freedom are guarded by tests/test_hook_import.py.
 dependencies = [
   "mcp>=1.0",
+  "stopwordsiso>=0.7.0",
 ]
 
 [project.optional-dependencies]

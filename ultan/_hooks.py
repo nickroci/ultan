@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 from typing import Any, Optional, cast
 
-from . import _blockers, _daemon, _events, _nudges, _priming, _session_context
+from . import _blockers, _daemon, _events, _nudges, _priming, _session_context, _transcript_tail
 
 # Hook events we accept (kebab-case as written into settings.json). The
 # hookEventName Claude Code expects back is the CamelCase form.
@@ -96,9 +96,18 @@ def _user_prompt_submit(payload: dict[str, Any]) -> int:
     project_slug = _project_slug_for_cwd(payload)
 
     # G6: priming, now project-scoped so the daemon's scope-boost can prefer
-    # this project's lessons.
-    md = _priming.get_priming(
+    # this project's lessons. Low-signal prompts ("ok", "continue") carry no
+    # retrieval cue of their own, so the query is backfilled with the recent
+    # transcript tail — the topical signal lives in the preceding assistant
+    # turn. Rich prompts go verbatim: appending context to them measurably
+    # smears the cross-encoder (see _transcript_tail module docstring).
+    transcript_path = payload.get("transcript_path")
+    query = _transcript_tail.build_priming_query(
         prompt if isinstance(prompt, str) else "",
+        transcript_path if isinstance(transcript_path, str) else None,
+    )
+    md = _priming.get_priming(
+        query,
         project_slug=project_slug,
         session_id=sid,
     )

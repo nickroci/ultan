@@ -65,7 +65,8 @@ exclude_lines = [
 [tool.pyright]
 include = ["bm25.py", "cli.py", "embeddings.py", "frontmatter.py", "aliases.py", "reranker.py", "_device.py"]
 exclude = [".venv", "**/__pycache__", "build", "dist", "fixtures", "test_*.py", "conftest.py"]
-venvPath = "."
+# Workspace-root env (see daemon/pyproject.toml for rationale).
+venvPath = "../.."
 venv = ".venv"
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
