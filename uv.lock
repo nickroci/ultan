@@ -451,34 +451,34 @@ wheels = [
 
 [package.optional-dependencies]
 cudart = [
-    { name = "nvidia-cuda-runtime" },
+    { name = "nvidia-cuda-runtime", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 cufft = [
-    { name = "nvidia-cufft" },
+    { name = "nvidia-cufft", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 cufile = [
-    { name = "nvidia-cufile" },
+    { name = "nvidia-cufile", marker = "sys_platform == 'linux'" },
 ]
 cupti = [
-    { name = "nvidia-cuda-cupti" },
+    { name = "nvidia-cuda-cupti", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 curand = [
-    { name = "nvidia-curand" },
+    { name = "nvidia-curand", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 cusolver = [
-    { name = "nvidia-cusolver" },
+    { name = "nvidia-cusolver", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 cusparse = [
-    { name = "nvidia-cusparse" },
+    { name = "nvidia-cusparse", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 nvjitlink = [
-    { name = "nvidia-nvjitlink" },
+    { name = "nvidia-nvjitlink", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 nvrtc = [
-    { name = "nvidia-cuda-nvrtc" },
+    { name = "nvidia-cuda-nvrtc", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 nvtx = [
-    { name = "nvidia-nvtx" },
+    { name = "nvidia-nvtx", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 
 [[package]]
@@ -1871,6 +1871,15 @@ wheels = [
 ]
 
 [[package]]
+name = "stopwordsiso"
+version = "0.7.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/90/74/503aa9a5d8384e40c4bfe06a144a3f43f65d59231ffa60164b015b341c02/stopwordsiso-0.7.0.tar.gz", hash = "sha256:cc3fd2ca524fa02f24609a133eb2a27afe803fe86fa2761cdb7b0b4bced53b4c", size = 73207, upload-time = "2026-05-14T22:42:11.582Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6a/25/96994809c74125f00421c9deea47fd33c29bbc04ebe0e1db0f4d18d71f8f/stopwordsiso-0.7.0-py3-none-any.whl", hash = "sha256:99025477be8082ae872ccafcad0ca9020801e7bbc00d35728423f5c057723a7a", size = 73412, upload-time = "2026-05-14T22:42:10.231Z" },
+]
+
+[[package]]
 name = "sympy"
 version = "1.14.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2061,6 +2070,7 @@ version = "0.4.3"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
+    { name = "stopwordsiso" },
 ]
 
 [package.optional-dependencies]
@@ -2082,6 +2092,7 @@ requires-dist = [
     { name = "agent-mem-daemon", marker = "extra == 'retrieval'", editable = "daemon" },
     { name = "agent-mem-tools", marker = "extra == 'retrieval'", editable = "tools/ultan" },
     { name = "mcp", specifier = ">=1.0" },
+    { name = "stopwordsiso", specifier = ">=0.7.0" },
 ]
 provides-extras = ["retrieval"]
 

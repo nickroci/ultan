@@ -563,20 +563,58 @@ def _hybrid_search(
     return _rerank_candidates(query, fused, k=k)
 
 
-# Scope bonuses (and one penalty) nudge the ranked score in
+# Scope bonuses (and one penalty) adjust the ranked score in
 # ``_boost_with_reinforcement``: prefer the current project, then global,
-# and gently penalise other projects so cross-context entries only surface
-# when nothing scoped beats them (the agent's complaint: vol-predictor
+# and penalise other projects hard enough that cross-context entries only
+# surface on a genuinely strong match (the agent's complaint: vol-predictor
 # entries surfacing during agent-mem work is noise).
 #
-# NOTE: these magnitudes (±0.01-0.02) are small relative to the rerank
-# logits (~ -3..+10) and the reinforcement term (reinforced * 0.5) they're
-# added to, so on the post-rerank scale the scope penalty is close to a
-# no-op. Re-calibrating the boost formula's three terms onto a common
-# scale is tracked separately — out of scope for the fusion change.
-_SCOPE_BONUS_CURRENT = 0.020
-_SCOPE_BONUS_GLOBAL = 0.005
-_SCOPE_PENALTY_CROSS_PROJECT = -0.010
+# Calibrated on the CROSS-ENCODER LOGIT scale (the score arriving here is
+# ms-marco rerank output, ~ -3..+10), against a 2026-07-03 sweep of the
+# live 919-entry library: cross-project junk that fired on low-signal
+# prompts ("ok", "continue") reranked at ≲ +1.3, while a genuine
+# cross-project bullseye (the ZOREP class) sits at +4 and above. The
+# -3.0 penalty plus ``_CROSS_PROJECT_SCORE_FLOOR`` below means an
+# out-of-project entry needs rerank ≥ ~+1.5 to surface at all. Degraded
+# mode: when the reranker is unavailable the scores are fused-lane values
+# in [0, 1], so the penalty acts as a hard cross-project exclusion —
+# precision-first is the right failure mode for a lane that can no longer
+# judge applicability.
+_SCOPE_BONUS_CURRENT = 0.25
+_SCOPE_BONUS_GLOBAL = 0.10
+_SCOPE_PENALTY_CROSS_PROJECT = -3.0
+
+# Saturating reinforcement boost (replaces the old unbounded
+# ``reinforced * 0.5``, which let a ×9 entry add +4.5 — more than most
+# real relevance gaps — and turned heavily-reinforced entries into
+# frequent flyers that fired in any session). Michaelis-Menten shape:
+# fast rise for the first few reassertions, asymptote at
+# ``_REINFORCEMENT_BOOST_MAX`` (×1 → +0.33, ×3 → +0.60, ×9 → +0.82).
+# The cap keeps reinforcement a tie-breaker between comparable matches
+# — it can no longer overcome a clear rerank gap (adjacent good hits sit
+# ~1-3 logits apart in the calibration sweep).
+_REINFORCEMENT_BOOST_MAX = 1.0
+_REINFORCEMENT_HALF_SAT = 2.0
+
+# Confidence floor for CROSS-PROJECT candidates only: an out-of-project
+# entry whose boosted score (rerank + penalty + boosts) lands below this
+# is dropped rather than rendered — the feedback log's "scope leak"
+# verdict, i.e. silence beats another project's noise. In-project and
+# global candidates are deliberately NOT floored here: multi-topic
+# queries (the rolling buffer; prompt + transcript tail) routinely push
+# legitimate secondary matches down to rerank ≈ -2.5 (measured: a query
+# literally containing "use ripgrep when searching" reranked its target
+# at -2.52 behind a dominant docker topic), so any global floor tight
+# enough to catch junk would also kill those. They stay governed by the
+# upstream ``_RERANK_SCORE_FLOOR``.
+_CROSS_PROJECT_SCORE_FLOOR = -1.5
+
+
+def _reinforcement_boost(reinforced: int) -> float:
+    """Saturating boost from the ``reinforced`` counter (see constants above)."""
+    if reinforced <= 0:
+        return 0.0
+    return _REINFORCEMENT_BOOST_MAX * reinforced / (reinforced + _REINFORCEMENT_HALF_SAT)
 
 
 # Project-scope alias resolution lives in ``tools/search/aliases.py``
@@ -639,18 +677,17 @@ def _boost_with_reinforcement(
     knowledge_dir: Optional[Path] = None,
     current_project_slug: Optional[str] = None,
 ) -> List[Tuple[Path, float, int]]:
-    """Re-rank by ``score + reinforced*0.5 + scope_bonus + usefulness_tiebreak``.
+    """Re-rank by ``score + reinforcement_boost + scope_bonus + usefulness_tiebreak``,
+    dropping cross-project candidates under ``_CROSS_PROJECT_SCORE_FLOOR``.
 
     The usefulness term is a small, prior-centered nudge from the
     fired-helpful/fired ratio (see ``_usefulness_score``) — a tiebreaker
     among comparable candidates, never a primary ranking signal. Untracked
     entries contribute exactly 0.
 
-    The reinforcement multiplier is gentle on purpose: reinforced is an
-    integer counter the user has driven up by repetition, and BM25 scores
-    on a small corpus typically sit in the 1.0–4.0 range, so half a point
-    per reinforcement reliably nudges a reasserted entry up without
-    overwhelming a genuinely better BM25 match.
+    Reinforcement is saturating (see ``_reinforcement_boost``): reasserted
+    entries win near-ties, but no amount of repetition can overcome a
+    clear relevance gap on the rerank scale.
 
     When ``knowledge_dir`` is supplied, also applies the scope bonus
     (see ``_scope_bonus``). ``current_project_slug`` may be ``None``;
@@ -686,6 +723,7 @@ def _boost_with_reinforcement(
                 current_project_slug,
                 aliases,
             )
+        is_cross_project = scope == _SCOPE_PENALTY_CROSS_PROJECT
         usefulness = _usefulness_score(fm)
         # TODO(usefulness): this is a deliberately gentle TIEBREAKER. Grow it
         # into a real signal once fired-helpful has weeks of data to calibrate
@@ -705,19 +743,23 @@ def _boost_with_reinforcement(
         #   3. RIF / near-duplicate negative ticks: when the top entry fires-
         #      and-helps, give near-competitors that also fired a small negative
         #      tick so monotonic-up counters don't entrench duplicates.
-        #   4. Put all four boost terms on a COMMON SCALE. Rerank logits are
-        #      ~[-3, +10], scope is ±0.02, reinforced is 0.5/unit, usefulness is
-        #      ~[-0.02, +0.08]: incommensurable today (see the NOTE on _SCOPE_*).
-        #      Normalise (e.g. squash the rerank logit to a bounded range) so
-        #      each weight means something comparable, then re-tune all three.
-        #   5. Telemetry: surface usefulness alongside the boosted score in the
+        #   4. Telemetry: surface usefulness alongside the boosted score in the
         #      run record so the weight can be calibrated from real data instead
-        #      of guessed.
+        #      of guessed. (Scope/reinforcement/floor were calibrated onto the
+        #      rerank-logit scale 2026-07-03; usefulness still runs on its
+        #      original guessed weight.)
         # Design rationale: knowledge/projects/agent-mem/concepts/forgetting-
         #   ltd-decay-design (decay-with-reinforcement, encoding-strength-as-
         #   rank-modifier, RIF, archive-not-delete). The usefulness-into-decay
         #   direction (idea 2) is tracked as a TODO in decay.py's sweep.
-        boosted = score + reinforced * 0.5 + scope + _USEFULNESS_TIEBREAK_WEIGHT * usefulness
+        boosted = (
+            score
+            + _reinforcement_boost(reinforced)
+            + scope
+            + _USEFULNESS_TIEBREAK_WEIGHT * usefulness
+        )
+        if is_cross_project and boosted < _CROSS_PROJECT_SCORE_FLOOR:
+            continue  # scope leak — see _CROSS_PROJECT_SCORE_FLOOR
         enriched.append((path, boosted, reinforced, score))
     enriched.sort(key=lambda t: (-t[1], str(t[0])))
     return [(p, ranked, reinforced) for p, ranked, reinforced, _orig in enriched]

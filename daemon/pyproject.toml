@@ -77,7 +77,10 @@ select = ["E", "F", "I", "W", "C901", "PLR0912", "PLR0915", "PLC0415"]
 # test code, so it's strict-checked alongside the package — unlike tests/.
 include = ["agent_mem_daemon", "evals"]
 exclude = [".venv", "**/__pycache__", "build", "dist", "tests"]
-venvPath = "."
+# The uv WORKSPACE env at the repo root — members share one venv; a
+# member-local .venv is unmanaged and goes stale (import resolution
+# silently breaks when its editable paths rot).
+venvPath = ".."
 venv = ".venv"
 pythonVersion = "3.12"
 typeCheckingMode = "strict"

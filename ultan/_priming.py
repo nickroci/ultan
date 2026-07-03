@@ -426,8 +426,10 @@ def _rank_entries(
         if score <= 0:
             continue
         reinforced = _reinforced_count(fm)
-        # Boost matches the daemon's _boost_with_reinforcement (×0.5).
-        scored.append((p, score + reinforced * 0.5, reinforced, fm))
+        # Saturating boost mirrors the daemon's _reinforcement_boost —
+        # reassertion wins near-ties but can't overcome a real overlap gap.
+        boost = reinforced / (reinforced + 2.0) if reinforced > 0 else 0.0
+        scored.append((p, score + boost, reinforced, fm))
 
     scored.sort(key=lambda t: (-t[1], str(t[0])))
     return scored

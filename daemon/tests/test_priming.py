@@ -493,10 +493,12 @@ def test_bullet_format_includes_title_hook_and_count(tmp_path):
 
 
 def test_scope_bonus_prefers_current_project_then_global(tmp_path):
-    """Three entries with identical RRF scores but different scopes:
-    current-project gets the +0.020 bump, global gets +0.005, other
-    project gets nothing. Ordering after _boost_with_reinforcement must
-    reflect that."""
+    """Three entries with identical fused scores but different scopes:
+    current-project outranks global, and the other-project entry is
+    DROPPED outright — on a weak tied match the cross-project penalty
+    (-2.5) pushes it below the boosted-score floor. Scope leak was the
+    worst failure in the 2026-07 priming feedback log; weak cross-project
+    matches must not surface at all."""
     k = tmp_path / "knowledge"
     cur_path = k / "projects" / "myproj" / "entry.md"
     other_path = k / "projects" / "otherproj" / "entry.md"
@@ -505,15 +507,76 @@ def test_scope_bonus_prefers_current_project_then_global(tmp_path):
     _write(other_path, _entry(id_="oth", title="Oth", applies_when="x", keywords=["x"]))
     _write(global_path, _entry(id_="glb", title="Glb", applies_when="x", keywords=["x"]))
 
-    # Tied RRF score so only the scope bonus orders them.
+    # Tied fused score so only the scope adjustment separates them.
     hits = [(other_path, 0.05), (global_path, 0.05), (cur_path, 0.05)]
     ranked = priming._boost_with_reinforcement(hits, knowledge_dir=k, current_project_slug="myproj")
     paths = [str(p.relative_to(k)) for p, _, _ in ranked]
     assert paths == [
         "projects/myproj/entry.md",
         "global/entry.md",
-        "projects/otherproj/entry.md",
     ]
+
+
+def test_strong_cross_project_hit_survives_penalty_and_floor(tmp_path):
+    """A cross-project entry with a genuinely strong rerank score (the
+    ZOREP class: +4 and up) must still surface after the -2.5 penalty —
+    the penalty kills weak leaks, not bullseyes."""
+    k = tmp_path / "knowledge"
+    cur_path = k / "projects" / "myproj" / "entry.md"
+    other_path = k / "projects" / "otherproj" / "entry.md"
+    _write(cur_path, _entry(id_="cur", title="Cur", applies_when="x", keywords=["x"]))
+    _write(other_path, _entry(id_="oth", title="Oth", applies_when="x", keywords=["x"]))
+
+    hits = [(other_path, 4.0), (cur_path, 0.5)]
+    ranked = priming._boost_with_reinforcement(hits, knowledge_dir=k, current_project_slug="myproj")
+    paths = [str(p.relative_to(k)) for p, _, _ in ranked]
+    # 4.0 - 2.5 = 1.5 still beats 0.5 + 0.25: order preserved, nothing dropped.
+    assert paths == [
+        "projects/otherproj/entry.md",
+        "projects/myproj/entry.md",
+    ]
+
+
+def test_cross_project_floor_drops_weak_leak_but_not_weak_global(tmp_path):
+    """A weak cross-project candidate is removed entirely (scope leak),
+    while an equally weak GLOBAL candidate survives — multi-topic queries
+    legitimately push secondary matches to low rerank scores, so only
+    out-of-project entries are held to the confidence floor."""
+    k = tmp_path / "knowledge"
+    leak = k / "projects" / "otherproj" / "leak.md"
+    weak_global = k / "global" / "weak.md"
+    _write(leak, _entry(id_="leak", title="Leak", applies_when="x", keywords=["x"]))
+    _write(weak_global, _entry(id_="weak", title="Weak", applies_when="x", keywords=["x"]))
+
+    # leak: -2.0 - 3.0 = -5.0 < -1.5 floor -> dropped.
+    # weak global: -2.0 + 0.10 = -1.9, no floor for globals -> kept.
+    hits = [(leak, -2.0), (weak_global, -2.0)]
+    ranked = priming._boost_with_reinforcement(hits, knowledge_dir=k, current_project_slug="myproj")
+    assert [p.stem for p, _, _ in ranked] == ["weak"]
+
+
+def test_reinforcement_saturates_and_cannot_overcome_clear_gap(tmp_path):
+    """The saturating boost caps below +1.0: a ×9 entry (+0.82) wins
+    near-ties but can no longer catapult over a clear relevance gap the
+    way the old unbounded ``reinforced * 0.5`` (+4.5 at ×9) did."""
+    k = tmp_path / "knowledge"
+    flyer = k / "global" / "flyer.md"
+    better = k / "global" / "better.md"
+    _write(
+        flyer,
+        _entry(id_="flyer", title="Flyer", applies_when="x", keywords=["x"], reinforced=9),
+    )
+    _write(better, _entry(id_="better", title="Better", applies_when="x", keywords=["x"]))
+
+    # Clear gap: 2.5 vs 1.0. Old formula: 1.0 + 4.5 = 5.5 would have flipped it.
+    hits = [(flyer, 1.0), (better, 2.5)]
+    ranked = priming._boost_with_reinforcement(hits, knowledge_dir=k, current_project_slug=None)
+    assert [p.stem for p, _, _ in ranked] == ["better", "flyer"]
+
+    # Near-tie: reinforcement still breaks it in the flyer's favour.
+    hits = [(flyer, 2.4), (better, 2.5)]
+    ranked = priming._boost_with_reinforcement(hits, knowledge_dir=k, current_project_slug=None)
+    assert [p.stem for p, _, _ in ranked] == ["flyer", "better"]
 
 
 def test_scope_bonus_uses_alias_map_to_resolve_bucket_slug(tmp_path):
@@ -536,7 +599,9 @@ def test_scope_bonus_uses_alias_map_to_resolve_bucket_slug(tmp_path):
         hits, knowledge_dir=k, current_project_slug="github.com-nickroci-ultan"
     )
     paths = [str(p.relative_to(k)) for p, _, _ in ranked]
-    assert paths == ["projects/agent-mem/entry.md", "projects/vol-predictor/entry.md"]
+    # The alias-resolved current project keeps its entry; the weak
+    # cross-project one falls below the boosted-score floor and is dropped.
+    assert paths == ["projects/agent-mem/entry.md"]
 
 
 def test_alias_helpers_default_to_identity_when_empty():
